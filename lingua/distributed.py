@@ -394,6 +394,7 @@ def clean_env():
 def parallelize_model(
     model,
     device_mesh,
+    stem_device_mesh,
     model_args,
     distributed_args: DistributedArgs,
     fsdp_grouping_plan: Optional[List[Tuple[str, bool]]] = None,
