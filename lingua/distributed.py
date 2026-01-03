@@ -394,7 +394,6 @@ def clean_env():
 def parallelize_model(
     model,
     device_mesh,
-    stem_device_mesh,
     model_args,
     distributed_args: DistributedArgs,
     fsdp_grouping_plan: Optional[List[Tuple[str, bool]]] = None,
@@ -461,7 +460,16 @@ def parallelize_model(
                 ),
             )
 
-        model = fully_shard(model, **fsdp_config, reshard_after_forward=True)
+        # For StemLMTransformer, wrap only lm_transformer as root, not the entire model
+        # This ensures stem_embeddings remain unwrapped and can be managed manually
+        if hasattr(model, "lm_transformer") and hasattr(model, "stem_embeddings"):
+            # This is a StemLMTransformer - wrap only lm_transformer as root
+            model.lm_transformer = fully_shard(
+                model.lm_transformer, **fsdp_config, reshard_after_forward=True
+            )
+        else:
+            # Standard model - wrap the entire root model
+            model = fully_shard(model, **fsdp_config, reshard_after_forward=True)
     else:
         raise ValueError(f"Invalid fsdp_type: {distributed_args.fsdp_type}")
 

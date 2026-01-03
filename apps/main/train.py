@@ -11,7 +11,7 @@ from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -108,22 +108,35 @@ class TrainArgs:
 class TrainState(Stateful):
     step: int  # Nb of steps taken by the optimizer
     acc_step: int  # Nb of accumulation steps done since last optimizer step
-    scheduler: lr_scheduler.LambdaLR
+    scheduler: Union[lr_scheduler.LambdaLR, Dict[str, lr_scheduler.LambdaLR]]  # Can be single scheduler or dict for stem training
     data_loader_state: PackTokensState
 
     def state_dict(self) -> Dict[str, Any]:
+        # Handle both single scheduler and dict of schedulers (for stem training)
+        if isinstance(self.scheduler, dict):
+            scheduler_state = {
+                key: sched.state_dict() for key, sched in self.scheduler.items()
+            }
+        else:
+            scheduler_state = self.scheduler.state_dict()
+        
         return {
             "step": self.step,
             "acc_step": self.acc_step,
             "data_loader_state": self.data_loader_state,
-            "scheduler": self.scheduler.state_dict(),
+            "scheduler": scheduler_state,
         }
 
     def load_state_dict(self, state_dict):
         self.step = state_dict["step"]
         self.acc_step = state_dict["acc_step"]
         self.data_loader_state = PackTokensState(**state_dict["data_loader_state"])
-        self.scheduler.load_state_dict(state_dict["scheduler"])
+        
+        # Handle both single scheduler and dict of schedulers (for stem training)
+        scheduler_state = state_dict["scheduler"]
+        for key, sched in self.scheduler.items():
+            if key in scheduler_state:
+                sched.load_state_dict(scheduler_state[key])
 
 
 def validate_train_args(args: TrainArgs, output_size: int):

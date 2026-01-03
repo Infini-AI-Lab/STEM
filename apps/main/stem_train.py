@@ -61,9 +61,8 @@ from lingua.probe import AutoProbeD
 from lingua.stool import StoolArgs, launch_job
 
 from apps.main.train import TrainArgs, TrainState, validate_train_args, every_n_steps
-from apps.main.stem import StemLMTransformerArgs, StemLMTransformer
+from apps.main.stem import StemLMTransformerArgs, StemLMTransformer, build_stem_lm_fsdp_grouping_plan
 from apps.main.transformer import (
-    build_fsdp_grouping_plan,
     get_no_recompute_ops,
     get_num_flop_per_token,
 )
@@ -76,6 +75,7 @@ logger = logging.getLogger()
 @dataclass
 class StemTrainArgs(TrainArgs):
     model: StemLMTransformerArgs = field(default_factory=StemLMTransformerArgs)
+    stem_parallel_size: int = 8
     
     
 preemption_flag = dict(flag=False)
@@ -118,9 +118,8 @@ def train(args: StemTrainArgs):
 
         # Initialize stem process groups for ParallelEmbedding
         # This MUST be called before creating the model with ParallelEmbedding
-        stem_parallel_size = 8  # TODO: can be made configurable
-        initialize_stem_process_group(stem_parallel_size)
-        logger.info(f"Initialized stem process groups with parallel size: {stem_parallel_size}")
+        initialize_stem_process_group(args.stem_parallel_size)
+        logger.info(f"Initialized stem process groups with parallel size: {args.stem_parallel_size}")
 
         torch.manual_seed(args.seed)
         logger.info("Building model")
@@ -137,22 +136,56 @@ def train(args: StemTrainArgs):
             world_mesh,
             args.model,
             args.distributed,
-            fsdp_grouping_plan=build_fsdp_grouping_plan(args.model),
+            fsdp_grouping_plan=build_stem_lm_fsdp_grouping_plan(args.model),
             tp_parallelize=None,
             no_recompute_ops=get_no_recompute_ops(),
         )
         
         model = model.to_empty(device="cuda")
         
+        # Ensure stem_embeddings parameters require gradients and verify they're on the correct device
+        for i, embedding in enumerate(model.stem_embeddings):
+            # Verify device after to_empty()
+            weight_device = embedding.weight.device
+            if weight_device.type != "cuda":
+                logger.warning(
+                    f"stem_embeddings[{i}].weight is on {weight_device} after to_empty(), "
+                    f"expected cuda. This may cause initialization issues."
+                )
+            for param in embedding.parameters():
+                param.requires_grad = True
+                # Debug: Check if parameter is initialized (not all zeros)
+                if param.numel() > 0:
+                    is_zero = (param.abs().max() == 0).item()
+                    if is_zero:
+                        logger.warning(
+                            f"stem_embeddings[{i}] parameter {param.shape} is all zeros before init_weights()"
+                        )
+        logger.info("Ensured stem_embeddings parameters require gradients")
 
-        if args.checkpoint.init_ckpt_path:
-            logger.info(f"Loading initial model from {args.checkpoint.init_ckpt_path}")
-            load_from_checkpoint(args.checkpoint.init_ckpt_path, model, model_key="model") # Put model_key="" if its directly the model checkpoint
-            model.rope_embeddings.reset_parameters() # For RoPe initialization since it's a buffer it might not be loaded
-        else:
+        # Initialize model weights if not loading from init checkpoint
+        # (init checkpoint loading happens after optimizer creation to allow loading optimizer states)
+        if not args.checkpoint.init_ckpt_path:
             with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
                 torch.manual_seed(args.model.seed)
                 model.init_weights()
+        
+        # Verify stem_embeddings are initialized after init_weights()
+        for i, embedding in enumerate(model.stem_embeddings):
+            for param_name, param in embedding.named_parameters():
+                if param.numel() > 0:
+                    is_zero = (param.abs().max() == 0).item()
+                    param_norm = param.norm().item()
+                    logger.info(
+                        f"stem_embeddings[{i}].{param_name}: "
+                        f"device={param.device}, shape={param.shape}, "
+                        f"norm={param_norm:.6f}, is_zero={is_zero}"
+                    )
+                    if is_zero:
+                        logger.error(
+                            f"ERROR: stem_embeddings[{i}].{param_name} is still all zeros after init_weights()!"
+                        )
+        
         check_model_value_range(model, range=10.0, std=1.0)
         
         logger.info(f"Model size: {model_param_count:,} total parameters")
@@ -165,7 +198,41 @@ def train(args: StemTrainArgs):
         logger.info(f"GPU memory usage: {gpu_memory_monitor}")
         
         # build optimizer after apply parallelisms to the model
-        optimizer, scheduler = build_optimizer(model, args.optim, args.steps)
+        # Create separate optimizers for lm_transformer and stem_embeddings
+        # to avoid mixing DTensors and regular Tensors
+        from torch.optim import AdamW
+        from lingua.optim import build_lr_fn
+        
+        # Create optimizer for lm_transformer (DTensors)
+        lm_optimizer = AdamW(
+            model.lm_transformer.parameters(),
+            lr=args.optim.lr,
+            betas=(args.optim.beta1, args.optim.beta2),
+            weight_decay=args.optim.weight_decay,
+            eps=args.optim.epsilon,
+            fused=True,
+        )
+        
+        # Create optimizer for stem_embeddings (regular Tensors)
+        stem_optimizer = AdamW(
+            model.stem_embeddings.parameters(),
+            lr=args.optim.lr,
+            betas=(args.optim.beta1, args.optim.beta2),
+            weight_decay=args.optim.weight_decay,
+            eps=args.optim.epsilon,
+            fused=False,  # Disable fused for regular tensors
+        )
+        
+        # Create schedulers for both optimizers
+        lr_fn = build_lr_fn(args.optim, args.steps)
+        from torch.optim import lr_scheduler
+        lm_scheduler = lr_scheduler.LambdaLR(lm_optimizer, lr_fn)
+        stem_scheduler = lr_scheduler.LambdaLR(stem_optimizer, lr_fn)
+        
+        # Store both optimizers and schedulers
+        optimizer = {"lm": lm_optimizer, "stem": stem_optimizer}
+        scheduler = {"lm": lm_scheduler, "stem": stem_scheduler}
+        
         data_loader_state = init_dataloader_state_from_args(
             args.data, dp_rank, dp_degree
         )
@@ -179,8 +246,26 @@ def train(args: StemTrainArgs):
         
         # Use StemCheckpointManager which handles ParallelEmbedding checkpointing
         checkpoint = StemCheckpointManager.instantiate_and_make_dir(args.checkpoint)
-        checkpoint.load(model, optimizer, train_state, world_mesh)  
-        # Either load from latest checkpoint or start from scratch
+        
+        # Load from init checkpoint if specified (before loading from latest checkpoint)
+        if args.checkpoint.init_ckpt_path:
+            logger.info(f"Loading initial model from {args.checkpoint.init_ckpt_path}")
+            from lingua.stem_checkpoint import load_from_checkpoint
+            load_from_checkpoint(
+                args.checkpoint.init_ckpt_path, 
+                model, 
+                optimizer=optimizer,
+                model_key="model"
+            )
+            model.rope_embeddings.reset_parameters() # For RoPe initialization since it's a buffer it might not be loaded
+            # Ensure stem_embeddings are initialized even when loading from checkpoint
+            # (in case they're not in the checkpoint)
+            with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+                torch.manual_seed(args.model.seed)
+                model.reset_stem_embeddings()
+        
+        # Load from latest checkpoint (or continue from init checkpoint)
+        checkpoint.load(model, optimizer, train_state, world_mesh)
         if args.probe_freq is not None:
             if get_is_master():
                 os.makedirs(Path(args.dump_dir) / "probe", exist_ok=True)
@@ -220,7 +305,7 @@ def train(args: StemTrainArgs):
             train_state.acc_step = train_state.acc_step % args.grad_acc_steps
 
             # get batch
-            curr_lr = float(optimizer.param_groups[0]["lr"])
+            curr_lr = float(optimizer["lm"].param_groups[0]["lr"])
             data_load_start = timer()
             batch, train_state.data_loader_state = next(data_loader)
             batch = torch.tensor(
@@ -276,7 +361,8 @@ def train(args: StemTrainArgs):
                     )
                     probe_loss.backward()
                     # We zero grads to cancel this fake step
-                    optimizer.zero_grad()
+                    optimizer["lm"].zero_grad()
+                    optimizer["stem"].zero_grad()
 
                 assert (
                     next(model.parameters()).grad is None
@@ -297,18 +383,51 @@ def train(args: StemTrainArgs):
 
             # optimizer step
             grad_norm = -1.0
+            stem_grad_norm = -1.0
             if train_state.acc_step == 0:
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), max_norm=args.optim.clip, foreach=True
-                )
+                # Clip gradients separately for lm_transformer and stem_embeddings
+                # since they have different tensor types (DTensor vs regular Tensor)
+                # Clip gradients from lm_transformer (DTensors from FSDP)
+                lm_params = [p for p in model.lm_transformer.parameters() if p.grad is not None]
+                if lm_params:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        lm_params, max_norm=args.optim.clip, foreach=True
+                    )
+                    grad_norm = (
+                        grad_norm.full_tensor() if isinstance(grad_norm, DTensor) else grad_norm
+                    ).item()
+                
+                # Clip gradients from stem_embeddings (regular Tensors, manually managed)
+                stem_params = [p for p in model.stem_embeddings.parameters() if p.grad is not None]
+                if stem_params:
+                    stem_grad_norm = torch.nn.utils.clip_grad_norm_(
+                        stem_params, max_norm=args.optim.clip, foreach=False
+                    ).item()
+                else:
+                    # Debug: check if stem_embeddings have gradients at all
+                    all_stem_params = list(model.stem_embeddings.parameters())
+                    params_with_grad = [p for p in all_stem_params if p.grad is not None]
+                    params_without_grad = [p for p in all_stem_params if p.grad is None]
+                    if params_without_grad:
+                        logger.warning(
+                            f"Warning: {len(params_without_grad)}/{len(all_stem_params)} stem_embeddings parameters "
+                            f"have no gradients. This may indicate a gradient flow issue."
+                        )
+                    # Check if any gradients are zero
+                    if params_with_grad:
+                        zero_grads = [p for p in params_with_grad if p.grad is not None and p.grad.abs().max() == 0]
+                        if zero_grads:
+                            logger.warning(
+                                f"Warning: {len(zero_grads)}/{len(params_with_grad)} stem_embeddings parameters "
+                                f"have zero gradients."
+                            )
 
-                grad_norm = (
-                    grad_norm.full_tensor() if isinstance(grad_norm, DTensor) else grad_norm
-                ).item()
-
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
+                optimizer["lm"].step()
+                optimizer["stem"].step()
+                scheduler["lm"].step()
+                scheduler["stem"].step()
+                optimizer["lm"].zero_grad()
+                optimizer["stem"].zero_grad()
                 train_state.step += 1
 
             # updates the scale for next iteration
@@ -354,6 +473,15 @@ def train(args: StemTrainArgs):
                     )
                     * wps
                 )
+                optim_dict = {
+                    "grad_norm": grad_norm,
+                    "lr": curr_lr,
+                    "total_tokens": total_tokens,
+                }
+                # Add stem gradient norm if available
+                if stem_grad_norm >= 0:
+                    optim_dict["stem_grad_norm"] = stem_grad_norm
+                
                 metrics = flatten_dict(
                     {
                         "global_step": train_state.step,
@@ -364,11 +492,7 @@ def train(args: StemTrainArgs):
                             "curr_iter_time": curr_iter_time,
                             "data_load_time": data_load_time,
                         },
-                        "optim": {
-                            "grad_norm": grad_norm,
-                            "lr": curr_lr,
-                            "total_tokens": total_tokens,
-                        },
+                        "optim": optim_dict,
                         "memory": gpu_mem_stats._asdict(),
                     },
                     sep="/",
@@ -384,11 +508,15 @@ def train(args: StemTrainArgs):
                 gpu_memory_monitor.reset_peak_stats()
                 nwords_since_last_log = 0
                 time_last_log = timer()
-                logger.info(
+                log_msg = (
                     f"step: {train_state.step}"
                     f"  acc: {train_state.acc_step}"
                     f"  loss: {round(loss.item(),4):>7}"
                     f"  grad: {grad_norm:.2e}"
+                )
+                if stem_grad_norm >= 0:
+                    log_msg += f"  stem_grad: {stem_grad_norm:.2e}"
+                log_msg += (
                     f"  flops: {FLOPS:.2e}"
                     f"  wps: {wps:.2e}"
                     f"  iter: {curr_iter_time:>7}"
@@ -397,11 +525,13 @@ def train(args: StemTrainArgs):
                     f"  mem: {gpu_mem_stats.max_active_pct:.0f}%"
                     f"  pow: {gpu_mem_stats.power_draw/1000} W"
                 )
+                logger.info(log_msg)
 
             saved = False
             if every_n_steps(
                 train_state, args.checkpoint.dump.every, acc_step=0
             ) or every_n_steps(train_state, args.checkpoint.eval.every, acc_step=0):
+                # Pass full optimizer dict - checkpoint manager will handle both optimizers
                 saved = checkpoint.save(
                     model,
                     optimizer,

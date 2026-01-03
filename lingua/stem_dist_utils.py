@@ -45,7 +45,7 @@ def initialize_stem_process_group(
     )
     
     found = torch.where(groups == rank)
-    assert all(len(found) == 1), f"Rank {rank} not found in any group"
+    assert all(len(x) == 1 for x in found)
     found = [x[0] for x in found]
     
     # build data parallel groups
@@ -92,17 +92,17 @@ def get_stem_data_parallel_rank() -> int:
 # Low-level communication primitives (similar to mp_utils.py)
 
 
-def _gather_along_first_dim_ple(x: torch.Tensor) -> torch.Tensor:
+def _gather_along_first_dim_stem(x: torch.Tensor) -> torch.Tensor:
     """
-    Gather tensors along first dimension within PLE process group.
-    Similar to _gather_along_first_dim in mp_utils.py but uses PLE process group.
+    Gather tensors along first dimension within Stem process group.
+    Similar to _gather_along_first_dim in mp_utils.py but uses Stem process group.
     """
     assert x.is_contiguous()
     stem_size = get_stem_model_parallel_world_size()
     if stem_size == 1:
         return x
 
-    # Output shape: first dim multiplied by ple_size
+    # Output shape: first dim multiplied by stem_size
     shape = list(x.shape)
     shape[0] = shape[0] * stem_size
 
@@ -117,9 +117,9 @@ def _gather_along_first_dim_ple(x: torch.Tensor) -> torch.Tensor:
     return output
 
 
-def _split_along_first_dim_ple(x: torch.Tensor) -> torch.Tensor:
+def _split_along_first_dim_stem(x: torch.Tensor) -> torch.Tensor:
     """
-    Split tensor along first dimension and keep the slice for this PLE rank.
+    Split tensor along first dimension and keep the slice for this Stem rank.
     Similar to _split_along_first_dim in mp_utils.py.
     """
     assert x.is_contiguous()
@@ -127,7 +127,7 @@ def _split_along_first_dim_ple(x: torch.Tensor) -> torch.Tensor:
     if stem_size == 1:
         return x
 
-    # Split based on PLE rank
+    # Split based on Stem rank
     dim_size = x.size(0)
     assert (
         dim_size % stem_size == 0
@@ -145,7 +145,7 @@ def _split_along_first_dim_ple(x: torch.Tensor) -> torch.Tensor:
 
 def _gather_along_last_dim_stem(x: torch.Tensor) -> torch.Tensor:
     """
-    Gather tensors along last dimension within PLE process group.
+    Gather tensors along last dimension within Stem process group.
     Similar to _gather_along_last_dim in mp_utils.py.
     """
     assert x.is_contiguous()
@@ -205,7 +205,7 @@ def _reduce_scatter_along_first_dim_stem(x: torch.Tensor) -> torch.Tensor:
 
     assert x.size(0) % stem_size == 0
 
-    # Output shape: first dim divided by ple_size
+    # Output shape: first dim divided by stem_size
     shape = list(x.shape)
     shape[0] = shape[0] // stem_size
 
@@ -237,7 +237,7 @@ def _all_to_all_stem(
 
     # Split input along scatter dimension
     input_list = [
-        _chunk.contiguous() for _chunk in torch.chunk(input, stem_size, dim=scatter_dim)
+        _chunk.contiguous() for _chunk in torch.chunk(input_, stem_size, dim=scatter_dim)
     ]
 
     # Output list to receive scattered chunks
@@ -392,7 +392,7 @@ def _initialize_affine_weight(
     the relevant chunk."""
 
     # if no_init, skip the initialization.
-    if torch.equal(init_method(torch.zeros([1000])), torch.zeros([1000])):
+    if torch.equal(init_method(torch.zeros_like(weight)), torch.zeros_like(weight)):
         return None
 
     # If we only use 1 process for model parallelism, bypass scatter.
@@ -403,9 +403,9 @@ def _initialize_affine_weight(
             return weight
         return None
 
-    # Initialize master weight
+    # Initialize master weight on the same device as weight
     master_weight = torch.empty(
-        out_features, in_features, dtype=weight.dtype, requires_grad=False
+        out_features, in_features, dtype=weight.dtype, device=weight.device, requires_grad=False
     )
     init_method(master_weight)
 
@@ -440,6 +440,7 @@ class ParallelEmbedding(torch.nn.Module):
             [torch.Tensor], torch.Tensor
         ] = torch.nn.init.xavier_normal_,
         keep_master_weight_for_test: bool = False,
+        device: Optional[torch.device] = None,
     ) -> None:
         super(ParallelEmbedding, self).__init__()
         # Keep the input dimensions.
@@ -459,21 +460,13 @@ class ParallelEmbedding(torch.nn.Module):
             self.embedding_dim, world_size
         )
 
-        # Allocate weights.
+        # Allocate weights on the specified device (or default if not specified)
         self.weight = Parameter(
-            torch.Tensor(self.num_embeddings, self.embedding_dim_per_partition)
+            torch.empty(self.num_embeddings, self.embedding_dim_per_partition, device=device)
         )
         # And initialize.
-        _initialize_affine_weight(
-            self.weight,
-            self.num_embeddings,
-            self.embedding_dim,
-            self.embedding_dim_per_partition,
-            1,
-            init_method,
-            stride=1,
-            return_master_weight=False,
-        )
+        self.init_method = init_method
+        self.reset_parameters()
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:  # type: ignore
         input_parallel = gather_tokens_for_stem(input_)
@@ -486,7 +479,45 @@ class ParallelEmbedding(torch.nn.Module):
             self.scale_grad_by_freq,
             self.sparse,
         )
-        # output = scatter_embeddings_for_ple(gather_embeddings_for_ple(output_parallel))
+        # output = scatter_embeddings_for_stem(gather_embeddings_for_stem(output_parallel))
         output = _AllToAllForStem.apply(output_parallel)
 
         return output
+    
+    def reset_parameters(self):
+        if self.weight.device.type == "meta":
+            return
+        # Ensure weight is actually on a real device before initializing
+        if not self.weight.is_cuda and self.weight.device.type != "cpu":
+            return
+        
+        try:
+            _initialize_affine_weight(
+                self.weight,
+                self.num_embeddings,
+                self.embedding_dim,
+                self.embedding_dim_per_partition,
+                1,
+                self.init_method,
+                stride=1,
+                return_master_weight=False,
+            )
+            # Verify initialization succeeded
+            if self.weight.numel() > 0 and self.weight.abs().max() == 0:
+                # Fallback: if initialization resulted in zeros, use direct initialization
+                import logging
+                logger = logging.getLogger()
+                logger.warning(
+                    f"ParallelEmbedding initialization resulted in zeros, using fallback initialization"
+                )
+                with torch.no_grad():
+                    self.init_method(self.weight)
+        except Exception as e:
+            # Fallback: if model parallel initialization fails, use direct initialization
+            import logging
+            logger = logging.getLogger()
+            logger.warning(
+                f"ParallelEmbedding model parallel initialization failed: {e}, using fallback initialization"
+            )
+            with torch.no_grad():
+                self.init_method(self.weight)

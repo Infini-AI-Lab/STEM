@@ -8,13 +8,13 @@ from torch import nn
 from torch.nn import functional as F
 from xformers.ops import fmha, AttentionBias
 from torch.nn.attention.flex_attention import BlockMask
-from lingua import InitStdFactor, RMSNorm, RotaryEmbedding, Attention, BaseTransformerArgs
+from lingua.transformer import InitStdFactor, RMSNorm, RotaryEmbedding, Attention, BaseTransformerArgs
 
 
 @dataclass
 class StemTransformerArgs(BaseTransformerArgs):
-    stem_embedding_dim: int
     stem_layers: Optional[List[int]] = None
+    stem_embedding_dim: Optional[int] = None
   
 
 class FeedForward(nn.Module):
@@ -166,6 +166,7 @@ class StemTransformerBlock(nn.Module):
             ffn_dim_multiplier=args.ffn_dim_multiplier,
         )
         if layer_idx in args.stem_layers:
+            assert args.stem_embedding_dim is not None, "stem_embedding_dim must be provided when stem_layers is specified"
             assert args.stem_embedding_dim == self.feed_forward.hidden_dim, "Stem embedding dim must match feed forward hidden dim"
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
@@ -201,7 +202,18 @@ class StemTransformer(nn.Module):
     def __init__(self, args: StemTransformerArgs):
         super().__init__()
         self.dim = args.dim
-        self.stem_layers = list(range(1, args.n_layers)) if args.stem_layers is None else args.stem_layers
+        if args.stem_layers is None:
+            args.stem_layers = list(range(1, args.n_layers))
+        self.stem_layers = args.stem_layers
+        if args.stem_embedding_dim is None:
+            hidden_dim = 4 * args.dim
+            hidden_dim = int(2 * hidden_dim / 3)
+            if args.ffn_dim_multiplier is not None:
+                hidden_dim = int(args.ffn_dim_multiplier * hidden_dim)
+            hidden_dim = args.multiple_of * ((hidden_dim + args.multiple_of - 1) // args.multiple_of)
+            args.stem_embedding_dim = hidden_dim
+        self.stem_embedding_dim = args.stem_embedding_dim
+            
         self.init_base_std = args.init_base_std
         self.init_std_factor = InitStdFactor(args.init_std_factor)
         self.max_seqlen = args.max_seqlen
