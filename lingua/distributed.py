@@ -76,6 +76,8 @@ class DistributedArgs:
     compile_cache_size_limit: int = 8
 
     spawn_method: str = "forkserver"
+    
+    stem_parallel_size: int = 8
 
 
 @dataclass

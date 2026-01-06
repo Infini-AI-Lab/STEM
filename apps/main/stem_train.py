@@ -75,7 +75,6 @@ logger = logging.getLogger()
 @dataclass
 class StemTrainArgs(TrainArgs):
     model: StemLMTransformerArgs = field(default_factory=StemLMTransformerArgs)
-    stem_parallel_size: int = 8
     
     
 preemption_flag = dict(flag=False)
@@ -118,8 +117,8 @@ def train(args: StemTrainArgs):
 
         # Initialize stem process groups for ParallelEmbedding
         # This MUST be called before creating the model with ParallelEmbedding
-        initialize_stem_process_group(args.stem_parallel_size)
-        logger.info(f"Initialized stem process groups with parallel size: {args.stem_parallel_size}")
+        initialize_stem_process_group(args.distributed.stem_parallel_size)
+        logger.info(f"Initialized stem process groups with parallel size: {args.distributed.stem_parallel_size}")
 
         torch.manual_seed(args.seed)
         logger.info("Building model")

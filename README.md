@@ -1,11 +1,24 @@
-# Meta Lingua
+# STEM: Scaling Transformers with Embedding Modules
 
-**Mathurin Videau***, **Badr Youbi Idrissi***, Daniel Haziza, Luca Wehrstedt, Jade Copet, Olivier Teytaud, David Lopez-Paz. ***Equal and main contribution**
+Ranajoy Sadhukhan, Sheng Cao, Harry Dong, Changsheng Zhao, Attiano Purpura-Pontoniere, Yuandong Tian, Zechun Liu*, Beidi Chen*.
 
-Meta Lingua is a minimal and fast LLM training and inference library designed for research. Meta Lingua uses easy-to-modify PyTorch components in order to try new architectures, losses, data, etc. We aim for this code to enable end to end training, inference and evaluation as well as provide tools to better understand speed and stability. While Meta Lingua is currently under development, we provide you with multiple `apps` to showcase how to use this codebase.
+This repository is an implementation of STEM. The training scripts are built on top of Meta Lingua which is a minimal and fast training library. Unlike standard transformer with gated FFNs, STEM replaces the up-projection matrix multiplication in each FFN layer with a token-indexed embedding lookup table. STEM provides improved ***knowledge storage capacity***, ***interpretability***, and ***efficiency*** in both training and inference. 
 
+<p align="center">
+<table>
+<tr style="vertical-align: top;">
+<td width="48%">
+<img src="figures/STEM.jpg" width="90%" style="display: block;"/>
+</td>
+<td width="4%"></td>
+<td width="48%">
+<img src="figures/val_ppl_vs_training_tokens_1B.jpg" width="95%" style="display: block;"/>
+</td>
+</tr>
+</table>
+</p>
 <p align="center">  
- <img src="lingua_overview.svg" width="100%"/>
+ <img src="figures/knowledge_inject.jpg" width="100%"/>
 </p>
 
 ## Quick start
@@ -14,8 +27,8 @@ The following commands launch a SLURM job that creates an environment for Meta L
 The env creation should take around 5 minutes without counting downloads. 
 
 ```bash
-git clone https://github.com/facebookresearch/lingua
-cd lingua
+git clone https://github.com/facebookresearch/STEM
+cd STEM
 
 bash setup/create_env.sh
 # or if you have access to a SLURM cluster
@@ -49,33 +62,46 @@ When using `stool`, if a job crashes, it can be relaunched using sbatch:
 ```bash
 sbatch path/to/dump_dir/submit.slurm
 ```
+
+To launch a debug job with the STEM architecture locally using 8 GPUs, use the following command
+```bash
+torchrun --nproc-per-node 8 -m apps.main.stem_train config=apps/main/configs/stem_debug.yaml
+```
+
 ## Training Results 
 
-We get very strong performance on many downstream tasks and match the performance of [DCLM baseline 1.0](https://arxiv.org/abs/2406.11794).
+Performance improvements with STEM at different model scales.
 
-### 1B models on 60B DCLM tokens
-| name           | arc_challenge | arc_easy | boolq |  copa | hellaswag |  obqa |  piqa |  siqa | winogrande |  nq  |  tqa  |
-|----------------|:-------------:|:--------:|:-----:|:-----:|:---------:|:-----:|:-----:|:-----:|:----------:|:----:|:-----:|
-| Transformer 1B |     36.48     |   62.83  | 62.57 | 79.00 |   63.62   | 37.40 | 75.14 | 45.19 |    61.64   | 8.75 | 26.31 |
-| minGRU 1B      |     30.82     |   57.89  | 62.05 | 74.00 |   50.27   | 37.00 | 72.31 | 43.76 |    52.49   | 3.24 |  9.03 |
-| minLSTM 1B     |     31.76     |   60.04  | 62.02 | 73.00 |   53.39   | 36.40 | 72.36 | 45.09 |    52.80   | 4.52 | 12.73 |
-| Hawk 1B        |     34.94     |   63.68  | 62.42 | 76.00 |   63.10   | 38.20 | 73.23 | 46.01 |    55.33   | 8.42 | 23.58 |
-| Mamba 1B       |     35.54     |   63.42  | 62.63 | 74.00 |   64.16   | 38.80 | 75.24 | 45.14 |    60.14   | 8.84 | 26.64 |
+### Pretraining results
 
-### 7B models
+### 350M model with 100B training tokens
+| name           | total params (B) | active params (B) | arc_challenge | arc_easy | boolq |  piqa | siqa | hellaswag |  obqa | winogrande |  average  |
+|----------------|:-------------:|:-------------:|:-------------:|:--------:|:-----:|:-----:|:---------:|:-----:|:-----:|:-----:|:----------:|
+| Baseline |     0.37     |   0.37  | 57.66 | 30.55 | 58.20 | 69.42 | 41.10 | 49.68 | 34.80 | 56.35 | 49.72 |
+| STEM (1/3 layers) | 1.14 | 0.35 | 63.01 | 32.68 | 60.31 | 70.18 | 39.76 | 52.38 | 33.00 | 55.88 | 50.90 |
+| STEM (1/2 layers) | 1.85 | 0.34 | 62.95 | 40.00 | 62.02 | 70.94 | 43.70 | 51.49 | 46.68 | 55.78 | 54.20 |
+| STEM (all layers) | 3.25 | 0.30 | 62.21 | 39.61 | 61.99 | 70.73 | 43.60 | 48.44 | 44.53 | 56.33 | 53.43 |
 
-| name                             | arc_challenge | arc_easy | boolq | copa  | hellaswag | obqa  | piqa  | siqa  | winogrande | mmlu  | nq    | tqa   | bbh   |
-|----------------------------------|---------------|----------|-------|-------|-----------|-------|-------|-------|------------|-------|-------|-------|-------|
-| Mamba 7B 200B tokens             | 47.21         | 76.03    | 65.63 | 84.00 | 77.80     | 44.00 | 80.25 | 49.69 | 70.24      | 32.81 | 20.53 | 51.93 | 20.35 |
-| Llama 7B 200B tokens             | 46.95         | 75.73    | 64.80 | 84.00 | 77.45     | 45.00 | 80.20 | 48.26 | 70.32      | 48.64 | 20.66 | 51.01 | 31.47 |
-| Llama 7B squared relu 1T tokens  | 49.61         | 76.74    | 72.45 | 89.00 | 81.19     | 44.80 | 82.05 | 49.95 | 72.14      | 60.56 | 25.68 | 59.52 | 42.11 |
+
+### 1B models with 1T training tokens
+
+| name           | total params (B) | active params (B) | arc_challenge | arc_easy | boolq |  piqa | siqa | hellaswag |  obqa | winogrande |  average  |
+|----------------|:-------------:|:-------------:|:-------------:|:--------:|:-----:|:-----:|:---------:|:-----:|:-----:|:-----:|:----------:|
+| Baseline |     1.50  |  1.50  | 66.98 | 41.88 | 64.21 | 73.44 | 44.09 | 59.65 | 39.84 | 56.48 | 55.82 |
+| STEM | 6.75  |  1.41  | 65.95 | 42.03 | 61.66 | 75.00 | 44.78 | 60.37 | 45.90 | 57.34 | **56.63** |
+
+### Midtraining results
+| name           | arc_challenge | arc_easy | boolq |  piqa | siqa | hellaswag |  obqa | winogrande |  average  | GSM8k | MMLU |
+|----------------|:-------------:|:-------------:|:-------------:|:--------:|:-----:|:-----:|:---------:|:-----:|:-----:|:-----:|:----------:|
+| Baseline |     70.78 | 42.11 | 65.84 | 72.95 | 47.13 | 60.39 | 42.97 | 57.81 | 57.50 |  44.2  |  29.92  |
+| STEM | 69.78 | 44.22 | 68.54 | 74.69 | 45.65 | 61.90 | 45.70 | 57.42 | **58.49** |  **46.4**  |  **32.38** | 
 
 ## Project overview
 
-Meta Lingua is structured as follows:
+STEM is structured as follows:
 
 ```
-📦meta-lingua
+📦STEM
  ┣ 📂lingua # Core library
  ┃ ┣ 📜args.py
  ┃ ┣ 📜checkpoint.py
@@ -89,34 +115,33 @@ Meta Lingua is structured as follows:
  ┃ ┣ 📜profiling.py
  ┃ ┣ 📜stool.py
  ┃ ┣ 📜tokenizer.py
- ┃ ┗ 📜transformer.py
+ ┃ ┣ 📜transformer.py
+ | ┣ 📜stem.py 
+ ┃ ┣ 📜stem_dist_utils.py
+ ┃ ┗ 📜stem_checkpoint.py
  ┣ 📂setup
  ┃ ┣ 📜create_env.sh
  ┃ ┗ 📜download_prepare_hf_data.py
  ┗ 📂apps # Apps that put components together
-   ┣ 📂main # Main language modeling app with llama
-   ┃ ┣ 📂configs
-   ┃ ┣ 📜eval.py
-   ┃ ┣ 📜generate.py
-   ┃ ┣ 📜train.py
-   ┃ ┗ 📜transformer.py
-   ┣ 📂fastRNN 
-   ┃ ┣ 📂component
-   ┃ ┣ 📂hawk
-   ┃ ┣ 📂minGRU
-   ┃ ┣ 📂minLSTM
-   ┣ 📂mamba
-   ┣ 📂mtp # Multi token prediction
-   ┗ 📂plots
+   ┗ 📂main # Main language modeling app with llama
+     ┣ 📂configs
+     ┣ 📜eval.py
+     ┣ 📜generate.py
+     ┣ 📜train.py
+     ┣ 📜transformer.py
+     ┣ 📜stem.py 
+     ┗ 📜stem_train.py 
 ```
 
-The `lingua` folder contains some essential and reusable components, while the `apps` folder contains scripts that put those components together. For instance the main training loop is in `apps/main`. We highly encourage you to use that as a template and modify it however you please to suit your experiments. 
+The `lingua` folder contains some essential and reusable components, while the `apps/main` folder contains scripts that put those components together. We add support for STEM modifications in these two folders. 
+> Note, STEM embedding tables have large memory footprints as each embedding table has size `vocab size x intermediate size`. So we split the embedding tables in each layer along the embedding dimension axis in multi GPU training. However, the backbone of the model can be flexibly parallelized using replication based DDP, FSDP or model parallel techniques. 
 
-Nothing is sacred in Meta Lingua. We've specifically tried to make it as easily modifiable as possible! So feel free to branch out and modify anything. 
+> For larger models, we can further optimize the implementation by offloading the STEM embedding tables and the corresponding optimizer states to CPU. For additional speedup, we can maintain an LFU cache to store the most commonly used embeddings and their optimizer states. We leave this implementation for the future.
+
 
 Here's a quick description of the most important files and features:
 
-- **`transformer.py`** : Defines model architecture. This is pure PyTorch `nn.Module` ! Nothing fancy here. 
+- **`transformer.py`** : Defines standard transformer architecture. 
 - **`distributed.py`** : Handles distributing the model on multiple GPUs. This is done through `parallelize_module` function which wraps your vanilla `nn.Module` and applies nearly any combination of Data Parallel, Fully Sharded Data Parallel, Model Parallelism, `torch.compile`, activation checkpointing and `float8`. 
 - **`data.py`** : Dataloader for LLM pretraining.
 
@@ -127,6 +152,18 @@ Here's a quick description of the most important files and features:
 - **`profiling.py`** : Small wrapper around xformers' profiler which provides automatic MFU and HFU calculation and dumps profile traces in profiling folder in your dump directory. It also has memory profiling trace. 
 - **`checkpoint.py`** : Manages model checkpoints. It saves model in checkpoints folder in your dump dir in .distcp format which is the new PyTorch distributed saving method. This format allows to reload the model with a different number of GPUs and with a different sharding. You can also convert those into normal PyTorch checkpoints with `torch.distributed.checkpoint.format_utils.dcp_to_torch_save` and the other way around `torch_save_to_dcp`.
 - **`args.py`** : Utilities to work with configs. 
+
+We always use parallel embedding for STEM embeddings to reduce memory overhead. Here are the additional files to support STEM architecture.
+
+- **`stem.py`** : Defines the backbone architecture of STEM-based model.
+- **`stem_dist_utils.py`** : Custom parallelization for the STEM embedding tables.
+- **`stem_checkpoint.py`** : Customized checkpoint for saving the sharded STEM embedding tables.
+
+We also add the following scripts in `apps/main` folder to support STEM.
+
+- **`stem.py`** : Combines the STEM model backbone defined in `lingua/stem.py` with layerwise STEM embedding tables.
+- **`stem_train.py`** : training script for STEM-based model.
+
 
 ## Configuration
 
@@ -173,92 +210,15 @@ data:
         path: tokenizers/llama2.model
 ```
 
+For STEM-based model, we need to use additional hyperparameters such as,
 
-## Launching jobs
-
-### Command line arguments
-
-The command line interface in all scripts (`train.py`, `eval.py`, `stool.py`) uses [OmegaConf](https://omegaconf.readthedocs.io/en/2.3_branch/usage.html#from-command-line-arguments)
-This accepts arguments as a dot list
-So if the dataclass looks like
-```python
-@dataclass
-class DummyArgs:
-    name: str = "blipbloup"
-    mode: LMTransformerArgs = LMTransformerArgs()
-    
-@dataclass
-class LMTransformerArgs:
-    dim: int = 512
-    n_layers: int = 12
-```
-
-Then you can pass `model.dim = 32` to change values in `LMTransformerArgs`
-or just `name = tictac` for top level attributes.
-
-**`train.py`** simply takes as argument the path to a config file and will load that config. The behavior here is as follows:
-1. We instantiate `TrainArgs` with its default values
-2. We override those default values with the ones in the provided config file
-3. We override the result with the additional arguments provided through command line
-
-If we take the `DummyArgs` example above, calling `train.py` with `train.py config=debug.yaml model.dim=64 name=tictac` 
-where `debug.yaml` contains 
 ```yaml
 model:
-    n_layers: 24
+    stem_layers: [1, 3, 5, 7]   # which layers to use STEM modification in
+
+distributed:
+    stem_parallel_size: 8       # the number of shards the STEM embeddings are split into
 ```
-will launch training with the config 
-```python
-DummyArgs(name="tictac", LMTransformerArgs(dim=64, n_layers=24))
-```
-
-### Launching with SLURM
-
-Since we want to do distributed training, we need `train.py` to run N times (with N being the number of GPUs)
-
-The easiest way to do this is through SLURM. And in order to make that simpler, we provide `lingua/stool.py` which is a simple python script that 
-1. Saves the provided config to `dump_dir`
-2. Copies your current code to `dump_dir` in order to back it up 
-3. Creates an sbatch file `submit.slurm` which is then used to launch the job with the provided config. 
-
-It can either be used through command line 
-
-```bash
-python -m lingua.stool config=apps/main/configs/debug.yaml nodes=1 account=fair_amaia_cw_codegen qos=lowest
-```
-
-Or the `launch_job` function directly. This allows you for example to create many arbitrary configs (to sweep parameters, do ablations) in a jupyter notebook and launch jobs directly from there. 
-
-Since the configuration file is copied to `dump_dir`, an easy way to iterate is to simply change the config file and launch the same command above. 
-
-## Debugging
-In order to iterate quickly, it is preferable not to have to wait for a SLURM allocation every time. You can instead ask SLURM to allocate resources for you, then once they're allocated you can run multiple commands on that same allocation. 
-
-For example you can do :
-
-```bash
-salloc --nodes 2 --cpus-per-gpu 16 --mem 1760GB --gres=gpu:8 --exclusive --time=72:00:00
-```
-
-Which will give you access to 2 nodes in your current terminal. Once the allocation is done, you will see some SLURM environement variables that were automatically added such as `$SLURM_JOB_ID` and others... This allows you for example to do in the same terminal
-
-```bash
-srun -n 16 python -m apps.main.train config=apps/main/configs/debug.yaml
-```
-
-Which will run the `python -m apps.main.train config=apps/main/configs/debug.yaml` command on each of the 16 GPUs. If this crashes or ends you can just relaunch `srun` again because the nodes are already allocated to you and you don't have to wait for SLURM to give you the resources again.
-
-This will also show you the outputs of all those commands in the same terminal which might become cumbersome. 
-
-Instead you can use `stool` directly to configure logs to be separated into different files per GPU.
-
-```bash
-python -m lingua.stool config=apps/main/configs/debug.yaml nodes=2 launcher=bash dirs_exists_ok=true
-```
-
-Notice that we added **`launcher=bash`** which basically means that the generated `submit.slurm` will simply be executed instead of submitting it through `sbatch`. The `submit.slurm` has an `srun` command also so this is very similar to the above `srun` command. We also add **`dirs_exists_ok=true`** to tell `stool` that it is okay to override things in an existing folder (code, config, etc)
-
-If you want to use `pdb` to step through your code, you should use `-n 1` to run only on 1 GPU. 
 
 ## Evaluations
 
@@ -294,6 +254,11 @@ python -m lingua.stool script=apps.main.eval config=apps/main/configs/eval.yaml 
  ┃ ┃ ┣ 📜params.json
  ┃ ┃ ┣ 📜train_state_00000.json
  ┃ ┃ ┗ 📜train_state_00001.json
+ ┃ ┗ 📂stem_shards # custom storage scheme for dimension parallel stem embedding tables
+ ┃ ┃ ┣ 📜stem_model_mp0.pt
+ ┃ ┃ ┣ 📜stem_optim_mp0.pt
+ ┃ ┃ ┣ 📜stem_model_mp1.pt
+ ┃ ┃ ┗ 📜stem_optim_mp1.pt
  ┣ 📂code # Backup of the code at the moment the job was launched
  ┣ 📂logs
  ┃ ┗ 📂166172 # Logs for each GPU in this SLURM job.
@@ -316,30 +281,17 @@ python -m lingua.stool script=apps.main.eval config=apps/main/configs/eval.yaml 
  ┗ 📜submit.slurm
 ```
 
-## Related repositories
-
-Here we highlight some related work that is complementary to this one. Most important being [torchtitan](https://github.com/pytorch/torchtitan), [torchtune](https://github.com/pytorch/torchtune) and [fairseq2](https://github.com/facebookresearch/fairseq2). 
-
-Lingua is designed for researchers who want to experiment with new ideas for LLM pretraining and get quick feedback on both training/inference speed and downstream benchmarks. Our goal is to lower the barrier to entry for LLM research by providing a lightweight and focused codebase.
-
-We see torchtitan, torchtune, lingua and fairseq2 as complementary tools. Torchtitan is excellent for large-scale work because it features 3D parallelism and is likely to integrate the latest PyTorch distributed training features more quickly, thanks to its close ties to the PyTorch team. On the other hand, Torchtune excels at fine-tuning, especially when GPU resources are limited, by offering various fine-tuning strategies like LoRA, QLoRA, DPO, and PPO. Fairseq2 is a FAIR project for sequence modeling with multi-modal capabilities that provides various LLM training recipes, multi-GPU support with data and model parallelism, and efficient data processing for speech and multilingual content.
-
-A typical workflow could look like this: you might first test a new idea in Lingua, then scale it up further with Torchtitan, and finally use Torchtune for instruction or preference fine-tuning.
-
-Although there's definitely some overlap among these codebases, we think it's valuable to have focused tools for different aspects of LLM work. For example, Torchtitan aims to showcase the latest distributed training features of PyTorch in a clean, minimal codebase, but for most research, you really don't need every feature PyTorch has to offer or the capability to scale to 100B parameters on 4096 GPUs. For instance, we think that FSDP + torch compile will cover 90% of all needs of a researcher. With lingua, we tried to ask "What's the minimal set of features needed to draw solid conclusions on the scalability of idea X?"
-
-We believe this targeted approach helps researchers make progress faster without the mental overhead of using many techniques that might not be needed.
 
 ## Citation
 
-```
+<!-- ```
 @misc{meta_lingua,
   author = {Mathurin Videau and Badr Youbi Idrissi and Daniel Haziza and Luca Wehrstedt and Jade Copet and Olivier Teytaud and David Lopez-Paz},
   title = {{Meta Lingua}: A minimal {PyTorch LLM} training library},
   url = {https://github.com/facebookresearch/lingua},
   year = {2024}
 }
-```
+``` -->
 ## License
 
-Meta Lingua is licensed under BSD-3-Clause license. Refer to the LICENSE file in the top level directory.
+STEM is licensed under BSD-3-Clause license. Refer to the LICENSE file in the top level directory.

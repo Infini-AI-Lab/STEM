@@ -37,6 +37,7 @@ RE_CKPT = r"__\d_\d\.distcp"
 
 CONSOLIDATE_FOLDER = "consolidated"
 CONSOLIDATE_NAME = "consolidated.pth"
+CONSOLIDATE_STEM_NAME = "consolidated_stem.pth"
 
 CONFIG_NAME = "params.json"
 TRAIN_STATE_NAME = "train_state_{:05d}.json"
@@ -378,6 +379,33 @@ def load_from_checkpoint(
     #    (no-op if stem_shards dir doesn't exist, e.g. old checkpoints)
     load_stem_shards(model, ckpt_path, stem_optimizer=stem_optimizer)
   
+
+def consolidate_stem_shards(ckpt_dir: str):
+    """
+    Consolidates all STEM shards in a directory to a single file
+    Consolidate checkpoint is saved in a subdirectory of ckpt_dir
+
+    Parameters:
+        ckpt_dir: str - path to the directory containing the checkpoints
+
+    Returns the path to the consolidated checkpoint
+    """
+    consolidate_path = Path(ckpt_dir) / CONSOLIDATE_FOLDER
+    stem_dir = consolidate_path / STEM_SUBDIR_NAME
+    consolidate_state_dict = {}
+    for shard_file in stem_dir.glob("stem_model_mp*.pt"):
+        state_dict = torch.load(shard_file, map_location="cpu")
+        for k, v in state_dict.items():
+            if k in consolidate_state_dict:
+                consolidate_state_dict[k].append(v)
+            else:
+                consolidate_state_dict[k] = [v]
+    
+    for k, v in consolidate_state_dict.items():
+        consolidate_state_dict[k] = torch.cat(v, dim=1)
+    torch.save(consolidate_state_dict, consolidate_path / CONSOLIDATE_STEM_NAME)
+    logger.info("Consolidated STEM shards !")
+    return consolidate_path
                         
 class StemCheckpointManager(CheckpointManager):
     
@@ -565,3 +593,5 @@ class StemCheckpointManager(CheckpointManager):
         # 3) Load STEM shards (model params and optimizer states) and copy into ParallelEmbedding params
         load_stem_shards(model, path, stem_optimizer=stem_optimizer)
         logger.info("STEM (ParallelEmbedding) model and optimizer shards reloaded")
+        
+    

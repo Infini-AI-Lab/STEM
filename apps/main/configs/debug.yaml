@@ -5,7 +5,6 @@ name: "debug"
 steps: 1000
 probe_freq: 100
 seed: 777
-stem_parallel_size: 4
 optim:
     lr: 3e-4
     warmup: 2000
@@ -24,7 +23,6 @@ model:
     dim: 1024
     n_layers: 8
     n_heads: 8
-    stem_layers: [2, 4, 6]
 
 data:
     root_dir: data/shuffled
