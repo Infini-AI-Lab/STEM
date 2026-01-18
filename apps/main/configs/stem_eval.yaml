@@ -1,0 +1,16 @@
+name: "debug_evals"
+ckpt_dir: /home/rsadhukh/STEM/logs/debug/checkpoints/0000001000/consolidated
+dump_dir: /home/rsadhukh/STEM/logs/debug/evals/0000001000
+generator:
+  max_tokens: 2048
+  dtype: bf16
+  temperature: 1.0
+  top_p: 0.95
+harness:
+  tasks:
+    - task: boolq
+      dataset_kwargs:
+        trust_remote_code: true
+    - arc_easy
+validation:
+  max_steps: 100

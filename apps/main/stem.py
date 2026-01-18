@@ -16,7 +16,7 @@ from lingua.stem import (
     StemTransformer,
     StemTransformerArgs,
 )
-from lingua.stem_dist_utils import ParallelEmbedding
+from lingua.stem_dist_utils import ParallelEmbedding, is_stem_process_group_initialized
 
 from apps.main.transformer import create_causal_mask, LMTransformerArgs, build_fsdp_grouping_plan
 
@@ -139,10 +139,18 @@ class StemLMTransformer(nn.Module):
         assert args.stem_embedding_dim is not None, "stem_embedding_dim must be provided when using StemLMTransformer"
         # Get device from existing parameters to ensure stem_embeddings are on the same device
         device = self.lm_transformer.output.weight.device
-        self.stem_embeddings = nn.ModuleList([
-            ParallelEmbedding(args.vocab_size, args.stem_embedding_dim, device=device) 
-            for _ in range(len(self.lm_transformer.stem_layers))
-        ])
+        
+        # Check if stem process group is initialized
+        if is_stem_process_group_initialized():
+            self.stem_embeddings = nn.ModuleList([
+                ParallelEmbedding(args.vocab_size, args.stem_embedding_dim, device=device) 
+                for _ in range(len(self.lm_transformer.stem_layers))
+            ])
+        else:
+            self.stem_embeddings = nn.ModuleList([
+                nn.Embedding(args.vocab_size, args.stem_embedding_dim).to(device) 
+                for _ in range(len(self.lm_transformer.stem_layers))
+            ])
         
         # Create mapping from layer index to stem_embeddings index
         self._layer_to_stem_idx = {

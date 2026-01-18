@@ -1,6 +1,6 @@
 name: "debug_evals"
-# ckpt_dir: !!CHANGETHIS!!
-# dump_dir: !!CHANGETHIS!!
+ckpt_dir: /home/rsadhukh/STEM/logs/debug/baseline/checkpoints/0000000100
+dump_dir: /home/rsadhukh/STEM/logs/debug/baseline/evals/0000000100
 generator:
   max_tokens: 8192
   dtype: bf16
@@ -9,27 +9,27 @@ generator:
 harness:
   tasks:
     - hellaswag
-    - task: boolq
-      dataset_kwargs:
-        trust_remote_code: true
-    - task: nq_open
-      num_fewshot: 5
-    - piqa
-    - task: social_iqa
-      dataset_kwargs:
-        trust_remote_code: true
-    - triviaqa
-    - winogrande
-    - openbookqa
-    - arc_easy
-    - arc_challenge
-    - race
-    - commonsense_qa
-    # - coqa
-    - copa
-    - gsm8k
-    - bbh
-    - mmlu
-    - mmlu_pro
+    # - task: boolq
+    #   dataset_kwargs:
+    #     trust_remote_code: true
+    # - task: nq_open
+    #   num_fewshot: 5
+    # - piqa
+    # - task: social_iqa
+    #   dataset_kwargs:
+    #     trust_remote_code: true
+    # - triviaqa
+    # - winogrande
+    # - openbookqa
+    # - arc_easy
+    # - arc_challenge
+    # - race
+    # - commonsense_qa
+    # # - coqa
+    # - copa
+    # - gsm8k
+    # - bbh
+    # - mmlu
+    # - mmlu_pro
 validation:
   max_steps: 1000

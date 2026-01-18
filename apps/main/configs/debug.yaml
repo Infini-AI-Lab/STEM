@@ -1,8 +1,8 @@
 # Template config, need to change dump_dir, data.root_dir and data.tokenizer.path
 
-dump_dir: logs/debug
+dump_dir: logs/debug/baseline
 name: "debug"
-steps: 1000
+steps: 100
 probe_freq: 100
 seed: 777
 optim:
@@ -61,7 +61,7 @@ eval:
         tasks:
             - hellaswag
             - piqa
-            - task: nq_open
-              num_fewshot: 5
+            # - task: nq_open
+            #   num_fewshot: 5
     validation:
         max_steps: 100

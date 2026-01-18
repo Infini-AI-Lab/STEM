@@ -69,6 +69,11 @@ def initialize_stem_process_group(
         logger.info(f"Initialized stem process group with groups: {groups}")
         
 
+def is_stem_process_group_initialized() -> bool:
+    """Check if the stem process group has been initialized."""
+    return _MODEL_PARALLEL_GROUP is not None
+
+
 def get_stem_data_parallel_group() -> dist.ProcessGroup:
     if _DATA_PARALLEL_GROUP is None:
         raise RuntimeError("Stem data parallel group is not initialized")

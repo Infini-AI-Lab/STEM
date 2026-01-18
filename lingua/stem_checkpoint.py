@@ -391,7 +391,7 @@ def consolidate_stem_shards(ckpt_dir: str):
     Returns the path to the consolidated checkpoint
     """
     consolidate_path = Path(ckpt_dir) / CONSOLIDATE_FOLDER
-    stem_dir = consolidate_path / STEM_SUBDIR_NAME
+    stem_dir = Path(ckpt_dir) / STEM_SUBDIR_NAME
     consolidate_state_dict = {}
     for shard_file in stem_dir.glob("stem_model_mp*.pt"):
         state_dict = torch.load(shard_file, map_location="cpu")

@@ -1,9 +1,8 @@
 dump_dir: logs/stem_debug
 name: "stem_debug"
-steps: 1000
+steps: 100
 probe_freq: 100
 seed: 777
-stem_parallel_size: 4
 optim:
     lr: 3e-4
     warmup: 2000

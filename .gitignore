@@ -1,5 +1,7 @@
 *.pyc
 *.log
+*.json
+*.jsonl
 .vscode
 *.ipynb
 slurm-*.out
@@ -7,4 +9,7 @@ wandb
 tokenizer
 data
 logs
+inference/checkpoints
+inference/data
+inference/tests/Data
 **/__pycache__
