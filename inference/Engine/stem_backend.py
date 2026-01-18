@@ -1,6 +1,8 @@
 import flashinfer
 import torch
 import torch.distributed as dist
+from concurrent.futures import Future
+from typing import Optional
 from Engine.stem_model import StemTransformer
 from Engine.backend import LMBackend
 from Engine.utils import load_stem_model
@@ -56,6 +58,10 @@ class StemLMBackend(LMBackend):
         seq_len = input_ids.shape[1]
         chunk_size = 128
         num_chunks = (seq_len + chunk_size - 1) // chunk_size  # Ceil division
+        
+        # Track prefetch future for next chunk
+        prefetch_future: Optional[Future] = None
+        
         for i in range(num_chunks):
             start_idx = i * chunk_size
             end_idx = min((i + 1) * chunk_size, seq_len)
@@ -64,7 +70,23 @@ class StemLMBackend(LMBackend):
             
             self.pre_encode(dec_len=dec_len)
             
-            self.model._wait_prefetch()
+            # Wait for prefetch of current chunk (if not first iteration)
+            if i > 0:
+                self.model._wait_prefetch()
+            
+            # Complete prefetch and get buffer_ids (if not first iteration)
+            if i > 0 and prefetch_future is not None:
+                buffer_ids = self.model.prefetch_stem_complete(prefetch_future)
+                self.model._swap_gpu_bufs()
+            
+            # Immediately submit CPU gather for chunk i+1 (non-blocking)
+            if i < num_chunks - 1:
+                next_start_idx = (i + 1) * chunk_size
+                next_end_idx = min(next_start_idx + chunk_size, seq_len)
+                next_chunk_input_ids = cpu_input_ids[:, next_start_idx:next_end_idx]
+                prefetch_future = self.model.prefetch_stem_async(next_chunk_input_ids)
+            
+            # Launch GPU compute for chunk i
             logits = self.prefill(
                 model=self.model,
                 x=chunk_input_ids,
@@ -76,13 +98,6 @@ class StemLMBackend(LMBackend):
                 kv_page_lastlen=self.paged_kv_last_page_len,
             )
             self.cachelens += dec_len
-            
-            if i < num_chunks - 1:
-                next_start_idx = (i + 1) * chunk_size
-                next_end_idx = min(next_start_idx + chunk_size, seq_len)
-                next_chunk_input_ids = cpu_input_ids[:, next_start_idx:next_end_idx]
-                buffer_ids = self.model.prefetch_stem(next_chunk_input_ids)
-                self.model._swap_gpu_bufs()
                 
         return self.sample(logits)
             

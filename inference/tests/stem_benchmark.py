@@ -132,7 +132,10 @@ for step, batch in tqdm(enumerate(dataloader), total=num_eval_steps-1):
     output = input_ids.clone()
     
     first_prefill_chunk = cpu_input_ids[:, :128]
-    first_prefill_buffer_ids = engine.model.prefetch_stem(first_prefill_chunk)
+    # Submit CPU gather for first chunk (non-blocking)
+    first_prefetch_future = engine.model.prefetch_stem_async(first_prefill_chunk)
+    # Complete prefetch and get buffer_ids
+    first_prefill_buffer_ids = engine.model.prefetch_stem_complete(first_prefetch_future)
     engine.model._swap_gpu_bufs()
     
     start_event.record()
@@ -158,7 +161,10 @@ batch = next(iter(dataloader))
 cpu_input_ids = batch[0].pin_memory()
 input_ids = batch[0].to(DEVICE)
 first_prefill_chunk = cpu_input_ids[:, :128]
-first_prefill_buffer_ids = engine.model.prefetch_stem(first_prefill_chunk)
+# Submit CPU gather for first chunk (non-blocking)
+first_prefetch_future = engine.model.prefetch_stem_async(first_prefill_chunk)
+# Complete prefetch and get buffer_ids
+first_prefill_buffer_ids = engine.model.prefetch_stem_complete(first_prefetch_future)
 engine.model._swap_gpu_bufs()
 
 torch.cuda.synchronize()
