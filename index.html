@@ -1,0 +1,1020 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <!-- Meta tags for social media banners, these should be filled in appropriatly as they are your "business card" -->
+  <!-- Replace the content tag with appropriate information -->
+  <meta name="description" content="STEM: Scaling Transformers with Embedding Modules">
+  <meta property="og:title" content="STEM"/>
+  <meta property="og:description" content="STEM: Scaling Transformers with Embedding Modules"/>
+  <meta property="og:url" content="https://github.com/Infini-AI-Lab/STEM/"/>
+  <!-- Path to banner image, should be in the path listed below. Optimal dimenssions are 1200X630-->
+  <meta property="og:image" content="static/images/icons/Bolt.png"/>
+  <meta property="og:image:width" content="1200"/>
+  <meta property="og:image:height" content="630"/>
+
+
+  <meta name="twitter:title" content="STEM">
+  <meta name="twitter:description" content="STEM: Scaling Transformers with Embedding Modules">
+  <!-- Path to banner image, should be in the path listed below. Optimal dimenssions are 1200X600-->
+  <meta name="twitter:image" content="static/images/icons/Kinetics.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <!-- Keywords for your paper to be indexed by-->
+  <meta name="keywords" content="Speculative Decoding">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+
+  <title>STEM: Scaling Transformers with Embedding Modules</title>
+  <link rel="icon" type="image/x-icon" href="static/images/icons/Bolt.png">
+  <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro"
+  rel="stylesheet">
+
+  <link rel="stylesheet" href="static/css/bulma.min.css">
+  <link rel="stylesheet" href="static/css/bulma-carousel.min.css">
+  <link rel="stylesheet" href="static/css/bulma-slider.min.css">
+  <link rel="stylesheet" href="static/css/fontawesome.all.min.css">
+  <link rel="stylesheet"
+  href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="static/css/index.css">
+  <link rel="stylesheet" href="static/css/stem-demo.css">
+
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script src="https://documentcloud.adobe.com/view-sdk/main.js"></script>
+  <script defer src="static/js/fontawesome.all.min.js"></script>
+  <script src="static/js/bulma-carousel.min.js"></script>
+  <script src="static/js/bulma-slider.min.js"></script>
+  <script src="static/js/index.js"></script>
+  <script type="text/x-mathjax-config">
+    MathJax.Hub.Config({
+      tex2jax: {
+        inlineMath: [['$','$'], ['\\(','\\)']],
+        displayMath: [['$$','$$'], ['\\[','\\]']],
+        processEscapes: true,
+        processEnvironments: true
+      },
+      "HTML-CSS": { availableFonts: ["TeX"] }
+    });
+  </script>
+  <script type="text/javascript"
+    src="http://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML">
+  </script>
+  <script type="text/javascript">
+    // Ensure MathJax processes the page after load
+    window.addEventListener('load', function() {
+      if (window.MathJax && window.MathJax.Hub) {
+        MathJax.Hub.Queue(["Typeset", MathJax.Hub]);
+      }
+    });
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+  <style>
+    @font-face {
+      font-family: 'TriForceFont';
+      src: url('static/Triforce.ttf') format('truetype');
+    }
+  
+    .custom-font {
+      font-family: 'TriForceFont', sans-serif !important;
+        font-size: 3.0rem;
+    }
+
+    .hero.is-light {
+        background-color: #ffffff !important;
+    }
+
+    body {
+        background-color: #ffffff; /* Plain white background */
+    }
+
+    .image-container {
+        background-color: #ffffff; /* Match the new plain white */
+        display: inline-block;
+    }
+
+    .image-container img {
+        mix-blend-mode: multiply;
+        max-width: 100%;
+        height: auto;
+    }
+
+
+    .container.is-fluid {
+      margin-left: 15px;
+      margin-right: 15px;
+      max-width: none;
+    }
+    
+    .hero .hero-body {
+      padding: 3rem 0;
+    }
+    
+    .section {
+      padding: 3rem 0;
+    }
+    
+    .column.is-full-width {
+      padding: 0 15px;
+    }
+  </style>
+</head>
+<body>
+
+
+<!-- Section: Header Titlepage -->
+<section class="hero">
+  <div class="hero-body">
+    <div class="container is-fluid">
+      <div class="columns is-centered">
+        <div class="column is-four-fifths has-text-centered">
+            <img src="static/images/icons/Bolt.png" alt="Magic Wand Icon" style="display: inline; height: 3rem; vertical-align: top;">
+            <h1 class="title is-2 publication-title" style="display: inline;">STEM: Scaling Transformers with Embedding Modules</h1>
+            
+            <br><br>
+            
+            <div class="is-size-5 publication-authors">
+              <span class="author-block"><a href="https://ranonrkm.github.io/" target="_blank">Ranajoy Sadhukhan</a><sup>¹</sup>,</span>
+              <span class="author-block"><a href="https://dreaming-panda.github.io/" target="_blank">Sheng Cao</a><sup>²</sup>,</span>
+              <span class="author-block"><a href="http://zhenghaizhong.com/" target="_blank">Harry Dong</a><sup>¹</sup>,</span>
+              <span class="author-block"><a href="" target="_blank">Changsheng Zhao</a><sup>³</sup>,</span>
+              <span class="author-block"><a href="" target="_blank">Attiano Purpura-Pontoniere</a><sup>³</sup>,</span>
+              <br>
+              <span class="author-block"><a href="https://strubell.github.io/" target="_blank">Yuandong Tian</a><sup>²</sup>,</span>
+              <span class="author-block"><a href="https://www.andrew.cmu.edu/user/beidic/" target="_blank">Zechun Liu</a><sup>³,*</sup>,</span>
+              <span class="author-block"><a href="https://www.andrew.cmu.edu/user/beidic/" target="_blank">Beidi Chen</a><sup>¹,*</sup>,</span>
+            </div>
+            
+            <div class="is-size-5 publication-authors">
+              <span class="affliation">
+                <small>
+                  <sup>¹</sup>Carnegie Mellon University, 
+                  <sup>²</sup>Work done at Meta AI, 
+                  <sup>³</sup>Meta AI
+                </small>
+              </span>
+              <span class="eql-cntrb">
+                <small><br><sup>*</sup>Indicates Co-supervision</small>
+              </span>
+            </div>
+            
+            <div class="column has-text-centered">
+              <span class="link-block">
+                <a href="https://arxiv.org/abs/2601.10639" target="_blank" class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon"><i class="ai ai-arxiv"></i></span>
+                  <span>arXiv</span>
+                </a>
+              </span>
+              
+              <span class="link-block">
+                <a href="https://github.com/Infini-AI-Lab/Kinetics" target="_blank" class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon"><i class="fab fa-github"></i></span>
+                  <span>Code</span>
+                </a>
+              </span>
+              
+              <!-- <span class="link-block">
+                <a href="https://youtu.be/vRAaAyjr6Jo" target="_blank" class="external-link button is-normal is-rounded is-dark">
+                  <span class="icon"><i class="fab fa-youtube"></i></span>
+                  <span>Video</span>
+                </a>
+              </span> -->
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+
+  <section class="section" style="background: #f7faff; padding-top: 32px; padding-bottom: 16px;">
+    <div class="container is-fluid">
+      <div class="columns is-centered">
+        <div class="column is-full">
+          <div style="display: flex; gap: 24px; flex-wrap: wrap; justify-content: center;">
+          
+            <!-- Figure 1 -->
+            <div id="figure1" style="flex: 0 1 45%; background: #fff; padding: 16px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+              <h4 class="title is-5" style="text-align: center; color: #4b6cb7;">
+                Improvement in Validation Perplexity
+              </h4>
+              <a href="#figure1">
+                <img src="static/images/STEM/val_ppl_vs_training_tokens_1B.jpg" alt="Validation Perplexity" style="width: 100%; border-radius: 6px;">
+              </a>
+              <figcaption style="text-align: center; margin-top: 8px; font-size: 14px; color: #555;">
+                <em>Figure 1: Validation perplexity vs. training tokens for 1B STEM vs dense baseline.</em>
+              </figcaption>
+            </div>
+  
+            <!-- Figure 2 -->
+            <div id="figure2" style="flex: 0 1 49%; background: #fff; padding: 16px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
+              <h4 class="title is-5" style="text-align: center; color: #4b6cb7;">
+                Improved Interpretability
+              </h4>
+              <div class="stem-demo-container">
+                <div class="stem-flow">
+                  <!-- Input -->
+                  <div class="stem-input-box">
+                    <strong>Prompt:</strong> Write one concise factual paragraph about the listed capital: role in government, geography, culture, economy, climate.<br><br>
+                    <strong>Country:</strong> <span id="stem-country" class="stem-token">Spain</span>
+                  </div>
+                  
+                  <!-- STEM Embedding Switch Indicator -->
+                  <div class="stem-embedding-switch">
+                    <span class="switch-from" id="switch-from">Spain</span>
+                    <span class="switch-arrow">→</span>
+                    <span class="switch-to" id="switch-to">Germany</span>
+                  </div>
+                  <div class="stem-label">STEM embedding switched (input text unchanged)</div>
+                  
+                  <!-- Output -->
+                  <div class="stem-output-box changing" id="stem-output">
+                    <div id="stem-output-text" class="stem-output-text">
+                      <strong>Capital: Madrid</strong><br>
+                      Madrid is Spain's capital and largest city, a cosmopolitan hub of Europe. With a population of over 3.2 million, it serves as the political, economic, and cultural center of Spain. The city is home to the Royal Palace, one of Europe's largest palaces, and numerous world-class museums.
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <figcaption style="text-align: center; margin-top: 8px; font-size: 14px; color: #555;">
+                <em>Figure 2: STEM embedding allows controlled knowledge injection by replacing token embeddings.</em>
+              </figcaption>
+            </div>
+  
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+<!-- Section: Paper abstract -->
+<section class="section hero is-light">
+  <div class="container is-fluid">
+    <div class="columns is-centered">
+      <div class="column is-four-fifths">
+          <div class="content has-text-justified">
+            <p>
+              <strong style="font-weight: 900;color: #0f598a">TL;DR:</strong> 
+              We introduce <span style="color:#1e88e5; font-weight:800;">STEM</span>: a <span style="color:#2e7d32; font-weight:700;">static, token-indexed</span> sparse architecture design that swaps FFN up-projection for a <span style="text-decoration: underline; font-weight:700;">layer-local embedding lookup</span>. Despite extreme sparsity, STEM trains <span style="color:#2e7d32; font-weight:800;">stably</span>, stores <span style="color:#2e7d32; font-weight:700;">more parametric knowlege</span> while <span style="color:#2e7d32; font-weight:700;">speeding up FFN layers by 3x</span>.
+              More interestingly, STEM improves <span style="color:#6a1b9a; font-weight:800;">interpretability</span> compared to the dense and exisiting sparse baselines and strengthens <span style="color:#1e88e5; font-weight:800;">long-context scaling</span>; across 350M–1B, yields up to <span style="color:#2e7d32; font-weight:900;">~3–4%</span> accuracy gains across various knowledge based and reasoning downstream tasks including ARC-Challenge, OpenbookQA, GSM8K, MMLU, Big-Bench Hard, etc.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+</section>
+
+
+<!-- Section: Paper abstract -->
+<section class="section hero is-light">
+  <div class="container is-fluid">
+    <div class="columns is-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3" style="text-align: center;">
+          <img src="static/images/icons/Llama.png" style="height: 43px; display: inline; vertical-align:text-top;"/>
+          &nbsp; Introduction
+        </h2>
+        <div class="content has-text-justified">
+          <div style="background: #ffffff; border-left: 4px solid #4b6cb7; border-radius: 6px; padding: 16px 24px; font-size: 16px; line-height: 1.6; color: #333;">
+            <p>
+              Fine-grained sparsity promises higher parametric capacity without proportional increase in per-token compute. But it often suffers <em style="color: #9a0336">training instability, load balancing, and communication overhead</em>. This is a major obstacle for the practical deployment of fine-grained sparsity. Furthermore, the sparse components are <em style="color: #9a0336">not very interpretable</em> and it is difficult to understand the role of each micro-expert. 
+            </p>
+
+            <p>
+              <span style="color: #4b6cb7; font-weight:700;">Token-indexed Static sparsity</span> emerged as a potential solution to this problem. It keeps compute path predictable (no runtime routing), enables prefetching and CPU offloading, and decouples capacity from per-token compute and cross-device communication with a relatively better training stability. Furthermore, the token-indexed nature helps the sparse model to localize its stored knowledge into respective micro-experts. However, it also compromises the model performance as the token-indexed selection <em style="color: #9a0336">can not capture contextual dependencies</em>. Consequently, inspite of adding a large number of micro-experts, the model performance might not be improved unless the micro-experts are placed carefully in the model.
+            </p>
+
+            <p>
+              Based on the results of our ablation studies, we introduce <span style="color: #1e88e5; font-weight:800;">STEM</span>, a <em style="color: #4b6cb7;">static, token-indexed</em> sparse architecture design that <span style="color: #4b6cb7; font-weight:700;">swaps FFN up-projection</span> for a layer-local embedding lookup. <em style="color: #4b6cb7">It is critical to leave the gating path in FFN unchanged to preserve the contextual ability of the model.</em>
+            </p>
+
+            <p>
+              With the additional parametric knowledge, STEM is expected to excel in different knowledge-based downstream tasks such as ARC-Challenge, OpenbookQA, MMLU. But interestingly, STEM also outperforms the dense baseline on various reasoning-heavy tasks such as GSM8K, Big-Bench Hard, etc. Additionally, STEM illustrated better long-context scaling abilities on tasks like Needle-in-the-Haystack, LongBench, etc. Most importantly, STEM achieves these performance improvements while being more <span style="color: #2e7d32; font-weight:700;">efficient</span> and <span style="color: #2e7d32; font-weight:700;">interpretable</span>. STEM successfully localizes its knowledge into respective micro-experts which is illustrated in our knowledge injection experiments. <!-- TODO: Add reference -->
+            </p>
+            
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+  <head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Note Box</title>
+  <style>
+    .note-box {
+      border: 3px solid #a57bb3;
+      border-radius: 10px;
+      padding: 1.2em;
+      background-color: #fefefe;
+      position: relative;
+      font-family: "Georgia", serif;
+      max-width: 800px;
+      margin: 2em auto;
+      line-height: 1.6;
+    }
+
+    .note-box::before {
+      content: "Note";
+      position: absolute;
+      top: -1.4em;
+      left: 0;
+      background-color: #a57bb3;
+      color: white;
+      padding: 0.4em 1em;
+      border-top-left-radius: 10px;
+      border-top-right-radius: 10px;
+      font-weight: bold;
+      font-size: 1.2em;
+    }
+
+    em {
+      font-style: italic;
+    }
+
+    /* Notation dropdown styling */
+    details summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details summary::marker {
+      display: none;
+    }
+
+    details[open] summary {
+      border-bottom: 1px solid #ddd;
+      padding-bottom: 10px;
+      margin-bottom: 10px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="note-box">
+    We do not propose STEM as a replacement for the existing sparse architectures like Mixture-of-Experts (MoE). STEM only aims to improve the performance of the FFN layers in transformer models. We believe that the combination of STEM and MoE can achieve even better performance. It is possible to design a <strong>mixture of STEM experts</strong> which can be more effective than the current MoE architectures.
+  </div>
+
+</body>
+
+  
+<section id="stem-architecture">
+  <div class="container is-fluid">
+    <div class="columns is-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3" style="text-align: center;">
+          <img src="static/images/icons/sparse_bolt.png" style="height: 64px; display: inline; vertical-align: middle;"/>
+          &nbsp; STEM Architecture
+        </h2>
+
+        <div class="content has-text-justified">
+          <div style="display: flex; gap: 30px; align-items: flex-start; flex-wrap: wrap;">
+            <!-- Left column: Text content -->
+            <div style="flex: 1 1 50%; min-width: 400px; padding-bottom: 20px;">
+              <!-- Notation Dropdown -->
+              <details style="margin-bottom: 20px; border: 1px solid #ddd; border-radius: 6px; padding: 10px 14px; background-color: #f9f9fb;">
+                <summary style="cursor: pointer; font-weight: 600; font-size: 15px; color: #2a63b2; list-style: none;">
+                  <span style="display: inline-flex; align-items: center; gap: 8px;">
+                    <span>📐</span>
+                    <span>Notation</span>
+                    <span style="font-size: 11px; color: #666;">(click to expand)</span>
+                  </span>
+                </summary>
+                <div style="margin-top: 12px; padding-left: 5px;">
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px 25px; font-size: 13px;">
+                    <div>
+                      <ul style="margin-top: 5px; line-height: 1.6; list-style: none; padding-left: 0;">
+                        <li style="margin-bottom: 6px;"><b>Layer index:</b> \( \ell \)</li>
+                        <li style="margin-bottom: 6px;"><b>Token id:</b> \( t \in \{1,\dots,V\} \)</li>
+                        <li style="margin-bottom: 6px;"><b>Model dimension:</b> \( d \)</li>
+                        <li style="margin-bottom: 6px;"><b>FFN hidden dim:</b> \( d_{\mathrm{ff}} \)</li>
+                      </ul>
+                    </div>
+                    <div>
+                      <ul style="margin-top: 5px; line-height: 1.6; list-style: none; padding-left: 0;">
+                        <li style="margin-bottom: 6px;"><b>Layer input:</b> \( \mathbf{x}_{\ell} \in \mathbb{R}^{d} \)</li>
+                        <li style="margin-bottom: 6px;"><b>Elementwise product:</b> \( \odot \)</li>
+                        <li style="margin-bottom: 6px;"><b>Activation:</b> \( \mathrm{SiLU}(\cdot) \)</li>
+                        <li style="margin-bottom: 6px; font-size: 12px; color: #666;"><i>where \(V\) is vocab size</i></li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </details>
+
+              <h3 class="title is-5" style="margin-top: 15px; margin-bottom: 12px;">Baseline FFN</h3>
+              <p style="margin-bottom: 12px;">
+                A standard gated FFN at layer \( \ell \) uses dense projections to expand into \( d_{\mathrm{ff}} \) and then
+                project back to \( d \). Let \( \mathbf{W}_{\ell}^{(u)} \in \mathbb{R}^{d_{\mathrm{ff}}\times d} \) be the
+                up-projection, \( \mathbf{W}_{\ell}^{(g)} \in \mathbb{R}^{d_{\mathrm{ff}}\times d} \) the gate projection, and
+                \( \mathbf{W}_{\ell}^{(d)} \in \mathbb{R}^{d\times d_{\mathrm{ff}}} \) the down-projection. The baseline computes:
+              </p>
+
+              <div class="box" style="background: #fafafa; margin: 12px 0 20px 0; padding: 15px;">
+                \[
+                  \mathbf{y}_{\ell}
+                  \;=\;
+                  \mathbf{W}_{\ell}^{(d)}\!\left(
+                    \mathrm{SiLU}\!\big(\mathbf{W}_{\ell}^{(g)} \mathbf{x}_{\ell}\big)
+                    \;\odot\;
+                    \big(\mathbf{W}_{\ell}^{(u)} \mathbf{x}_{\ell}\big)
+                  \right).
+                \]
+              </div>
+
+              <h3 class="title is-5" style="margin-top: 25px; margin-bottom: 12px;">STEM: Token-Indexed Embedding Replaces Up-Projection</h3>
+              <p style="margin-bottom: 12px;">
+                STEM replaces the dense up-projection \( \mathbf{W}_{\ell}^{(u)} \mathbf{x}_{\ell} \) with a
+                <b>token-indexed, layer-local embedding lookup</b>. For each layer \( \ell \), STEM introduces an embedding table
+                \( \mathbf{U}_{\ell} \in \mathbb{R}^{V \times d_{\mathrm{ff}}} \). Given token id \( t \), the layer fetches
+                \( \mathbf{U}_{\ell}[t] \in \mathbb{R}^{d_{\mathrm{ff}}} \) and combines it with the dense gate path:
+              </p>
+
+              <div class="box" style="background: #f7fbff; margin: 12px 0 20px 0; padding: 15px;">
+                \[
+                  \mathbf{y}_{\ell}
+                  \;=\; \mathbf{W}_{\ell}^{(d)}\!\left(
+                      \mathrm{SiLU}\!\big(\mathbf{W}_{\ell}^{(g)} \mathbf{x}_{\ell}\big)
+                      \;\odot\;
+                      \mathbf{U}_{\ell}[t]
+                  \right),
+                \]
+              </div>
+
+              <p style="margin-top: 12px; margin-bottom: 0;">
+                where \( \odot \) denotes elementwise multiplication. In other words, STEM keeps the gate and down-projection dense,
+                but <b>replaces the FFN up-projection with a lookup</b> into \( \mathbf{U}_{\ell} \), activating \( d_{\mathrm{ff}} \)
+                parameters conditioned directly on token \( t \).
+              </p>
+            </div>
+
+            <!-- Right column: Image -->
+            <div style="flex: 1 1 47%; min-width: 300px; text-align: center; display: flex; align-items: flex-start; justify-content: center;">
+              <div style="background: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); position: sticky; top: 20px; width: 100%; margin-top: 40px;">
+                <img src="static/images/STEM/STEM.drawio.jpg" alt="STEM Architecture Diagram" style="width: 100%; height: auto; border-radius: 6px; display: block; margin: 0 auto;" />
+                <p style="margin-top: 12px; font-size: 12px; color: #666; font-style: italic; line-height: 1.4; text-align: center;">
+                  STEM Architecture: Token-indexed embedding lookup replaces the up-projection matrix
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="improved-performance">
+  <div class="container is-fluid">
+    <div class="columns is-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3" style="text-align: center;">
+          <img src="static/images/icons/sparse_bolt.png" style="height: 64px; display: inline; vertical-align: middle;"/>
+          &nbsp; Improved Performance
+        </h2>
+
+        <div class="content has-text-justified">
+
+          <!-- 1) Training stability + ROI -->
+          <div class="box" style="border-left: 6px solid #22c55e;">
+            <h3 class="title is-5" style="margin-bottom: 0.5rem;">1) Better training stability and ROI</h3>
+
+            <p style="margin-top: 0;">
+              Interestingly, STEM manages to be
+              <span style="color:#16a34a; font-weight:700;">aggressively sparse</span> without inheriting the typical
+              instability expected from sparse architectures. The training plot shows that
+              the baseline and STEM curves stay smooth, while the Hash-layer Mixture-of-Experts baseline shows noticeably
+              <span style="color:#b91c1c; font-weight:700;">bumpier loss jumps</span>. STEM avoids these spikes and keeps training well-behaved even as sparsity is pushed harder.
+            </p>
+
+            <article class="message is-success is-light">
+              <div class="message-body">
+                <span style="white-space: nowrap;"><b>Training ROI</b> = <i>Average downstream accuracy</i> / <i>Total training FLOPs</i></span>.
+                This lets you compare “how much accuracy you buy per unit of compute.”
+              </div>
+            </article>
+
+            <p>
+              What makes this especially compelling is the scaling trend: replacing more FFN up-projections with STEM not only
+              reduces training FLOPs, it can also <span style="color:#16a34a; font-weight:700;">improve ROI</span>.
+              For example, at 1B pretraining, STEM reaches <b>1.08×</b> the baseline ROI while using fewer GFLOPs per token.
+            </p>
+
+            <!-- Training stability plots -->
+            <div style="display: flex; gap: 20px; margin-top: 20px; flex-wrap: wrap; justify-content: center;">
+              <div style="flex: 1 1 48%; min-width: 300px; background: #fff; padding: 16px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                <img src="static/images/STEM/loss_vs_training_tokens_350M_w_moe.jpg" alt="Loss vs Training Tokens" style="width: 100%; height: auto; border-radius: 6px;" />
+                <p style="margin-top: 8px; font-size: 13px; color: #666; text-align: center; font-style: italic;">
+                  Loss vs. Training Tokens (350M)
+                </p>
+              </div>
+              <div style="flex: 1 1 48%; min-width: 300px; background: #fff; padding: 16px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                <img src="static/images/STEM/loss_vs_training_flops_350M.jpg" alt="Loss vs Training FLOPs" style="width: 100%; height: auto; border-radius: 6px;" />
+                <p style="margin-top: 8px; font-size: 13px; color: #666; text-align: center; font-style: italic;">
+                  Loss vs. Training FLOPs (350M)
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 2) Knowledge capacity -->
+          <div class="box" style="border-left: 6px solid #7c3aed;">
+            <h3 class="title is-5" style="margin-bottom: 0.5rem;">2) Better knowledge storage capacity</h3>
+
+            <p style="margin-top: 0;">
+              A useful way to think about FFNs is as a <span style="font-weight:700;">key–value memory</span>:
+              the FFN creates an “address” (which memory slots to read), then the down-projection mixes the corresponding values.
+              In a dense SwiGLU FFN, this address is produced by a learned affine map (the up-projection) and then shaped by gating.
+            </p>
+
+            <p>
+              STEM changes the story: the "address" is no longer entirely synthesized from the hidden state—each token brings its own
+              layer-local address vector via the embedding table. Crucially, STEM embeddings show a
+              <span style="color:#6d28d9; font-weight:700;">large angular spread</span> (low pairwise cosine similarity),
+              which reduces cross-talk between memory slots and makes stored information easier to retrieve reliably.
+              This geometry is one reason STEM can translate extra parameters into real knowledge gains rather than noisy redundancy.
+            </p>
+
+            <!-- Knowledge capacity plots -->
+            <div style="display: flex; gap: 15px; margin-top: 20px; flex-wrap: wrap; justify-content: center;">
+              <div style="flex: 1 1 32%; min-width: 250px; background: #fff; padding: 16px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                <img src="static/images/STEM/angular_spread.jpg" alt="Angular Spread" style="width: 100%; height: auto; border-radius: 6px;" />
+                <p style="margin-top: 8px; font-size: 12px; color: #666; text-align: center; font-style: italic;">
+                  Angular Spread
+                </p>
+              </div>
+              <div style="flex: 1 1 32%; min-width: 250px; background: #fff; padding: 16px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                <img src="static/images/STEM/1B-ple8k-up_vs_ple_L10.jpg" alt="Up vs PLE" style="width: 100%; height: auto; border-radius: 6px;" />
+                <p style="margin-top: 8px; font-size: 12px; color: #666; text-align: center; font-style: italic;">
+                  Up vs PLE
+                </p>
+              </div>
+              <div style="flex: 1 1 32%; min-width: 250px; background: #fff; padding: 16px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                <img src="static/images/STEM/gate_up_feat_sim_dist_layer_3_combined.jpg" alt="Gate vs PLE" style="width: 100%; height: auto; border-radius: 6px;" />
+                <p style="margin-top: 8px; font-size: 12px; color: #666; text-align: center; font-style: italic;">
+                  Gate vs PLE
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3) Downstream performance + tables -->
+          <div class="box" style="border-left: 6px solid #0ea5e9;">
+            <h3 class="title is-5" style="margin-bottom: 0.5rem;">3) Downstream performance (knowledge, reasoning, and long context)</h3>
+
+            <p style="margin-top: 0;">
+              On standard downstream suites, STEM is particularly strong on
+              <span style="color:#0284c7; font-weight:700;">knowledge-intensive benchmarks</span>
+              (e.g., ARC-Challenge, OpenBookQA), while also improving
+              <span style="color:#0284c7; font-weight:700;">reasoning-centric tasks</span>
+              like GSM8K and MMLU after mid-training. And when you extend the context window, STEM continues to hold up, often improving
+              as context grows, which is exactly what we hope for from a design that activates more distinct parameters over longer sequences.
+            </p>
+
+            <hr/>
+
+            <h4 class="title is-6">Results tables</h4>
+
+            <!-- Table: 1B Pretraining -->
+            <details open>
+              <summary style="cursor: pointer; font-weight: 700; margin-bottom: 0.5rem;">
+                1B (Pretraining): downstream accuracy + compute/ROI
+              </summary>
+
+              <div class="table-container">
+                <table class="table is-striped is-hoverable is-fullwidth is-narrow">
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th>#Total Params (B)</th>
+                      <th>#Active Params (B)</th>
+                      <th>ARC-E</th>
+                      <th>ARC-C</th>
+                      <th>BoolQ</th>
+                      <th>PIQA</th>
+                      <th>SIQA</th>
+                      <th>HSwag</th>
+                      <th>OBQA</th>
+                      <th>Wino</th>
+                      <th>Avg</th>
+                      <th>#GFLOPs</th>
+                      <th>ROI (norm.)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><b>Baseline</b></td>
+                      <td>1.50</td>
+                      <td>1.50</td>
+                      <td>66.98</td>
+                      <td>41.88</td>
+                      <td>64.21</td>
+                      <td>73.44</td>
+                      <td>44.09</td>
+                      <td>59.65</td>
+                      <td>39.84</td>
+                      <td>56.48</td>
+                      <td>55.82</td>
+                      <td>3.00</td>
+                      <td>1.00×</td>
+                    </tr>
+                    <tr>
+                      <td><b>STEM</b></td>
+                      <td><span style="color:#0ea5e9; font-weight:700;">6.75</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">1.41</span></td>
+                      <td>65.95</td>
+                      <td><span style="color:#16a34a; font-weight:700;">42.03</span></td>
+                      <td>61.66</td>
+                      <td><span style="color:#16a34a; font-weight:700;">75.00</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">44.78</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">60.37</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">45.90</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">57.34</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">56.63</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">2.83</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">1.08×</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <p class="is-size-7" style="margin-top: 0.25rem;">
+                ROI is normalized to the baseline in the paper. 
+              </p>
+            </details>
+
+            <!-- Table: 1B Mid-training -->
+            <details>
+              <summary style="cursor: pointer; font-weight: 700; margin: 0.75rem 0 0.5rem;">
+                1B (Mid-training): reasoning/knowledge retrieval improves further
+              </summary>
+
+              <div class="table-container">
+                <table class="table is-striped is-hoverable is-fullwidth is-narrow">
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th>ARC-E</th>
+                      <th>ARC-C</th>
+                      <th>BoolQ</th>
+                      <th>PIQA</th>
+                      <th>SIQA</th>
+                      <th>HellaSwag</th>
+                      <th>OBQA</th>
+                      <th>Wino</th>
+                      <th>Avg</th>
+                      <th>GSM8K</th>
+                      <th>MMLU</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><b>Baseline</b></td>
+                      <td>70.78</td>
+                      <td>42.11</td>
+                      <td>65.84</td>
+                      <td>72.95</td>
+                      <td>47.13</td>
+                      <td>60.39</td>
+                      <td>42.97</td>
+                      <td>57.81</td>
+                      <td>57.50</td>
+                      <td>44.2</td>
+                      <td>29.92</td>
+                    </tr>
+                    <tr>
+                      <td><b>STEM</b></td>
+                      <td>69.78</td>
+                      <td><span style="color:#16a34a; font-weight:700;">44.22</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">68.54</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">74.69</span></td>
+                      <td>45.65</td>
+                      <td><span style="color:#16a34a; font-weight:700;">61.90</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">45.70</span></td>
+                      <td>57.42</td>
+                      <td><span style="color:#16a34a; font-weight:700;">58.49</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">46.4</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">32.38</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+
+            <!-- Table: Contextual reasoning -->
+            <details>
+              <summary style="cursor: pointer; font-weight: 700; margin: 0.75rem 0 0.5rem;">
+                Contextual reasoning (BBH, MuSR, LongBench subsets)
+              </summary>
+
+              <div class="table-container">
+                <table class="table is-striped is-hoverable is-fullwidth is-narrow">
+                  <thead>
+                    <tr>
+                      <th rowspan="2">Model</th>
+                      <th rowspan="2">BBH</th>
+                      <th rowspan="2">MuSR</th>
+                      <th colspan="3">LongBench Multi-hop</th>
+                      <th colspan="3">LongBench Code</th>
+                    </tr>
+                    <tr>
+                      <th>&lt;4k</th>
+                      <th>4–8k</th>
+                      <th>&ge;8k</th>
+                      <th>&lt;4k</th>
+                      <th>4–8k</th>
+                      <th>&ge;8k</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><b>Baseline</b></td>
+                      <td>24.87</td>
+                      <td>35.85</td>
+                      <td>5.72</td>
+                      <td>6.20</td>
+                      <td>6.19</td>
+                      <td>45.37</td>
+                      <td>44.64</td>
+                      <td>41.30</td>
+                    </tr>
+                    <tr>
+                      <td><b>STEM</b></td>
+                      <td><span style="color:#16a34a; font-weight:700;">27.55</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">36.38</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">10.20</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">8.63</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">7.82</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">52.68</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">52.53</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">49.60</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+
+            <!-- Table: LongBench length avg -->
+            <details>
+              <summary style="cursor: pointer; font-weight: 700; margin: 0.75rem 0 0.5rem;">
+                Long-context evaluation: LongBench averaged by context length
+              </summary>
+
+              <div class="table-container">
+                <table class="table is-striped is-hoverable is-fullwidth is-narrow">
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th>0–2k</th>
+                      <th>2–4k</th>
+                      <th>4–6k</th>
+                      <th>6–8k</th>
+                      <th>8–10k</th>
+                      <th>10–12k</th>
+                      <th>12k+</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><b>Base</b></td>
+                      <td>24.0</td>
+                      <td>23.8</td>
+                      <td>22.1</td>
+                      <td>22.3</td>
+                      <td>21.9</td>
+                      <td>21.1</td>
+                      <td>23.5</td>
+                    </tr>
+                    <tr>
+                      <td><b>STEM</b></td>
+                      <td><span style="color:#16a34a; font-weight:700;">27.6</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">27.6</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">24.4</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">22.7</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">23.0</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">21.7</span></td>
+                      <td><span style="color:#16a34a; font-weight:700;">24.2</span></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Section: Better Interpretability -->
+<section class="section hero is-light">
+  <div class="container is-fluid">
+    <div class="columns is-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3" style="text-align: center;">
+          <img src="static/images/icons/Idea.png" style="height: 64px; display: inline; vertical-align: middle;"/>
+          &nbsp; Better Interpretability
+        </h2>
+
+        <div class="content has-text-justified">
+          <div class="box">
+            <h3 class="title is-5" style="margin-bottom: 0.5rem;">Knowledge editing through STEM embeddings</h3>
+
+            <div style="margin: 20px 0; text-align: center;">
+              <img src="static/images/STEM/knowledge_inject.jpg" alt="Knowledge Editing with STEM" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" />
+            </div>
+
+            <p style="margin-top: 0;">
+              STEM embeddings enable <span style="color:#ec4899; font-weight:700;">direct knowledge editing</span> by replacing token embeddings while keeping the input text unchanged. This allows us to study how the model's factual knowledge is stored and can be manipulated.
+            </p>
+
+            <p>
+              When source and target entities have the same tokenization length, editing is straightforward: replace each source token's STEM embedding with the corresponding target token's embedding.
+            </p>
+
+            <div style="background: #f9fafb; border-left: 4px solid #ec4899; padding: 15px; margin: 15px 0; border-radius: 4px;">
+              <p style="margin: 0; font-size: 14px;">
+                <strong>Example:</strong> Replacing "Spain" → "Germany" in the prompt <em>"Country: Spain. Capital:"</em> causes the model to generate a paragraph about <strong>Berlin</strong> instead of Madrid, even though the input text still says "Spain".
+              </p>
+            </div>
+
+            <p>
+              For different tokenization lengths, we use several strategies:
+            </p>
+
+            <ul style="line-height: 1.8;">
+              <li><strong>Padding/Copying</strong> (when source is longer): Pad or repeat target tokens to match source length.</li>
+              <li><strong>Subset Selection</strong> (when target is longer): Select the most semantically representative target tokens.</li>
+              <li><strong>Averaging</strong> (universal): Use the average of all target token embeddings—surprisingly effective across all cases.</li>
+            </ul>
+
+            <div style="background: #fef3f2; border-left: 4px solid #f87171; padding: 15px; margin: 15px 0; border-radius: 4px;">
+              <p style="margin: 0 0 8px 0; font-size: 14px; font-weight: 600;">Example: United States → Czech Republic</p>
+              <p style="margin: 0; font-size: 13px; color: #555;">
+                <strong>Prompt:</strong> <em>"Country: United States of America. Capital:"</em><br>
+                <strong>After STEM replacement:</strong> Model generates a paragraph about <strong>Prague</strong>, describing it as "Czechia's capital and Europe's 10th-largest city..."
+              </p>
+            </div>
+
+            <div style="background: #f0f9ff; border-left: 4px solid #60a5fa; padding: 15px; margin: 15px 0; border-radius: 4px;">
+              <p style="margin: 0 0 8px 0; font-size: 14px; font-weight: 600;">Example: United States → United Kingdom</p>
+              <p style="margin: 0; font-size: 13px; color: #555;">
+                <strong>Prompt:</strong> <em>"Country: United States of America. Capital:"</em><br>
+                <strong>After STEM replacement:</strong> Model generates text about <strong>London</strong> as "the world's largest financial center, home to the British Parliament..."
+              </p>
+            </div>
+
+            <div style="background: #f0fdf4; border-left: 4px solid #4ade80; padding: 15px; margin: 15px 0; border-radius: 4px;">
+              <p style="margin: 0 0 8px 0; font-size: 14px; font-weight: 600;">Example: Country → State Transfer</p>
+              <p style="margin: 0; font-size: 13px; color: #555;">
+                <strong>Source:</strong> <em>United States</em> (Country) → <strong>Target:</strong> <em>California</em> (State)<br>
+                <strong>Result:</strong> Model describes <strong>Sacramento</strong> as "California's political, cultural, and economic center..."
+              </p>
+            </div>
+
+            <p style="margin-top: 15px;">
+              This interpretability demonstrates that STEM embeddings act as <span style="color:#ec4899; font-weight:700;">localized knowledge stores</span> that can be directly manipulated, providing insights into how the model organizes and retrieves factual information.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<!-- Section: Conclusion and Future Work -->
+<section class="section hero is-light">
+  <div class="container is-fluid">
+    <div class="columns is-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3" style="text-align: center;">
+          <img src="static/images/icons/Telescope.png" style="height: 50px; display: inline; vertical-align: middle;"/>
+          &nbsp; Conclusion and Future Work
+        </h2>
+        <div class="content has-text-justified">
+          <p>
+            In this work, we introduced <strong style="color:#1e88e5; font-weight:800;">STEM</strong>—a static, token-indexed architecture that aims to scale the paramtric capacity in a tractable manner that maintains <strong>training stability</strong>, <strong>improves inference efficiency</strong>, and <strong>enhances interpretability</strong>. The additional parameters helps STEM to outperform the dense baseline on not only knowledge-intensive but also reasoning-heavy downstream tasks. Usually, performance and interpretability are at odds with each other, but STEM manages to achieve both. Thus STEM is a step towards a <span style="color:#2e7d32; font-weight:700;">more interpretable and a scalable architecture</span>.
+          </p>
+
+          <p style="margin-top: 20px;">
+            Looking forward, we see STEM as a building block that can be combined with other architectural innovations such as Mixture-of-Experts (MoE). We want to study the efficacy of STEM at larger model scales. This will help us understand how much of the parametric capacity of large scale models can be offloaded to more statically indexed and more interpretable STEM embeddings.
+          </p>
+        </div>
+        <div class="has-text-centered">
+          <img src="static/images/STEM/STEM_icon.png" alt="STEM" width="400" height="400" />
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+  
+  
+  <!-- Section: References -->
+  <section class="section" id="BibTeX">
+    <!-- <div class="container is-max-desktop content"> -->
+      <div class="container is-fluid">
+        <div class="columns is-centered">
+          <div class="column is-four-fifths">
+            <h2 class="title">BibTeX</h2>
+            <pre><code>@misc{sadhukhan2026stemscalingtransformersembedding,
+              title={STEM: Scaling Transformers with Embedding Modules}, 
+              author={Ranajoy Sadhukhan and Sheng Cao and Harry Dong and Changsheng Zhao and Attiano Purpura-Pontoniere and Yuandong Tian and Zechun Liu and Beidi Chen},
+              year={2026},
+              eprint={2601.10639},
+              archivePrefix={arXiv},
+              primaryClass={cs.LG},
+              url={https://arxiv.org/abs/2601.10639}, 
+}</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+  
+  <footer class="footer">
+    <div class="container is-fluid">
+      <div class="columns is-centered">
+        <div class="column is-four-fifths">
+          <div class="content">
+            <p>
+              This page was built using the <a href="https://github.com/eliahuhorwitz/Academic-project-page-template" target="_blank">Academic Project Page Template</a> which was adopted from the <a href="https://nerfies.github.io" target="_blank">Nerfies</a> project page.
+              You are free to borrow the of this website, we just ask that you link back to this page in the footer. <br> This website is licensed under a <a rel="license"  href="http://creativecommons.org/licenses/by-sa/4.0/" target="_blank">Creative
+              Commons Attribution-ShareAlike 4.0 International License</a>. The icons are created by GPT4. 
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // STEM Embedding Animation
+    (function() {
+      const countryElement = document.getElementById('stem-country');
+      const outputElement = document.getElementById('stem-output-text');
+      const outputBox = document.getElementById('stem-output');
+      const switchFrom = document.getElementById('switch-from');
+      const switchTo = document.getElementById('switch-to');
+      
+      const spainText = '<strong>Capital: Madrid</strong><br>Madrid is Spain\'s capital and largest city, a cosmopolitan hub of Europe. With a population of over 3.2 million, it serves as the political, economic, and cultural center of Spain. The city is home to the Royal Palace, one of Europe\'s largest palaces, and numerous world-class museums.';
+      
+      const germanyText = '<strong>Capital: Berlin</strong><br>Berlin is Germany\'s capital and largest city, with a population of approximately 3.7 million. It serves as a major center for politics, culture, media, and science. The city has a rich history, having been divided during the Cold War and reunified in 1990, symbolizing the end of the Cold War era.';
+      
+      let isSpainEmbedding = true;
+      
+      function updateEmbeddingSwitch() {
+        // Update embedding switch indicator
+        if (isSpainEmbedding) {
+          switchFrom.classList.add('active');
+          switchTo.classList.remove('active');
+        } else {
+          switchFrom.classList.remove('active');
+          switchTo.classList.add('active');
+        }
+      }
+      
+      function updateOutputColor() {
+        const mode = isSpainEmbedding ? 'spain-mode' : 'germany-mode';
+        const otherMode = isSpainEmbedding ? 'germany-mode' : 'spain-mode';
+        
+        // Remove other mode class
+        outputBox.classList.remove(otherMode);
+        
+        // Add current mode class (only output box changes color)
+        outputBox.classList.add(mode);
+      }
+      
+      function animateTransition() {
+        // Fade out current text
+        outputElement.classList.add('fade-out');
+        
+        setTimeout(() => {
+          // Switch embedding (but keep input text as "Spain")
+          isSpainEmbedding = !isSpainEmbedding;
+          
+          // Update embedding switch indicator
+          updateEmbeddingSwitch();
+          
+          // Update output box color only
+          updateOutputColor();
+          
+          // Change output text based on embedding
+          outputElement.innerHTML = isSpainEmbedding ? spainText : germanyText;
+          
+          // Fade in new text
+          outputElement.classList.remove('fade-out');
+        }, 500);
+      }
+      
+      // Initialize
+      updateEmbeddingSwitch();
+      updateOutputColor();
+      
+      // Start animation after page load
+      setTimeout(() => {
+        // Initial animation after 2 seconds
+        setInterval(animateTransition, 4000);
+      }, 2000);
+    })();
+  </script>

@@ -1,0 +1,194 @@
+/* STEM Embedding Animation Styles */
+.stem-demo-container {
+  max-width: 100%;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.stem-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  align-items: center;
+  padding-bottom: 10px;
+}
+
+.stem-input-box {
+  background: #f0f7ff;
+  border: 2px solid #4b6cb7;
+  border-radius: 8px;
+  padding: 15px;
+  width: 100%;
+  max-width: 500px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #333;
+  transition: all 0.8s ease;
+  position: relative;
+  margin-bottom: 25px;
+}
+
+.stem-input-box::after {
+  content: "✓ Input text stays the same";
+  position: absolute;
+  bottom: -22px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: #4b6cb7;
+  font-style: italic;
+  font-weight: 600;
+  white-space: nowrap;
+  background: #fff;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.stem-process {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  position: relative;
+}
+
+.stem-token {
+  background: #e8f0fe;
+  border: 2px solid #4b6cb7;
+  border-radius: 6px;
+  padding: 10px 15px;
+  font-weight: 600;
+  color: #2a63b2;
+  position: relative;
+  transition: all 0.6s ease;
+}
+
+@keyframes pulse-change {
+  0%, 100% { 
+    transform: scale(1);
+  }
+  50% { 
+    transform: scale(1.05);
+  }
+}
+
+.stem-arrow {
+  font-size: 24px;
+  color: #4b6cb7;
+  animation: arrow-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes arrow-pulse {
+  0%, 100% { opacity: 0.6; transform: translateX(0); }
+  50% { opacity: 1; transform: translateX(5px); }
+}
+
+.stem-output-box {
+  background: #f0f7ff;
+  border: 2px solid #4b6cb7;
+  border-radius: 8px;
+  padding: 15px;
+  width: 100%;
+  max-width: 500px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #333;
+  min-height: 120px;
+  transition: all 0.8s ease;
+}
+
+.stem-output-box.changing {
+  animation: output-change 3s ease-in-out infinite;
+}
+
+.stem-output-box.spain-mode {
+  background: #fffbf0;
+  border-color: #ffc107;
+}
+
+.stem-output-box.germany-mode {
+  background: #f0fdf4;
+  border-color: #22c55e;
+}
+
+@keyframes output-change {
+  0%, 100% { 
+    transform: scale(1);
+  }
+  50% { 
+    transform: scale(1.02);
+  }
+}
+
+.stem-output-text {
+  opacity: 1;
+  transition: opacity 0.5s ease;
+}
+
+.stem-output-text.fade-out {
+  opacity: 0;
+}
+
+.stem-label {
+  font-size: 11px;
+  color: #666;
+  text-align: center;
+  margin-top: 5px;
+  font-style: italic;
+}
+
+.stem-switch-indicator {
+  display: inline-block;
+  padding: 5px 10px;
+  background: #4b6cb7;
+  color: white;
+  border-radius: 4px;
+  font-size: 11px;
+  margin-top: 10px;
+  animation: indicator-pulse 2s ease-in-out infinite;
+  transition: all 0.6s ease;
+}
+
+.stem-embedding-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+  padding: 10px;
+  background: #f0f7ff;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.stem-embedding-switch .switch-from,
+.stem-embedding-switch .switch-to {
+  padding: 5px 12px;
+  border-radius: 4px;
+  font-weight: 600;
+  color: #2a63b2;
+  background: #e8f0fe;
+  border: 1px solid #4b6cb7;
+  transition: all 0.6s ease;
+}
+
+.stem-embedding-switch .switch-from.active {
+  background: #fffbf0;
+  border-color: #ffc107;
+  color: #b8860b;
+}
+
+.stem-embedding-switch .switch-to.active {
+  background: #f0fdf4;
+  border-color: #22c55e;
+  color: #15803d;
+}
+
+.stem-embedding-switch .switch-arrow {
+  color: #4b6cb7;
+  font-size: 16px;
+}
+
+@keyframes indicator-pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
