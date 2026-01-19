@@ -105,7 +105,7 @@ transformer_configs = {
         high_freq_factor=4,
         low_freq_factor=1,
         original_max_position_embeddings=8192,
-        stem_layers=list(range(1, 16)),
+        stem_layers=list(range(1, 16, 2)),
     ),
 }
 

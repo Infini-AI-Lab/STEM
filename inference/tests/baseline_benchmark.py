@@ -31,7 +31,7 @@ def convert_pg19_dataset(tokenizer, seq_len=4096, nitem=100):
         remove_columns=dataset.column_names,
     )
     tokenized_prompts.set_format(type="torch", columns=["input_ids"])
-    data = torch.stack([x["input_ids"] for x in tokenized_prompts], dim=0)
+    data = torch.stack([x["input_ids"] for x in tokenized_prompts]*5, dim=0)
     return TensorDataset(data)
 
 parser = argparse.ArgumentParser(

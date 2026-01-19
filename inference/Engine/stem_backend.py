@@ -37,6 +37,7 @@ class StemLMBackend(LMBackend):
         self,
         checkpoints: str,
         model_name: str,
+        max_batched_tokens: int,
         use_tp: bool=False,
         rank_group=None,
         group=None,
@@ -46,13 +47,19 @@ class StemLMBackend(LMBackend):
             model_name=model_name,
             device=self.device,
             precision=self.dtype,
+            max_batched_tokens=max_batched_tokens,
             use_tp=use_tp,
             rank_group=rank_group,
             group=group,
         ) 
             
     @torch.inference_mode()
-    def encode(self, input_ids: torch.LongTensor, cpu_input_ids: torch.LongTensor, buffer_ids: torch.LongTensor):
+    def encode(
+        self, 
+        input_ids: torch.LongTensor, 
+        cpu_input_ids: torch.LongTensor, 
+        buffer_ids: torch.LongTensor
+    ):
         self.clear_kv()
         logits = None
         seq_len = input_ids.shape[1]
@@ -61,30 +68,26 @@ class StemLMBackend(LMBackend):
         
         # Track prefetch future for next chunk
         prefetch_future: Optional[Future] = None
+        next_buf = 1 - self.model._cur_buf_idx
         
         for i in range(num_chunks):
             start_idx = i * chunk_size
             end_idx = min((i + 1) * chunk_size, seq_len)
+            next_start_idx = (i + 1) * chunk_size
+            next_end_idx = min(next_start_idx + chunk_size, seq_len)
+            
+            # Immediately submit CPU gather for chunk i+1 (non-blocking)
+            if i < num_chunks - 1:
+                next_chunk_input_ids = cpu_input_ids[:, next_start_idx:next_end_idx]
+                prefetch_future = self.model.submit_cpu_gather(next_chunk_input_ids, next_buf)
+            
             chunk_input_ids = input_ids[:, start_idx:end_idx]
             dec_len = end_idx - start_idx
             
             self.pre_encode(dec_len=dec_len)
             
-            # Wait for prefetch of current chunk (if not first iteration)
-            if i > 0:
-                self.model._wait_prefetch()
-            
-            # Complete prefetch and get buffer_ids (if not first iteration)
-            if i > 0 and prefetch_future is not None:
-                buffer_ids = self.model.prefetch_stem_complete(prefetch_future)
-                self.model._swap_gpu_bufs()
-            
-            # Immediately submit CPU gather for chunk i+1 (non-blocking)
-            if i < num_chunks - 1:
-                next_start_idx = (i + 1) * chunk_size
-                next_end_idx = min(next_start_idx + chunk_size, seq_len)
-                next_chunk_input_ids = cpu_input_ids[:, next_start_idx:next_end_idx]
-                prefetch_future = self.model.prefetch_stem_async(next_chunk_input_ids)
+            # compute stream waits for current buffer to be ready
+            self.model.wait_current_ready_nonblocking()
             
             # Launch GPU compute for chunk i
             logits = self.prefill(
@@ -98,6 +101,16 @@ class StemLMBackend(LMBackend):
                 kv_page_lastlen=self.paged_kv_last_page_len,
             )
             self.cachelens += dec_len
+            
+            if i < num_chunks - 1:
+                assert prefetch_future is not None
+                # Block on CPU gather while GPU is computing
+                next_buf, next_U, next_T = prefetch_future.result()
+                # Enqueue H2D from CPU gather result to GPU buffer
+                self.model.enqueue_h2d_from_stage(next_buf, next_U, next_T)
+                self.model.swap_to(next_buf)
+                buffer_ids = self.model.current_buffer_ids()
+                next_buf = 1 - next_buf
                 
         return self.sample(logits)
             

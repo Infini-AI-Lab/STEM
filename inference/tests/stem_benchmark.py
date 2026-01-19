@@ -30,7 +30,7 @@ def convert_pg19_dataset(tokenizer, seq_len=4096, nitem=100):
         remove_columns=dataset.column_names,
     )
     tokenized_prompts.set_format(type="torch", columns=["input_ids"])
-    data = torch.stack([x["input_ids"] for x in tokenized_prompts], dim=0)
+    data = torch.stack([x["input_ids"] for x in tokenized_prompts]*5, dim=0)
     return TensorDataset(data)
 
 parser = argparse.ArgumentParser(
@@ -84,6 +84,8 @@ rank = -1
 setup_seed(args.seed)
 print(f"Using device={DEVICE}")
 
+
+CHUNK_SIZE = 128
 MAX_LEN = args.max_len
 DTYPE = torch.bfloat16
 BATCH_SIZE = args.B
@@ -94,6 +96,7 @@ engine = StemLMBackend(dtype=DTYPE, device=DEVICE)
 engine.load_model(
     checkpoint_path,
     model_name,
+    max_batched_tokens=BATCH_SIZE * CHUNK_SIZE,
     use_tp=use_tp,
     rank_group=args.rank_group,
     group=global_group,
@@ -131,15 +134,16 @@ for step, batch in tqdm(enumerate(dataloader), total=num_eval_steps-1):
     terminate = False
     output = input_ids.clone()
     
-    first_prefill_chunk = cpu_input_ids[:, :128]
-    # Submit CPU gather for first chunk (non-blocking)
-    first_prefetch_future = engine.model.prefetch_stem_async(first_prefill_chunk)
-    # Complete prefetch and get buffer_ids
-    first_prefill_buffer_ids = engine.model.prefetch_stem_complete(first_prefetch_future)
-    engine.model._swap_gpu_bufs()
+    cur_buf = engine.model._cur_buf_idx
+    first_end = min(args.prefix_len, CHUNK_SIZE)
+    fut_0 = engine.model.submit_cpu_gather(cpu_input_ids[:, :first_end], cur_buf)
+    next_buf, U, T = fut_0.result()
+    engine.model.enqueue_h2d_from_stage(next_buf, U, T)
+    engine.model.swap_to(next_buf)
+    buffer_ids = engine.model.current_buffer_ids()
     
     start_event.record()
-    next_tokens = engine.encode(input_ids=input_ids, cpu_input_ids=cpu_input_ids, buffer_ids=first_prefill_buffer_ids)[:, -1:]
+    next_tokens = engine.encode(input_ids=input_ids, cpu_input_ids=cpu_input_ids, buffer_ids=buffer_ids)[:, -1:]
     end_event.record()
     
     end_event.synchronize()
@@ -160,12 +164,13 @@ print(f"Average prefill latency: {prefill_time/model_steps} ms")
 batch = next(iter(dataloader))
 cpu_input_ids = batch[0].pin_memory()
 input_ids = batch[0].to(DEVICE)
-first_prefill_chunk = cpu_input_ids[:, :128]
-# Submit CPU gather for first chunk (non-blocking)
-first_prefetch_future = engine.model.prefetch_stem_async(first_prefill_chunk)
-# Complete prefetch and get buffer_ids
-first_prefill_buffer_ids = engine.model.prefetch_stem_complete(first_prefetch_future)
-engine.model._swap_gpu_bufs()
+cur_buf = engine.model._cur_buf_idx
+first_end = min(args.prefix_len, CHUNK_SIZE)
+fut_0 = engine.model.submit_cpu_gather(cpu_input_ids[:, :first_end], cur_buf)
+next_buf, U, T = fut_0.result()
+engine.model.enqueue_h2d_from_stage(next_buf, U, T)
+engine.model.swap_to(next_buf)
+buffer_ids = engine.model.current_buffer_ids()
 
 torch.cuda.synchronize()
 if rank <= 0:
@@ -175,7 +180,7 @@ else:
     prof = contextlib.nullcontext()
     
 with prof:
-    next_tokens = engine.encode(input_ids=input_ids, cpu_input_ids=cpu_input_ids, buffer_ids=first_prefill_buffer_ids)[:, -1:]
+    next_tokens = engine.encode(input_ids=input_ids, cpu_input_ids=cpu_input_ids, buffer_ids=buffer_ids)[:, -1:]
     
 torch.cuda.synchronize()
 if rank <= 0:

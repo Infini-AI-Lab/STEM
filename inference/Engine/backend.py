@@ -145,7 +145,7 @@ class LMBackend:
         )
         if compile_prefill:
             self.prefill = torch.compile(
-                self.prefill, mode="max-autotune", fullgraph=False
+                self.prefill, fullgraph=True, dynamic=True
             )
             
     def sample(self, logits: torch.Tensor):

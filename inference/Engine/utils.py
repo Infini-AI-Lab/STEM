@@ -96,6 +96,7 @@ def load_stem_model(
     model_name,
     device,
     precision,
+    max_batched_tokens: int,
     use_tp=False,
     rank_group=None,
     group=None,
@@ -110,11 +111,9 @@ def load_stem_model(
     
     if "stem_embeddings" in checkpoint:
         with torch.device(device):
-            model.setup_stem()
+            model.setup_stem(max_batched_tokens=max_batched_tokens)
         ckpt_stem = checkpoint["stem_embeddings"]
         model.cpu_stem_embeddings.copy_(ckpt_stem)
-    # with torch.device(device):
-    #     model.setup_stem()
     
     # TODO: add support for tp
     
