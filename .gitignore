@@ -12,4 +12,5 @@ logs
 inference/checkpoints
 inference/data
 inference/tests/Data
+inference/Engine/build
 **/__pycache__
