@@ -134,13 +134,13 @@
             
             <div class="is-size-5 publication-authors">
               <span class="author-block"><a href="https://ranonrkm.github.io/" target="_blank">Ranajoy Sadhukhan</a><sup>¹</sup>,</span>
-              <span class="author-block"><a href="https://dreaming-panda.github.io/" target="_blank">Sheng Cao</a><sup>²</sup>,</span>
-              <span class="author-block"><a href="http://zhenghaizhong.com/" target="_blank">Harry Dong</a><sup>¹</sup>,</span>
-              <span class="author-block"><a href="" target="_blank">Changsheng Zhao</a><sup>³</sup>,</span>
-              <span class="author-block"><a href="" target="_blank">Attiano Purpura-Pontoniere</a><sup>³</sup>,</span>
+              <span class="author-block"><a href="https://www.linkedin.com/in/rick-cao/" target="_blank">Sheng Cao</a><sup>²</sup>,</span>
+              <span class="author-block"><a href="https://www.andrew.cmu.edu/user/harryd/" target="_blank">Harry Dong</a><sup>¹</sup>,</span>
+              <span class="author-block"><a href="" target="https://www.linkedin.com/in/changsheng-zhao/">Changsheng Zhao</a><sup>³</sup>,</span>
+              <span class="author-block"><a href="" target="https://www.linkedin.com/in/attianopp/">Attiano Purpura-Pontoniere</a><sup>³</sup>,</span>
               <br>
-              <span class="author-block"><a href="https://strubell.github.io/" target="_blank">Yuandong Tian</a><sup>²</sup>,</span>
-              <span class="author-block"><a href="https://www.andrew.cmu.edu/user/beidic/" target="_blank">Zechun Liu</a><sup>³,*</sup>,</span>
+              <span class="author-block"><a href="https://yuandong-tian.com/" target="_blank">Yuandong Tian</a><sup>²</sup>,</span>
+              <span class="author-block"><a href="https://zechunliu.com/" target="_blank">Zechun Liu</a><sup>³,*</sup>,</span>
               <span class="author-block"><a href="https://www.andrew.cmu.edu/user/beidic/" target="_blank">Beidi Chen</a><sup>¹,*</sup>,</span>
             </div>
             
@@ -166,7 +166,7 @@
               </span>
               
               <span class="link-block">
-                <a href="https://github.com/Infini-AI-Lab/Kinetics" target="_blank" class="external-link button is-normal is-rounded is-dark">
+                <a href="https://github.com/Infini-AI-Lab/STEM" target="_blank" class="external-link button is-normal is-rounded is-dark">
                   <span class="icon"><i class="fab fa-github"></i></span>
                   <span>Code</span>
                 </a>
@@ -218,12 +218,48 @@
                     <strong>Country:</strong> <span id="stem-country" class="stem-token">Spain</span>
                   </div>
                   
-                  <!-- STEM Embedding Switch Indicator -->
-                  <div class="stem-embedding-switch">
-                    <span class="switch-from" id="switch-from">Spain</span>
-                    <span class="switch-arrow">→</span>
-                    <span class="switch-to" id="switch-to">Germany</span>
+                  <!-- FFN Layer Box with STEM Embeddings -->
+                  <div class="stem-ffn-visualization">
+                    <!-- Spain STEM bar (left, outside box) -->
+                    <div class="stem-bar-container">
+                      <div class="stem-bar" id="stem-bar-spain">
+                        <span class="stem-bar-label">stem[Spain]</span>
+                      </div>
+                      <div class="stem-bar-arrow" id="arrow-spain">
+                        <svg width="40" height="20" viewBox="0 0 40 20" preserveAspectRatio="xMidYMid meet">
+                          <defs>
+                            <marker id="arrowhead-common" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                              <polygon points="0 0, 10 3, 0 6" fill="currentColor"/>
+                            </marker>
+                          </defs>
+                          <path d="M 5 10 L 28 10" stroke="currentColor" stroke-width="2" fill="none" marker-end="url(#arrowhead-common)"/>
+                        </svg>
+                      </div>
+                    </div>
+                    
+                    <!-- FFN Layer Box -->
+                    <div class="stem-ffn-box">
+                      <div class="stem-ffn-label">STEM-based FFN layer</div>
+                    </div>
+                    
+                    <!-- Germany STEM bar (left, outside box) -->
+                    <div class="stem-bar-container">
+                      <div class="stem-bar" id="stem-bar-germany">
+                        <span class="stem-bar-label">stem[Germany]</span>
+                      </div>
+                      <div class="stem-bar-arrow" id="arrow-germany">
+                        <svg width="40" height="20" viewBox="-2 0 42 20" preserveAspectRatio="xMidYMid meet">
+                          <defs>
+                            <marker id="arrowhead-common-reverse" markerWidth="10" markerHeight="10" refX="1" refY="3" orient="auto-start-reverse">
+                              <polygon points="0 0, 10 3, 0 6" fill="currentColor"/>
+                            </marker>
+                          </defs>
+                          <path d="M 35 10 L 12 10" stroke="currentColor" stroke-width="2" fill="none" marker-end="url(#arrowhead-common-reverse)"/>
+                        </svg>
+                      </div>
+                    </div>
                   </div>
+                  
                   <div class="stem-label">STEM embedding switched (input text unchanged)</div>
                   
                   <!-- Output -->
@@ -954,8 +990,6 @@
       const countryElement = document.getElementById('stem-country');
       const outputElement = document.getElementById('stem-output-text');
       const outputBox = document.getElementById('stem-output');
-      const switchFrom = document.getElementById('switch-from');
-      const switchTo = document.getElementById('switch-to');
       
       const spainText = '<strong>Capital: Madrid</strong><br>Madrid is Spain\'s capital and largest city, a cosmopolitan hub of Europe. With a population of over 3.2 million, it serves as the political, economic, and cultural center of Spain. The city is home to the Royal Palace, one of Europe\'s largest palaces, and numerous world-class museums.';
       
@@ -964,13 +998,23 @@
       let isSpainEmbedding = true;
       
       function updateEmbeddingSwitch() {
-        // Update embedding switch indicator
+        const barSpain = document.getElementById('stem-bar-spain');
+        const barGermany = document.getElementById('stem-bar-germany');
+        const arrowSpain = document.getElementById('arrow-spain');
+        const arrowGermany = document.getElementById('arrow-germany');
+        
         if (isSpainEmbedding) {
-          switchFrom.classList.add('active');
-          switchTo.classList.remove('active');
+          // Highlight Spain bar and arrow
+          barSpain.classList.add('active');
+          barGermany.classList.remove('active');
+          arrowSpain.classList.add('active');
+          arrowGermany.classList.remove('active');
         } else {
-          switchFrom.classList.remove('active');
-          switchTo.classList.add('active');
+          // Highlight Germany bar and arrow
+          barGermany.classList.add('active');
+          barSpain.classList.remove('active');
+          arrowGermany.classList.add('active');
+          arrowSpain.classList.remove('active');
         }
       }
       

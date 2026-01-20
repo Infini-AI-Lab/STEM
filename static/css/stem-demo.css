@@ -34,14 +34,15 @@
   bottom: -22px;
   left: 50%;
   transform: translateX(-50%);
-  font-size: 10px;
-  color: #4b6cb7;
+  font-size: 12px;
+  color: #274c9b;
   font-style: italic;
-  font-weight: 600;
+  font-weight: 700;
   white-space: nowrap;
   background: #fff;
-  padding: 2px 6px;
-  border-radius: 3px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  box-shadow: 0 2px 6px rgba(39, 76, 155, 0.15);
 }
 
 .stem-process {
@@ -148,43 +149,100 @@
   transition: all 0.6s ease;
 }
 
-.stem-embedding-switch {
+/* FFN Layer Visualization */
+.stem-ffn-visualization {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin: 10px 0;
-  padding: 10px;
-  background: #f0f7ff;
-  border-radius: 6px;
-  font-size: 12px;
+  gap: 15px;
+  margin: 25px 0;
+  padding: 20px;
+  position: relative;
 }
 
-.stem-embedding-switch .switch-from,
-.stem-embedding-switch .switch-to {
-  padding: 5px 12px;
-  border-radius: 4px;
-  font-weight: 600;
-  color: #2a63b2;
-  background: #e8f0fe;
-  border: 1px solid #4b6cb7;
-  transition: all 0.6s ease;
+.stem-bar-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
 }
 
-.stem-embedding-switch .switch-from.active {
-  background: #fffbf0;
+.stem-bar {
+  width: 80px;
+  height: 50px;
+  background: rgba(0, 0, 0, 0.08);
+  border: 2px solid rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.5s ease;
+  opacity: 0.5;
+}
+
+.stem-bar.active {
+  background: rgba(255, 193, 7, 0.25);
   border-color: #ffc107;
-  color: #b8860b;
+  opacity: 1;
+  transform: scale(1.05);
+  box-shadow: 0 4px 12px rgba(255, 193, 7, 0.4);
 }
 
-.stem-embedding-switch .switch-to.active {
-  background: #f0fdf4;
-  border-color: #22c55e;
-  color: #15803d;
+.stem-bar#stem-bar-germany {
+  width: 100px;
+  height: 60px;
 }
 
-.stem-embedding-switch .switch-arrow {
+.stem-bar#stem-bar-germany.active {
+  background: rgba(34, 197, 94, 0.25);
+  border-color: rgba(21, 128, 61, 0.8);
+  box-shadow: 0 4px 12px rgba(21, 128, 61, 0.3);
+}
+
+.stem-bar-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #333;
+  text-align: center;
+}
+
+.stem-bar.active .stem-bar-label {
+  color: #111;
+  font-weight: 700;
+}
+
+.stem-bar-arrow {
+  color: rgba(0, 0, 0, 0.2);
+  transition: all 0.5s ease;
+  opacity: 0.3;
+}
+
+.stem-bar-arrow.active {
+  color: #ffc107;
+  opacity: 1;
+}
+
+.stem-bar-arrow#arrow-germany.active {
+  color: rgba(21, 128, 61, 0.9);
+}
+
+.stem-ffn-box {
+  width: 200px;
+  height: 120px;
+  background: #ffffff;
+  border: 3px solid #4b6cb7;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 12px rgba(75, 108, 183, 0.15);
+  position: relative;
+}
+
+.stem-ffn-label {
+  font-size: 14px;
+  font-weight: 700;
   color: #4b6cb7;
-  font-size: 16px;
+  text-align: center;
 }
 
 @keyframes indicator-pulse {
