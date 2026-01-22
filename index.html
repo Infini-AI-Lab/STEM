@@ -44,28 +44,21 @@
   <script src="static/js/bulma-carousel.min.js"></script>
   <script src="static/js/bulma-slider.min.js"></script>
   <script src="static/js/index.js"></script>
-  <script type="text/x-mathjax-config">
-    MathJax.Hub.Config({
-      tex2jax: {
+  <script>
+    window.MathJax = {
+      tex: {
         inlineMath: [['$','$'], ['\\(','\\)']],
         displayMath: [['$$','$$'], ['\\[','\\]']],
         processEscapes: true,
         processEnvironments: true
       },
-      "HTML-CSS": { availableFonts: ["TeX"] }
-    });
-  </script>
-  <script type="text/javascript"
-    src="http://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML">
-  </script>
-  <script type="text/javascript">
-    // Ensure MathJax processes the page after load
-    window.addEventListener('load', function() {
-      if (window.MathJax && window.MathJax.Hub) {
-        MathJax.Hub.Queue(["Typeset", MathJax.Hub]);
+      options: {
+        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre']
       }
-    });
+    };
   </script>
+  <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+  <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
   <style>
@@ -392,18 +385,18 @@
   </div>
 
 </body>
-
+  
   
 <section id="stem-architecture">
   <div class="container is-fluid">
     <div class="columns is-centered">
       <div class="column is-four-fifths">
-        <h2 class="title is-3" style="text-align: center;">
+          <h2 class="title is-3" style="text-align: center;">
           <img src="static/images/STEM/stem_logo.png" style="height: 64px; display: inline; vertical-align: middle;"/>
           &nbsp; STEM Architecture
-        </h2>
+          </h2>
 
-        <div class="content has-text-justified">
+          <div class="content has-text-justified">
           <div style="display: flex; gap: 30px; align-items: flex-start; flex-wrap: wrap;">
             <!-- Left column: Text content -->
             <div style="flex: 1 1 50%; min-width: 400px; padding-bottom: 20px;">
@@ -527,7 +520,7 @@
               <div class="message-body">
                 <span style="white-space: nowrap;"><b>Training ROI</b> = <i>Average downstream accuracy</i> / <i>Total training FLOPs</i></span>.
                 This lets you compare “how much accuracy you buy per unit of compute.”
-              </div>
+                </div>
             </article>
 
             <p>
@@ -543,7 +536,7 @@
                 <p style="margin-top: 8px; font-size: 13px; color: #666; text-align: center; font-style: italic;">
                   Loss vs. Training Tokens (350M)
                 </p>
-              </div>
+                </div>
               <div style="flex: 1 1 48%; min-width: 300px; background: #fff; padding: 16px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
                 <img src="static/images/STEM/loss_vs_training_flops_350M.jpg" alt="Loss vs Training FLOPs" style="width: 100%; height: auto; border-radius: 6px;" />
                 <p style="margin-top: 8px; font-size: 13px; color: #666; text-align: center; font-style: italic;">
@@ -551,7 +544,7 @@
                 </p>
               </div>
             </div>
-          </div>
+                </div>
 
           <!-- 2) Knowledge capacity -->
           <div class="box" style="border-left: 6px solid #7c3aed;">
@@ -577,8 +570,8 @@
                 <img src="static/images/STEM/angular_spread.jpg" alt="Angular Spread" style="width: 100%; height: auto; border-radius: 6px;" />
                 <p style="margin-top: 8px; font-size: 12px; color: #666; text-align: center; font-style: italic;">
                   Angular Spread
-                </p>
-              </div>
+            </p>
+          </div>
               <div style="flex: 1 1 32%; min-width: 250px; background: #fff; padding: 16px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
                 <img src="static/images/STEM/1B-ple8k-up_vs_ple_L10.jpg" alt="Up vs PLE" style="width: 100%; height: auto; border-radius: 6px;" />
                 <p style="margin-top: 8px; font-size: 12px; color: #666; text-align: center; font-style: italic;">
@@ -615,7 +608,7 @@
             <details open>
               <summary style="cursor: pointer; font-weight: 700; margin-bottom: 0.5rem;">
                 1B (Pretraining): downstream accuracy + compute/ROI
-              </summary>
+                </summary>
 
               <div class="table-container">
                 <table class="table is-striped is-hoverable is-fullwidth is-narrow">
@@ -734,7 +727,7 @@
                     </tr>
                   </tbody>
                 </table>
-              </div>
+                </div>
             </details>
 
             <!-- Table: Contextual reasoning -->
@@ -833,16 +826,16 @@
                     </tr>
                   </tbody>
                 </table>
-              </div>
+            </div>
             </details>
-
+            
+          </div>
           </div>
         </div>
       </div>
     </div>
-  </div>
 </section>
-
+  
 <!-- Section: Better Interpretability -->
 <section class="section hero is-light">
   <div class="container is-fluid">
@@ -859,7 +852,7 @@
 
             <div style="margin: 20px 0; text-align: center;">
               <img src="static/images/STEM/knowledge_inject.jpg" alt="Knowledge Editing with STEM" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" />
-            </div>
+                </div>
 
             <p style="margin-top: 0;">
               STEM embeddings enable <span style="color:#ec4899; font-weight:700;">direct knowledge editing</span> by replacing token embeddings while keeping the input text unchanged. This allows us to study how the model's factual knowledge is stored and can be manipulated.
@@ -874,7 +867,7 @@
                 <strong>Example:</strong> Replacing "Spain" → "Germany" in the prompt <em>"Country: Spain. Capital:"</em> causes the model to generate a paragraph about <strong>Berlin</strong> instead of Madrid, even though the input text still says "Spain".
               </p>
             </div>
-
+            
             <p>
               For different tokenization lengths, we use several strategies:
             </p>
@@ -898,8 +891,8 @@
               <p style="margin: 0; font-size: 13px; color: #555;">
                 <strong>Prompt:</strong> <em>"Country: United States of America. Capital:"</em><br>
                 <strong>After STEM replacement:</strong> Model generates text about <strong>London</strong> as "the world's largest financial center, home to the British Parliament..."
-              </p>
-            </div>
+                  </p>
+                </div>
 
             <div style="background: #f0fdf4; border-left: 4px solid #4ade80; padding: 15px; margin: 15px 0; border-radius: 4px;">
               <p style="margin: 0 0 8px 0; font-size: 14px; font-weight: 600;">Example: Country → State Transfer</p>
@@ -907,13 +900,13 @@
                 <strong>Source:</strong> <em>United States</em> (Country) → <strong>Target:</strong> <em>California</em> (State)<br>
                 <strong>Result:</strong> Model describes <strong>Sacramento</strong> as "California's political, cultural, and economic center..."
               </p>
-            </div>
+                </div>
 
             <p style="margin-top: 15px;">
               This interpretability demonstrates that STEM embeddings act as <span style="color:#ec4899; font-weight:700;">localized knowledge stores</span> that can be directly manipulated, providing insights into how the model organizes and retrieves factual information.
             </p>
-          </div>
-        </div>
+              </div>
+            </div>   
       </div>
     </div>
   </div>
@@ -937,7 +930,7 @@
           </div>
 
           <!-- 1) Parameter reduction -->
-          <div class="box" style="border-left: 6px solid #16a34a;">
+          <div class="box">
             <h3 class="title is-5" style="margin-bottom: 0.5rem;">1) 33% fewer FFN parameters → lower memory loading + fewer FLOPs</h3>
 
             <p style="margin-top: 0;">
@@ -949,9 +942,9 @@
                 <strong>Layer-level savings (SwiGLU):</strong><br>
                 • Decoding parameter load: <code>3·d·d<sub>ff</sub> → 2·d·d<sub>ff</sub></code> (≈ <strong>33% reduction</strong>)<br>
                 • Prefill/training FLOPs: reduced by replacing dense up-proj compute with a lookup
-              </p>
-            </div>
-          </div>
+                  </p>
+                </div>
+                </div>
 
           <!-- 2) CPU offload -->
           <div class="box" style="border-left: 6px solid #0ea5e9;">
@@ -964,8 +957,8 @@
             <p style="margin-top: 10px;">
               This is exactly what makes STEM practical: you get "big memory" without permanently parking it in HBM.
             </p>
-          </div>
-
+              </div>
+            
           <!-- 3) Prefilling -->
           <div class="box" style="border-left: 6px solid #7c3aed;">
             <h3 class="title is-5" style="margin-bottom: 0.5rem;">3) Making prefilling fast in practice</h3>
@@ -982,8 +975,8 @@
               <li><strong>Token deduplication:</strong> many tokens repeat within a prefill batch, so you only transfer <span style="color:#6d28d9; font-weight:700;">unique token embeddings</span>, cutting CPU→GPU traffic.</li>
               <li><strong>Asynchronous overlap:</strong> the reduced transfers can be <span style="color:#6d28d9; font-weight:700;">hidden behind layer computation</span> for practical speedups.</li>
             </ul>
-          </div>
-
+            </div>
+            
           <!-- 4) Decoding -->
           <div class="box" style="border-left: 6px solid #ec4899;">
             <h3 class="title is-5" style="margin-bottom: 0.5rem;">4) Efficient decoding with caching (the "hard" case)</h3>
@@ -1037,12 +1030,12 @@
           <div class="column is-four-fifths">
             <h2 class="title">BibTeX</h2>
             <pre><code>@misc{sadhukhan2026stemscalingtransformersembedding,
-              title={STEM: Scaling Transformers with Embedding Modules}, 
+      title={STEM: Scaling Transformers with Embedding Modules}, 
               author={Ranajoy Sadhukhan and Sheng Cao and Harry Dong and Changsheng Zhao and Attiano Purpura-Pontoniere and Yuandong Tian and Zechun Liu and Beidi Chen},
               year={2026},
               eprint={2601.10639},
-              archivePrefix={arXiv},
-              primaryClass={cs.LG},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
               url={https://arxiv.org/abs/2601.10639}, 
 }</code></pre>
         </div>
