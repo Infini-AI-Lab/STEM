@@ -270,14 +270,17 @@ distributed:
 
 ## Citation
 
-<!-- ```
-@misc{meta_lingua,
-  author = {Mathurin Videau and Badr Youbi Idrissi and Daniel Haziza and Luca Wehrstedt and Jade Copet and Olivier Teytaud and David Lopez-Paz},
-  title = {{Meta Lingua}: A minimal {PyTorch LLM} training library},
-  url = {https://github.com/facebookresearch/lingua},
-  year = {2024}
+```
+@misc{sadhukhan2026stemscalingtransformersembedding,
+      title={STEM: Scaling Transformers with Embedding Modules}, 
+      author={Ranajoy Sadhukhan and Sheng Cao and Harry Dong and Changsheng Zhao and Attiano Purpura-Pontoniere and Yuandong Tian and Zechun Liu and Beidi Chen},
+      year={2026},
+      eprint={2601.10639},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2601.10639}, 
 }
-``` -->
+```
 ## License
 
 STEM is licensed under BSD-3-Clause license. Refer to the LICENSE file in the top level directory.
