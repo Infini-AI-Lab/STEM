@@ -9,7 +9,7 @@
   <meta property="og:description" content="STEM: Scaling Transformers with Embedding Modules"/>
   <meta property="og:url" content="https://github.com/Infini-AI-Lab/STEM/"/>
   <!-- Path to banner image, should be in the path listed below. Optimal dimenssions are 1200X630-->
-  <meta property="og:image" content="static/images/icons/Bolt.png"/>
+  <meta property="og:image" content="static/images/STEM/stem_logo.png"/>
   <meta property="og:image:width" content="1200"/>
   <meta property="og:image:height" content="630"/>
 
@@ -25,7 +25,7 @@
 
 
   <title>STEM: Scaling Transformers with Embedding Modules</title>
-  <link rel="icon" type="image/x-icon" href="static/images/icons/Bolt.png">
+  <link rel="icon" type="image/x-icon" href="static/images/STEM/stem_logo.png">
   <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro"
   rel="stylesheet">
 
@@ -127,7 +127,7 @@
     <div class="container is-fluid">
       <div class="columns is-centered">
         <div class="column is-four-fifths has-text-centered">
-            <img src="static/images/icons/Bolt.png" alt="Magic Wand Icon" style="display: inline; height: 3rem; vertical-align: top;">
+            <img src="static/images/STEM/stem_logo.png" alt="STEM Logo" style="display: inline; height: 3rem; vertical-align: top;">
             <h1 class="title is-2 publication-title" style="display: inline;">STEM: Scaling Transformers with Embedding Modules</h1>
             
             <br><br>
@@ -399,7 +399,7 @@
     <div class="columns is-centered">
       <div class="column is-four-fifths">
         <h2 class="title is-3" style="text-align: center;">
-          <img src="static/images/icons/sparse_bolt.png" style="height: 64px; display: inline; vertical-align: middle;"/>
+          <img src="static/images/STEM/stem_logo.png" style="height: 64px; display: inline; vertical-align: middle;"/>
           &nbsp; STEM Architecture
         </h2>
 
@@ -505,7 +505,7 @@
     <div class="columns is-centered">
       <div class="column is-four-fifths">
         <h2 class="title is-3" style="text-align: center;">
-          <img src="static/images/icons/sparse_bolt.png" style="height: 64px; display: inline; vertical-align: middle;"/>
+          <img src="static/images/STEM/Stonks_emoji.png" style="height: 64px; display: inline; vertical-align: middle;"/>
           &nbsp; Improved Performance
         </h2>
 
@@ -919,6 +919,88 @@
   </div>
 </section>
 
+<!-- Section: Efficient Inference -->
+<section class="section hero is-light">
+  <div class="container is-fluid">
+    <div class="columns is-centered">
+      <div class="column is-four-fifths">
+        <h2 class="title is-3" style="text-align: center;">
+          <img src="static/images/icons/sparse_bolt.png" style="height: 64px; display: inline; vertical-align: middle;"/>
+          &nbsp; Efficient Inference
+        </h2>
+
+        <div class="content has-text-justified">
+          <div style="background: #ffffff; border-left: 4px solid #4b6cb7; border-radius: 6px; padding: 16px 24px; font-size: 16px; line-height: 1.6; color: #333; margin-bottom: 25px;">
+            <p style="margin: 0;">
+              STEM is designed to <span style="color:#1e88e5; font-weight:700;">scale parametric memory without paying the usual inference tax</span>. By replacing the dense up-projection with a token-indexed embedding lookup (while keeping gate + down-projection dense), STEM removes <span style="color:#16a34a; font-weight:700;">~33% of FFN parameters</span>, making both memory traffic and compute cheaper.
+            </p>
+          </div>
+
+          <!-- 1) Parameter reduction -->
+          <div class="box" style="border-left: 6px solid #16a34a;">
+            <h3 class="title is-5" style="margin-bottom: 0.5rem;">1) 33% fewer FFN parameters → lower memory loading + fewer FLOPs</h3>
+
+            <p style="margin-top: 0;">
+              In a standard gated FFN, decoding is often <span style="color:#b91c1c; font-weight:700;">memory-bound</span>: throughput is limited by how fast you can stream FFN weights from HBM. STEM reduces this pressure by <span style="color:#16a34a; font-weight:700;">eliminating one-third of FFN parameters</span>, directly cutting the "parameter loading cost" per layer during decoding.
+            </p>
+
+            <div style="background: #f0fdf4; border-left: 4px solid #16a34a; padding: 12px 16px; margin: 12px 0; border-radius: 4px;">
+              <p style="margin: 0; font-size: 14px;">
+                <strong>Layer-level savings (SwiGLU):</strong><br>
+                • Decoding parameter load: <code>3·d·d<sub>ff</sub> → 2·d·d<sub>ff</sub></code> (≈ <strong>33% reduction</strong>)<br>
+                • Prefill/training FLOPs: reduced by replacing dense up-proj compute with a lookup
+              </p>
+            </div>
+          </div>
+
+          <!-- 2) CPU offload -->
+          <div class="box" style="border-left: 6px solid #0ea5e9;">
+            <h3 class="title is-5" style="margin-bottom: 0.5rem;">2) CPU offload + deterministic indexing enables prefetching</h3>
+
+            <p style="margin-top: 0;">
+              STEM uses <span style="color:#0284c7; font-weight:700;">large layer-local embedding tables</span>, which can be <span style="color:#0284c7; font-weight:700;">offloaded to CPU memory</span> during inference. Crucially, because embeddings are <span style="color:#0284c7; font-weight:700;">indexed purely by token IDs</span>, their access pattern is <em>predictable</em>—so they can be <span style="color:#0284c7; font-weight:700;">prefetched asynchronously and overlapped with GPU compute</span>.
+            </p>
+
+            <p style="margin-top: 10px;">
+              This is exactly what makes STEM practical: you get "big memory" without permanently parking it in HBM.
+            </p>
+          </div>
+
+          <!-- 3) Prefilling -->
+          <div class="box" style="border-left: 6px solid #7c3aed;">
+            <h3 class="title is-5" style="margin-bottom: 0.5rem;">3) Making prefilling fast in practice</h3>
+
+            <p style="margin-top: 0;">
+              Prefill is the easy case for overlap: the full prompt tokens are known upfront, so the runtime can prefetch embeddings <span style="color:#6d28d9; font-weight:700;">ahead of time</span>.
+            </p>
+
+            <p style="margin-top: 10px;">
+              Two implementation tricks make this even faster:
+            </p>
+
+            <ul style="line-height: 1.8; margin-top: 8px;">
+              <li><strong>Token deduplication:</strong> many tokens repeat within a prefill batch, so you only transfer <span style="color:#6d28d9; font-weight:700;">unique token embeddings</span>, cutting CPU→GPU traffic.</li>
+              <li><strong>Asynchronous overlap:</strong> the reduced transfers can be <span style="color:#6d28d9; font-weight:700;">hidden behind layer computation</span> for practical speedups.</li>
+            </ul>
+          </div>
+
+          <!-- 4) Decoding -->
+          <div class="box" style="border-left: 6px solid #ec4899;">
+            <h3 class="title is-5" style="margin-bottom: 0.5rem;">4) Efficient decoding with caching (the "hard" case)</h3>
+
+            <p style="margin-top: 0;">
+              Decoding is trickier due to autoregressivity: you only know the next token <span style="color:#be185d; font-weight:700;">after</span> completing the current step, so prefetching has less lookahead.
+            </p>
+
+            <p style="margin-top: 10px;">
+              STEM addresses this with a simple but effective observation: token frequencies follow a <span style="color:#ec4899; font-weight:700;">Zipfian distribution</span>, so a small number of tokens dominate accesses. This enables a <span style="color:#ec4899; font-weight:700;">memory-efficient LFU cache</span> with <span style="color:#16a34a; font-weight:700;">>80% hit rate</span>, greatly reducing CPU→GPU transfers during generation.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
 
 <!-- Section: Conclusion and Future Work -->
 <section class="section hero is-light">
