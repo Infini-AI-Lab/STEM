@@ -1,6 +1,25 @@
 # STEM: Scaling Transformers with Embedding Modules
 
-Ranajoy Sadhukhan, Sheng Cao, Harry Dong, Changsheng Zhao, Attiano Purpura-Pontoniere, Yuandong Tian, Zechun Liu*, Beidi Chen*.
+## Authors
+
+<div align="center">
+
+### Authors
+
+Ranajoy Sadhukhan<sup>1,2</sup>, Sheng Cao<sup>2</sup>, Harry Dong<sup>1</sup>, Changsheng Zhao<sup>2</sup>,  
+Attiano Purpura-Pontoniere<sup>2</sup>, Yuandong Tian<sup>2</sup>, Zechun Liu<sup>2</sup>, Beidi Chen<sup>1</sup>
+
+<sup>1</sup> Carnegie Mellon University &nbsp;&nbsp; <sup>2</sup> Meta AI
+
+</div>
+
+<div align="center">
+[<a href="https://arxiv.org/abs/2410.16179">Paper</a>] | [<a href="https://sites.google.com/view/
+magicpig-llm">Blog</a>]
+</div>
+<br>
+
+----------
 
 This repository is an implementation of STEM. The training scripts are built on top of Meta Lingua which is a minimal and fast training library. Unlike standard transformer with gated FFNs, STEM replaces the up-projection matrix multiplication in each FFN layer with a token-indexed embedding lookup table. STEM provides improved ***knowledge storage capacity***, ***interpretability***, and ***efficiency*** in both training and inference. 
 
