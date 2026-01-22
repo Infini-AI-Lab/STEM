@@ -1,0 +1,12 @@
+*.pyc
+*.log
+.vscode
+*.ipynb
+slurm-*.out
+wandb
+tokenizer
+data
+logs
+**/__pycache__
+inference/checkpoints
+inference/tests/Data
