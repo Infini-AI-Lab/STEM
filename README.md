@@ -1,10 +1,6 @@
 # STEM: Scaling Transformers with Embedding Modules
 
-## Authors
-
 <div align="center">
-
-### Authors
 
 Ranajoy Sadhukhan<sup>1,2</sup>, Sheng Cao<sup>2</sup>, Harry Dong<sup>1</sup>, Changsheng Zhao<sup>2</sup>,  
 Attiano Purpura-Pontoniere<sup>2</sup>, Yuandong Tian<sup>2</sup>, Zechun Liu<sup>2</sup>, Beidi Chen<sup>1</sup>
