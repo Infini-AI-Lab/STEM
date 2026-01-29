@@ -10,8 +10,7 @@ Attiano Purpura-Pontoniere<sup>2</sup>, Yuandong Tian<sup>2</sup>, Zechun Liu<su
 </div>
 
 <div align="center">
-[<a href="https://arxiv.org/abs/2410.16179">Paper</a>] | [<a href="https://sites.google.com/view/
-magicpig-llm">Blog</a>]
+[<a href="https://arxiv.org/pdf/2601.10639">Paper</a>] | [<a href="https://infini-ai-lab.github.io/STEM/">Blog</a>]
 </div>
 <br>
 
