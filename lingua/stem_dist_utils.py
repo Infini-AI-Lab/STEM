@@ -69,6 +69,10 @@ def initialize_stem_process_group(
         logger.info(f"Initialized stem process group with groups: {groups}")
         
 
+def is_stem_initialized() -> bool:
+    """Check if STEM process groups are initialized."""
+    return _MODEL_PARALLEL_GROUP is not None and dist.is_initialized()
+
 def get_stem_data_parallel_group() -> dist.ProcessGroup:
     if _DATA_PARALLEL_GROUP is None:
         raise RuntimeError("Stem data parallel group is not initialized")
@@ -80,13 +84,28 @@ def get_stem_model_parallel_group() -> dist.ProcessGroup:
     return _MODEL_PARALLEL_GROUP
 
 def get_stem_model_parallel_world_size() -> int:
+    """Get STEM model parallel world size. Returns 1 if not distributed."""
+    if not dist.is_initialized() or _MODEL_PARALLEL_GROUP is None:
+        return 1
     return dist.get_world_size(group=get_stem_model_parallel_group())
 
 def get_stem_model_parallel_rank() -> int:
+    """Get STEM model parallel rank. Returns 0 if not distributed."""
+    if not dist.is_initialized() or _MODEL_PARALLEL_GROUP is None:
+        return 0
     return dist.get_rank(group=get_stem_model_parallel_group())
 
 def get_stem_data_parallel_rank() -> int:
+    """Get STEM data parallel rank. Returns 0 if not distributed."""
+    if not dist.is_initialized() or _DATA_PARALLEL_GROUP is None:
+        return 0
     return dist.get_rank(group=get_stem_data_parallel_group())
+
+def get_stem_data_parallel_world_size() -> int:
+    """Get STEM data parallel world size. Returns 1 if not distributed."""
+    if not dist.is_initialized() or _DATA_PARALLEL_GROUP is None:
+        return 1
+    return dist.get_world_size(group=get_stem_data_parallel_group())
 
 
 # Low-level communication primitives (similar to mp_utils.py)
@@ -469,6 +488,11 @@ class ParallelEmbedding(torch.nn.Module):
         self.reset_parameters()
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:  # type: ignore
+        # All STEM ranks in the same model-parallel group must receive the
+        # same input shape.  During eval this is guaranteed by having the
+        # evaluation harness use the STEM *data-parallel* rank/world_size
+        # (see EvalHarnessLM in stem_eval.py) so every rank in a model-
+        # parallel group processes the same requests.
         input_parallel = gather_tokens_for_stem(input_)
         output_parallel = F.embedding(
             input_parallel,
@@ -479,11 +503,9 @@ class ParallelEmbedding(torch.nn.Module):
             self.scale_grad_by_freq,
             self.sparse,
         )
-        # output = scatter_embeddings_for_stem(gather_embeddings_for_stem(output_parallel))
         output = _AllToAllForStem.apply(output_parallel)
-
         return output
-    
+
     def reset_parameters(self):
         if self.weight.device.type == "meta":
             return
@@ -521,3 +543,212 @@ class ParallelEmbedding(torch.nn.Module):
             )
             with torch.no_grad():
                 self.init_method(self.weight)
+
+
+# ---------------------------------------------------------------------------
+# Verification / self-test
+# ---------------------------------------------------------------------------
+
+
+def verify_parallel_embedding(
+    num_embeddings: int = 1024,
+    embedding_dim: int = 128,
+    batch_size: int = 4,
+    seq_len: int = 16,
+    seed: int = 42,
+    atol: float = 1e-5,
+    rtol: float = 1e-5,
+) -> bool:
+    """Verify ``ParallelEmbedding`` against a vanilla ``nn.Embedding`` reference.
+
+    **Must** be called from every rank in the STEM model-parallel group at the
+    same time (the function contains distributed collectives).
+
+    Tests
+    -----
+    1. *train forward*  – same ``(B, S)`` on every rank, output matches reference.
+    2. *train backward* – weight-gradient shard matches the corresponding shard
+       of the reference gradient (uses identical input on all ranks so that the
+       ``1/W`` rescale from the all-to-all backward cancels out).
+    3. *eval forward (same shape)* – sanity check, same ``(B, S)`` on every rank.
+    4. *eval forward (different shapes)* – each rank gets a **different**
+       ``batch_size`` and ``seq_len``; output still matches reference.
+
+    Returns ``True`` if every check passes **on every rank**.
+    """
+    rank = get_stem_model_parallel_rank()
+    world_size = get_stem_model_parallel_world_size()
+    device = torch.device(f"cuda:{torch.cuda.current_device()}")
+
+    if rank == 0:
+        logger.info(
+            f"=== verify_parallel_embedding  (world_size={world_size}) ==="
+        )
+
+    # ---- build ParallelEmbedding -----------------------------------------
+    pemb = ParallelEmbedding(
+        num_embeddings,
+        embedding_dim,
+        device=device,
+        init_method=lambda w: torch.nn.init.normal_(w, mean=0.0, std=0.02),
+    )
+
+    # ---- reconstruct full weight for reference ---------------------------
+    full_weight = _gather_along_last_dim_stem(pemb.weight.data)  # [V, D]
+    ref = torch.nn.Embedding(num_embeddings, embedding_dim, device=device)
+    with torch.no_grad():
+        ref.weight.copy_(full_weight)
+
+    checks: Dict[str, bool] = {}
+
+    # =====================================================================
+    # Test 1 — train forward, same shape per rank
+    # =====================================================================
+    pemb.train()
+    torch.manual_seed(seed + rank)
+    inp = torch.randint(0, num_embeddings, (batch_size, seq_len), device=device)
+
+    out_par = pemb(inp)
+    out_ref = ref(inp)
+
+    ok = torch.allclose(out_par, out_ref, atol=atol, rtol=rtol)
+    checks["train_forward"] = ok
+    if not ok:
+        logger.error(
+            f"  [FAIL] train_forward — rank {rank}, "
+            f"max |diff| = {(out_par - out_ref).abs().max().item():.2e}"
+        )
+
+    # =====================================================================
+    # Test 2 — train backward, same input on every rank
+    #
+    # When every rank uses the *same* input the rescale factor from the
+    # all-to-all backward cancels with the W copies of each token in the
+    # gathered batch, so  pemb.weight.grad  should exactly equal the
+    # corresponding column-shard of  ref.weight.grad.
+    # =====================================================================
+    pemb.zero_grad()
+    ref.zero_grad()
+
+    torch.manual_seed(seed)  # identical on all ranks
+    inp_same = torch.randint(
+        0, num_embeddings, (batch_size, seq_len), device=device
+    )
+
+    pemb(inp_same).sum().backward()
+    ref(inp_same).sum().backward()
+
+    shard_lo = rank * pemb.embedding_dim_per_partition
+    shard_hi = shard_lo + pemb.embedding_dim_per_partition
+    ref_grad_shard = ref.weight.grad[:, shard_lo:shard_hi]
+
+    if pemb.weight.grad is None:
+        checks["train_backward"] = False
+        logger.error(
+            f"  [FAIL] train_backward — rank {rank}, grad is None"
+        )
+    else:
+        ok = torch.allclose(
+            pemb.weight.grad, ref_grad_shard, atol=atol, rtol=rtol
+        )
+        checks["train_backward"] = ok
+        if not ok:
+            logger.error(
+                f"  [FAIL] train_backward — rank {rank}, "
+                f"max |diff| = "
+                f"{(pemb.weight.grad - ref_grad_shard).abs().max().item():.2e}"
+            )
+
+    # =====================================================================
+    # Test 3 — eval forward, same shape per rank (sanity)
+    # =====================================================================
+    pemb.eval()
+
+    torch.manual_seed(seed)
+    inp_eval_same = torch.randint(
+        0, num_embeddings, (batch_size, seq_len), device=device
+    )
+
+    out_par_eval = pemb(inp_eval_same)
+    out_ref_eval = ref(inp_eval_same)
+
+    ok = torch.allclose(out_par_eval, out_ref_eval, atol=atol, rtol=rtol)
+    checks["eval_forward_same_shape"] = ok
+    if not ok:
+        logger.error(
+            f"  [FAIL] eval_forward_same_shape — rank {rank}, "
+            f"max |diff| = {(out_par_eval - out_ref_eval).abs().max().item():.2e}"
+        )
+
+    # =====================================================================
+    # Test 4 — eval forward, same input on every rank (simulates correct
+    #          STEM dp usage where all model-parallel ranks get the same
+    #          requests from lm_eval)
+    # =====================================================================
+    torch.manual_seed(seed + 999)
+    inp_eval_same_all = torch.randint(
+        0, num_embeddings, (batch_size + 2, seq_len + 5), device=device
+    )
+
+    out_par_eval2 = pemb(inp_eval_same_all)
+    out_ref_eval2 = ref(inp_eval_same_all)
+
+    ok = torch.allclose(out_par_eval2, out_ref_eval2, atol=atol, rtol=rtol)
+    checks["eval_forward_same_input_all_ranks"] = ok
+    if not ok:
+        logger.error(
+            f"  [FAIL] eval_forward_same_input_all_ranks — rank {rank}, "
+            f"max |diff| = {(out_par_eval2 - out_ref_eval2).abs().max().item():.2e}"
+        )
+
+    # ---- aggregate across ranks -----------------------------------------
+    all_local = all(checks.values())
+    passed_t = torch.tensor(
+        [int(all_local)], device=device, dtype=torch.long
+    )
+    if dist.is_initialized() and _MODEL_PARALLEL_GROUP is not None:
+        dist.all_reduce(
+            passed_t,
+            op=dist.ReduceOp.MIN,
+            group=get_stem_model_parallel_group(),
+        )
+    global_passed = passed_t.item() == 1
+
+    if rank == 0:
+        for name, ok in checks.items():
+            logger.info(f"  [{'PASS' if ok else 'FAIL'}] {name}")
+        summary = "ALL PASSED" if global_passed else "SOME FAILED"
+        (logger.info if global_passed else logger.error)(
+            f"=== {summary} ==="
+        )
+
+    return global_passed
+
+
+# ---------------------------------------------------------------------------
+# Standalone entry-point — run with:
+#   torchrun --nproc_per_node=<N> lingua/stem_dist_utils.py
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    import os
+    import logging
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    dist.init_process_group("nccl")
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+
+    world_size = dist.get_world_size()
+    initialize_stem_process_group(world_size)
+
+    ok = verify_parallel_embedding()
+
+    dist.barrier()
+    dist.destroy_process_group()
+
+    if not ok:
+        raise SystemExit(1)

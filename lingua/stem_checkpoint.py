@@ -74,48 +74,30 @@ def extract_stem_optimizer_state_dict(
     
     Returns a filtered optimizer state dict containing only states for ParallelEmbedding parameters.
     """
-    # Get full optimizer state dict
-    full_optim_state = stem_optimizer.state_dict()
+    # Get set of stem parameter objects
+    stem_params_set = {p for _, p in _iter_stem_params(model)}
     
-    # Get set of stem parameter IDs
-    stem_param_ids = {id(p) for _, p in _iter_stem_params(model)}
+    # Filter optimizer.state to only include stem parameters
+    # optimizer.state uses actual parameter tensors as keys
+    filtered_state = {}
+    for param, state in stem_optimizer.state.items():
+        if param in stem_params_set:
+            filtered_state[param] = state
     
-    # Map parameter objects to their state
-    param_id_to_state = full_optim_state["state"]
-    
-    # Filter state dict to only include stem parameters
-    filtered_state = {
-        "state": {},
-        "param_groups": [],
-    }
-    
-    # Find which param_groups contain stem parameters and filter states
+    # Build param_groups containing only stem params
+    # optimizer.param_groups has actual parameter tensors in "params" list
     filtered_param_groups = []
-    for group_idx, group in enumerate(full_optim_state["param_groups"]):
-        # Filter params in this group to only stem params
-        stem_params = []
-        for param in group["params"]:
-            # param is the actual parameter object - check its ID
-            if id(param) in stem_param_ids:
-                stem_params.append(param)
-        
-        if stem_params:
-            # Create new param group with only stem params
-            filtered_group = {
-                **group,
-                "params": stem_params,
-            }
+    for group in stem_optimizer.param_groups:
+        stem_params_in_group = [p for p in group["params"] if p in stem_params_set]
+        if stem_params_in_group:
+            filtered_group = {k: v for k, v in group.items() if k != "params"}
+            filtered_group["params"] = stem_params_in_group
             filtered_param_groups.append(filtered_group)
-            
-            # Copy states for stem params only
-            for param in stem_params:
-                if param in param_id_to_state:
-                    filtered_state["state"][param] = param_id_to_state[param]
     
-    # Update param_groups
-    filtered_state["param_groups"] = filtered_param_groups
-    
-    return filtered_state
+    return {
+        "state": filtered_state,
+        "param_groups": filtered_param_groups,
+    }
 
 
 
@@ -176,7 +158,6 @@ def split_backbone_and_stem_state_dict(
     stem_optim_sd = None
     if stem_optimizer is not None:
         stem_optim_sd = extract_stem_optimizer_state_dict(stem_optimizer, model)
-
     return fsdp_state_dict, stem_model_sd, stem_optim_sd
 
 
@@ -197,18 +178,22 @@ def save_stem_shards(
     if not stem_model_sd and not stem_optim_sd:
         return
 
+    # Ensure stem_shards directory exists before any rank writes.
+    # The mkdir is done by rank 0; the barrier must include ALL ranks
+    # (not just dp_rank == 0) to keep the global-PG operation count
+    # balanced — otherwise downstream barriers/collectives will mismatch.
+    stem_dir = ckpt_dir / STEM_SUBDIR_NAME
+    if get_is_master() and not stem_dir.exists():
+        stem_dir.mkdir(parents=False, exist_ok=True)
+    if dist.is_initialized():
+        dist.barrier()
+
     mp_rank = get_stem_model_parallel_rank()
     dp_rank = get_stem_data_parallel_rank()
 
     # Save only one DP replica per MP shard to avoid duplicates
     if dp_rank != 0:
         return
-
-    stem_dir = ckpt_dir / STEM_SUBDIR_NAME
-    if get_is_master() and not stem_dir.exists():
-        stem_dir.mkdir(parents=False, exist_ok=True)
-    if dist.is_initialized():
-        dist.barrier()
 
     # Save model parameters
     if stem_model_sd:
@@ -391,7 +376,7 @@ def consolidate_stem_shards(ckpt_dir: str):
     Returns the path to the consolidated checkpoint
     """
     consolidate_path = Path(ckpt_dir) / CONSOLIDATE_FOLDER
-    stem_dir = consolidate_path / STEM_SUBDIR_NAME
+    stem_dir = ckpt_dir / STEM_SUBDIR_NAME
     consolidate_state_dict = {}
     for shard_file in stem_dir.glob("stem_model_mp*.pt"):
         state_dict = torch.load(shard_file, map_location="cpu")

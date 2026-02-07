@@ -41,6 +41,7 @@ class BaseTransformerArgs:
     norm_eps: float = 1e-5
 
     rope_theta: float = 10000.0
+    rope_scaling: Optional[dict] = None
 
     init_base_std: Optional[float] = None
     init_std_factor: str = "disabled"
@@ -69,7 +70,29 @@ def repeat_kv(x: torch.Tensor, n_rep: int, dim: int) -> torch.Tensor:
     )
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+def apply_rope_scaling(freqs: torch.Tensor, rope_scaling: Optional[dict] = None):
+    factor = rope_scaling["factor"]
+    low_freq_factor = rope_scaling["low_freq_factor"]
+    high_freq_factor = rope_scaling["high_freq_factor"]
+    old_context_len = rope_scaling["original_max_position_embeddings"]
+
+    low_freq_wavelen = old_context_len / low_freq_factor
+    high_freq_wavelen = old_context_len / high_freq_factor
+    new_freqs = []
+    for freq in freqs:
+        wavelen = 2 * math.pi / freq
+        if wavelen < high_freq_wavelen:
+            new_freqs.append(freq)
+        elif wavelen > low_freq_wavelen:
+            new_freqs.append(freq / factor)
+        else:
+            assert low_freq_wavelen != high_freq_wavelen
+            smooth = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+            new_freqs.append((1 - smooth) * freq / factor + smooth * freq)
+    return torch.tensor(new_freqs, dtype=freqs.dtype, device=freqs.device)
+
+
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, rope_scaling: Optional[dict]=None):
     """
     Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
 
@@ -86,6 +109,9 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
         torch.Tensor: Precomputed frequency tensor with complex exponentials.
     """
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    if rope_scaling is not None:
+        freqs = apply_rope_scaling(freqs, rope_scaling)
+        
     t = torch.arange(end, device=freqs.device)
     freqs = torch.outer(t, freqs).float()
 

@@ -138,7 +138,7 @@ class StemLMTransformer(nn.Module):
         # Create stem_embeddings separately (not part of lm_transformer, manually managed)
         assert args.stem_embedding_dim is not None, "stem_embedding_dim must be provided when using StemLMTransformer"
         # Get device from existing parameters to ensure stem_embeddings are on the same device
-        device = self.lm_transformer.output.weight.device
+        device = next(iter(self.lm_transformer.parameters())).device
         self.stem_embeddings = nn.ModuleList([
             ParallelEmbedding(args.vocab_size, args.stem_embedding_dim, device=device) 
             for _ in range(len(self.lm_transformer.stem_layers))

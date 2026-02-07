@@ -83,6 +83,8 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32):
         "fineweb_edu_10bt": "HuggingFaceFW/fineweb-edu",
         "dclm_baseline_1.0": "mlfoundations/dclm-baseline-1.0",
         "dclm_baseline_1.0_10prct": "mlfoundations/dclm-baseline-1.0",
+        "dolmino-mix": "allenai/dolma3_dolmino_mix-100B-1125",
+        "dolmino-mix-subset": "allenai/dolma3_dolmino_mix-100B-1125",
     }[dataset]
     src_dir = f"{data_dir}/{dataset}"
     out_dir = f"{src_dir}_shuffled"
@@ -94,18 +96,24 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32):
         "fineweb_edu_10bt": ".jsonl",
         "dclm_baseline_1.0": ".jsonl.zst",
         "dclm_baseline_1.0_10prct": ".jsonl.zst",
+        "dolmino-mix": ".jsonl.zst",
+        "dolmino-mix-subset": ".jsonl.zst",
     }[dataset]
     cat_command = {
         "fineweb_edu": "cat {}",
         "fineweb_edu_10bt": "cat {}",
         "dclm_baseline_1.0": "zstdcat {} && echo",
         "dclm_baseline_1.0_10prct": "zstdcat {} && echo",
+        "dolmino-mix": "zstdcat {} && echo",
+        "dolmino-mix-subset": "zstdcat {} && echo",
     }[dataset]
     allow_patterns = {
         "fineweb_edu": None,
         "fineweb_edu_10bt": "sample/10BT/*",
         "dclm_baseline_1.0": "*.jsonl.zst",
         "dclm_baseline_1.0_10prct": "global-shard_01_of_10/*.jsonl.zst",
+        "dolmino-mix": "*.jsonl.zst",
+        "dolmino-mix-subset": "data/ingredient1-common_crawl-high-quality_20_science_math_and_technology/*.jsonl.zst",
     }[dataset]
     suffix = ".jsonl"
     k_validation = 10000  # Number of lines to take from each chunk for validation
@@ -129,7 +137,6 @@ def main(dataset, memory, data_dir, seed=42, nchunks=32):
         f"ulimit -n 100000 && "
         f"find {src_dir} -type f -name '*{orig_extension}' -print0 | xargs -0 -I {{}} sh -c '{cat_command}' | {terashuf_executable} | "
         f"split -n r/{nchunks} -d --suffix-length 2 --additional-suffix {suffix} - {out_dir}/{prefix}"
-        "; trap 'echo \"Caught signal 13, exiting with code 1\"; exit 1' SIGPIPE;"
     )
 
     # Create validation set and remove lines from chunks

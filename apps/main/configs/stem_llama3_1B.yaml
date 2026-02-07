@@ -1,14 +1,15 @@
-dump_dir: logs/stem_debug
-name: "stem_debug"
-steps: 1000
+dump_dir: logs/debug
+name: "stem_llama3_1B"
+steps: 60_000
 probe_freq: 100
 seed: 777
 
 optim:
-    lr: 3e-4
+    lr: 2e-5
+    weight_decay: 0.033
     warmup: 2000
     lr_min_ratio: 0.000001
-    clip: 10.0
+    clip: 1.0
 
 distributed:
     fsdp_type: full_shard
@@ -20,37 +21,52 @@ distributed:
     stem_parallel_size: 4
 
 model:
-    dim: 1024
-    n_layers: 8
-    n_heads: 8
-    stem_layers: [2, 4, 6]
+    dim: 2048
+    ffn_dim_multiplier: 1.5
+    n_layers: 16
+    n_heads: 32
+    n_kv_heads: 8
+    head_dim: 64
+    weight_tying: True
+    init_base_std: 0.02
+    init_std_factor: disabled
+    max_seqlen: 8192
+    rope_theta: 500000.0
+    stem_layers: [1, 3, 5, 7, 9, 11, 13, 15]
 
 data:
     root_dir: data/shuffled
     sources:
         fineweb_edu_10bt: 1.0
-    batch_size: 4
-    prefetch_size: 64
-    seq_len: 2048
+    batch_size: 8
+    prefetch_size: 1024
+    seq_len: 4096
     n_views: 2
     load_async: true
+    add_bos: true
+    add_eos: true
     tokenizer:
-        name: bytes
+        name: tiktoken
         path: tokenizer/original/tokenizer.model
 
 profiling:
     run: true
 
 checkpoint:
+    # path: logs/debug/checkpoints
+    init_ckpt_path: checkpoints/Llama-3.2-1B/distcp
     dump:
         every: 100
         keep: 1
     eval:
-        every: 100000
+        every: 100
         keep: 1
 
 logging:
     freq: 10
+    wandb:
+        project: "stem"
+        name: "stem-test"
 
 eval:
     generator:
@@ -62,7 +78,9 @@ eval:
         tasks:
             - hellaswag
             - piqa
-            - task: nq_open
-              num_fewshot: 5
+            # - task: nq_open
+            #   num_fewshot: 5
+        limit: 100
     validation:
         max_steps: 100
+

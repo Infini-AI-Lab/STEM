@@ -2,7 +2,7 @@
 
 dump_dir: logs/debug
 name: "debug"
-steps: 1000
+steps: 200
 probe_freq: 100
 seed: 777
 optim:
@@ -25,9 +25,9 @@ model:
     n_heads: 8
 
 data:
-    root_dir: data/shuffled
+    root_dir: data/dolmino-mix-subset_shuffled
     sources:
-        fineweb_edu_10bt: 1.0
+        ingredient1-common_crawl-high-quality_20_science_math_and_technology: 1.0
     batch_size: 4
     prefetch_size: 64
     seq_len: 2048
@@ -45,7 +45,7 @@ checkpoint:
         every: 100
         keep: 1
     eval:
-        every: 100000
+        every: 100
         keep: 1
 
 logging:

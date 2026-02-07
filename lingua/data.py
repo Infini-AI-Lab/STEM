@@ -173,6 +173,9 @@ def read_jsonl(
     with open(file_path, "r") as file:
         file.seek(position)
         while line := file.readline():
+            # Skip empty lines (can occur from data preparation with zstdcat)
+            if not line.strip():
+                continue
             current_line += 1
             if (current_line - 1) % block_size == offset:
                 # We return state that will allow resuming from this position

@@ -66,7 +66,35 @@ from apps.main.transformer import (
     get_no_recompute_ops,
     get_num_flop_per_token,
 )
-from lingua.stem_dist_utils import initialize_stem_process_group
+from lingua.stem_dist_utils import (
+    initialize_stem_process_group,
+    get_stem_data_parallel_group,
+    get_stem_data_parallel_rank,
+    get_stem_data_parallel_world_size,
+)
+
+
+def sync_stem_embeddings_across_dp(model):
+    """Broadcast stem_embeddings weights from dp_rank 0 to all STEM data-parallel ranks.
+
+    This ensures all DP ranks start with identical stem_embeddings weights,
+    which is required because:
+      - FSDP-sharded lm_transformer init may consume different amounts of RNG
+        on different ranks, causing the RNG state to diverge by the time
+        stem_embeddings are initialized.
+      - reset_stem_embeddings() after checkpoint loading also uses RNG.
+
+    Must be called after any stem_embeddings initialization or reset.
+    """
+    if get_stem_data_parallel_world_size() <= 1:
+        return  # Single DP group, nothing to sync
+
+    dp_group = get_stem_data_parallel_group()
+    # Rank 0 within the DP group is the source of truth
+    src_rank = torch.distributed.get_global_rank(dp_group, 0)
+    for param in model.stem_embeddings.parameters():
+        torch.distributed.broadcast(param.data, src=src_rank, group=dp_group)
+    logger.info("Synchronized stem_embeddings weights across STEM data-parallel ranks")
 
 import wandb
 
@@ -168,6 +196,9 @@ def train(args: StemTrainArgs):
             with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
                 torch.manual_seed(args.model.seed)
                 model.init_weights()
+            # Ensure stem_embeddings are identical across DP ranks
+            # (RNG state may diverge due to FSDP-sharded lm_transformer init)
+            sync_stem_embeddings_across_dp(model)
         
         # Verify stem_embeddings are initialized after init_weights()
         for i, embedding in enumerate(model.stem_embeddings):
@@ -250,18 +281,27 @@ def train(args: StemTrainArgs):
         if args.checkpoint.init_ckpt_path:
             logger.info(f"Loading initial model from {args.checkpoint.init_ckpt_path}")
             from lingua.stem_checkpoint import load_from_checkpoint
-            load_from_checkpoint(
-                args.checkpoint.init_ckpt_path, 
-                model, 
-                optimizer=optimizer,
-                model_key="model"
-            )
+            if args.checkpoint.continue_training_from_init:
+                load_from_checkpoint(
+                    args.checkpoint.init_ckpt_path, 
+                    model, 
+                    optimizer=optimizer,
+                    model_key="model"
+                )
+            else:
+                load_from_checkpoint(
+                    args.checkpoint.init_ckpt_path, 
+                    model, 
+                    model_key="model"
+                )
             model.rope_embeddings.reset_parameters() # For RoPe initialization since it's a buffer it might not be loaded
             # Ensure stem_embeddings are initialized even when loading from checkpoint
             # (in case they're not in the checkpoint)
             with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
                 torch.manual_seed(args.model.seed)
                 model.reset_stem_embeddings()
+            # Ensure stem_embeddings are identical across DP ranks after reset
+            sync_stem_embeddings_across_dp(model)
         
         # Load from latest checkpoint (or continue from init checkpoint)
         checkpoint.load(model, optimizer, train_state, world_mesh)
@@ -421,6 +461,20 @@ def train(args: StemTrainArgs):
                                 f"have zero gradients."
                             )
 
+                # Sync stem_embeddings gradients across STEM data-parallel ranks.
+                # FSDP handles gradient sync for lm_transformer, but stem_embeddings
+                # are managed manually and need an explicit all-reduce when there are
+                # multiple data-parallel groups (e.g. multi-node with intra-node STEM MP).
+                if get_stem_data_parallel_world_size() > 1:
+                    dp_group = get_stem_data_parallel_group()
+                    for param in model.stem_embeddings.parameters():
+                        if param.grad is not None:
+                            torch.distributed.all_reduce(
+                                param.grad,
+                                op=torch.distributed.ReduceOp.AVG,
+                                group=dp_group,
+                            )
+
                 optimizer["lm"].step()
                 optimizer["stem"].step()
                 scheduler["lm"].step()
@@ -542,16 +596,17 @@ def train(args: StemTrainArgs):
             if args.eval is not None and (every_n_steps(
                 train_state, args.checkpoint.eval.every, acc_step=0
             ) or every_n_steps(train_state, args.steps, acc_step=0)):
-                from apps.main.eval import (
-                    launch_eval,
+                from apps.main.stem_eval import (
+                    launch_stem_eval,
                     EVAL_FOLDER_NAME,
-                    EvalArgs,
+                    StemEvalArgs,
                 )
 
-                eval_args = dataclass_from_dict(EvalArgs, args.eval)
+                eval_args = dataclass_from_dict(StemEvalArgs, args.eval)
 
                 eval_args.global_step = train_state.step
                 eval_args.ckpt_dir = str(checkpoint.existing_saves[-1])
+                eval_args.stem_parallel_size = args.distributed.stem_parallel_size
                 eval_args.dump_dir = str(
                     os.path.join(
                         args.dump_dir,
@@ -561,7 +616,7 @@ def train(args: StemTrainArgs):
                 )
                 eval_args.metric_log_dir = args.dump_dir
                 if args.async_eval_gpus is None:
-                    launch_eval(eval_args)
+                    launch_stem_eval(eval_args)
                 elif get_is_master():
                     if wandb.run is not None and args.logging.wandb is not None:
                         eval_args.wandb = deepcopy(args.logging.wandb)
@@ -571,7 +626,7 @@ def train(args: StemTrainArgs):
                         launch_job(
                             StoolArgs(
                                 asdict(eval_args),
-                                script="apps.main.eval",
+                                script="apps.main.stem_eval",
                                 copy_code=False,
                                 nodes=args.async_eval_gpus // 8,
                                 qos="lowest",

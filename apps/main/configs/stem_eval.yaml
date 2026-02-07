@@ -1,0 +1,22 @@
+name: "stem_eval"
+dump_dir: logs/stem_eval
+ckpt_dir: logs/debug/checkpoints/0000000500
+stem_parallel_size: 4  # must match training stem_parallel_size
+
+generator:
+    max_tokens: 4096
+    dtype: bf16
+    temperature: 0.0
+    top_p: 0.95
+
+harness:
+    tasks:
+        - hellaswag
+        - piqa
+    batch_size: 8
+    num_fewshot: 0
+    limit: 100
+
+validation: 
+    max_steps: 100
+

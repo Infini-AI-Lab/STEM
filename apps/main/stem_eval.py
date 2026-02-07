@@ -13,12 +13,14 @@ from typing import Any, List, Optional, Tuple, Union
 from lm_eval import simple_evaluate
 from omegaconf import OmegaConf
 import torch
-from apps.main.generate import (
+import wandb
+from apps.main.stem_generate import (
     PackedCausalTransformerGenerator,
     PackedCausalTransformerGeneratorArgs,
     load_consolidated_model_and_tokenizer,
 )
-from apps.main.transformer import LMTransformer, LMTransformerArgs
+from apps.main.stem import StemLMTransformer, StemLMTransformerArgs
+from apps.main.eval import LMHarnessArgs, ValidationArgs, all_dicts_same
 from lingua.args import dump_config
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
 from lingua.data import init_choice_state, setup_sources
@@ -29,51 +31,26 @@ from lingua.distributed import (
     get_world_size,
     setup_torch_distributed,
 )
+from lingua.stem_dist_utils import (
+    initialize_stem_process_group,
+    is_stem_initialized,
+    get_stem_data_parallel_group,
+    get_stem_data_parallel_rank,
+    get_stem_data_parallel_world_size,
+    get_stem_model_parallel_group,
+)
 
 EVAL_FOLDER_NAME = "{:010d}"
 
 logger = logging.getLogger()
 
-
 @dataclass
-class LMHarnessArgs:
-    tasks: Optional[List[Any]] = None
-    num_fewshot: Optional[int] = None
-    device: Optional[str] = None
-    use_cache: Optional[str] = None
-    cache_requests: bool = False
-    rewrite_requests_cache: bool = False
-    delete_requests_cache: bool = False
-    limit: Optional[Union[int, float]] = None
-    bootstrap_iters: int = 100000
-    check_integrity: bool = False
-    write_out: bool = False
-    log_samples: bool = True
-    system_instruction: Optional[str] = None
-    apply_chat_template: Union[bool, str] = False
-    fewshot_as_multiturn: bool = False
-    gen_kwargs: Optional[str] = None
-    verbosity: str = "INFO"
-    predict_only: bool = False
-    random_seed: int = 0
-    numpy_random_seed: int = 1234
-    torch_random_seed: int = 1234
-    fewshot_random_seed: int = 1234
-    batch_size: Union[int, str] = 8
-
-@dataclass
-class ValidationArgs:
-    max_steps: Optional[int] = None # If None the whole validation file is used -> /!\ This number of steps is gpu dependent (100 max steps on 8 gpus = 800 steps on 1 gpu)
-    use_val_from_train_src: bool = True # Use the validation set from training sources
-    root_dir: str = ""
-    sources: List[str] = field(default_factory=list) # Other sources to eval on
-
-@dataclass
-class EvalArgs:
-    name: str = "evals"
+class StemEvalArgs:
+    name: str = "stem_evals"
     dump_dir: Optional[str] = None
     metric_log_dir: Optional[str] = None
     ckpt_dir: str = ""
+    stem_parallel_size: int = 1  # STEM model parallel size (>1 enables distributed ParallelEmbedding)
     generator: PackedCausalTransformerGeneratorArgs = field(
         default_factory=PackedCausalTransformerGeneratorArgs
     )
@@ -85,23 +62,37 @@ class EvalArgs:
     global_step: Optional[int] = None  # for in-training evaluation
 
 
-def all_dicts_same(dict_list):
-    if not dict_list:  # Check if the list is empty
-        return True
+class StemMockAccelerator:
+    """Accelerator stub used by lm_eval.
 
-    # Compare each dictionary to the first one
-    first_dict = dict_list[0]
-    return all(d == first_dict for d in dict_list)
+    With Option C eval, only one model-parallel group (dp_rank == 0) runs
+    eval and lm_eval sees world_size=1.  Therefore gather is a no-op and
+    barriers must stay within the active MP group (not the global group,
+    since dp_rank > 0 ranks are waiting at a different barrier).
 
+    When STEM is not initialised (stem_parallel_size <= 1) the standard
+    global-group behaviour is used instead.
+    """
 
-class MockAccelerator:
     def gather(self, tensor):
-        l = [torch.zeros_like(tensor) for _ in range(get_world_size())]
-        torch.distributed.all_gather(l, tensor)
-        return torch.stack(l)
+        if is_stem_initialized():
+            # Only one MP group is running eval (world_size=1 for lm_eval).
+            # gather is not expected to be called, but handle safely.
+            return tensor.unsqueeze(0)
+        elif torch.distributed.is_initialized():
+            out = [torch.zeros_like(tensor) for _ in range(get_world_size())]
+            torch.distributed.all_gather(out, tensor)
+            return torch.stack(out)
+        else:
+            return tensor.unsqueeze(0)
 
     def wait_for_everyone(self):
-        torch.distributed.barrier()
+        if is_stem_initialized():
+            # Barrier only within the active MP group to avoid hanging
+            # (dp_rank > 0 ranks are not participating in eval).
+            torch.distributed.barrier(group=get_stem_model_parallel_group())
+        elif torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
 
 # Light wrapper around generator for lm-eval harness
@@ -109,9 +100,21 @@ class EvalHarnessLM(LM):
     def __init__(self, generator):
         super().__init__()
         self.generator = generator
-        self.accelerator = MockAccelerator()
-        self._rank = get_global_rank()
-        self._world_size = get_world_size()
+        self.accelerator = StemMockAccelerator()
+        # When STEM is initialised, only one MP group runs eval (Option C).
+        # lm_eval sees world_size=1 so it does NOT split requests or call
+        # gather_object — avoiding conflicts with the global process group.
+        # All ranks in that MP group get the same requests, which is what
+        # ParallelEmbedding collectives require.
+        if is_stem_initialized():
+            self._rank = 0
+            self._world_size = 1
+        elif torch.distributed.is_initialized():
+            self._rank = get_global_rank()
+            self._world_size = get_world_size()
+        else:
+            self._rank = 0
+            self._world_size = 1
         self.device = generator.device
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
@@ -169,11 +172,26 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
     for src in val_args.sources:
         path = os.path.join(val_args.root_dir, src)
         srcs[path] = 1.0
-    for src in train_cfg.data.sources:
-        path = os.path.join(train_cfg.data.root_dir, src)
-        srcs[path] = 1.0
+    if hasattr(train_cfg, 'data') and hasattr(train_cfg.data, 'sources'):
+        for src in train_cfg.data.sources:
+            path = os.path.join(train_cfg.data.root_dir, src)
+            srcs[path] = 1.0
 
-    multi_state = init_choice_state("", srcs, 0, get_global_rank(), get_world_size(), "*.val.jsonl")
+    # Determine effective DP rank/degree for validation data splitting.
+    # When STEM is initialised only one MP group runs eval (Option C),
+    # so dp_rank=0 and dp_degree=1 — all validation data is processed by
+    # this single group.  When STEM is off, standard full DP is used.
+    if is_stem_initialized():
+        dp_rank = 0
+        dp_degree = 1
+    elif torch.distributed.is_initialized():
+        dp_rank = get_global_rank()
+        dp_degree = get_world_size()
+    else:
+        dp_rank = 0
+        dp_degree = 1
+    
+    multi_state = init_choice_state("", srcs, 0, dp_rank, dp_degree, "*.val.jsonl")
     path_to_iter = setup_sources(multi_state)
 
     max_gen_len = generator.max_gen_len
@@ -204,7 +222,11 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
         
         for m in metrics:
             metrics[m] = sum(metrics[m]) / len(metrics[m])
-        metrics.update(dist_mean_dict(metrics))
+        # Only average metrics when there are multiple eval workers.
+        # With STEM (Option C) dp_degree=1, so skip to avoid hanging on
+        # the global process group (dp_rank > 0 ranks are not participating).
+        if dp_degree > 1 and torch.distributed.is_initialized():
+            metrics.update(dist_mean_dict(metrics))
         logger.info(f"Validation on {src} done. Metrics: {metrics}")
 
         name = os.path.basename(src)
@@ -217,41 +239,86 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
 
     return all_val_metrics
 
-def launch_eval(cfg: EvalArgs):
-    if not torch.distributed.is_initialized():
+
+def launch_stem_eval(cfg: StemEvalArgs):
+    # Setup distributed if needed (but don't require it)
+    if torch.distributed.is_initialized():
+        pass  # Already initialized
+    elif torch.cuda.device_count() > 1:
         setup_torch_distributed(DistributedArgs())
+    
+    # Initialize STEM process groups for distributed ParallelEmbedding
+    # Skip if already initialized (e.g. when called from stem_train.py during training)
+    if torch.distributed.is_initialized() and cfg.stem_parallel_size > 1 and not is_stem_initialized():
+        initialize_stem_process_group(cfg.stem_parallel_size)
+        logger.info(f"Initialized STEM process groups with parallel size: {cfg.stem_parallel_size}")
+    
+    # ------------------------------------------------------------------
+    # Option C: When dp_size > 1, only one data-parallel replica
+    # (dp_rank == 0) runs eval.  This avoids lm_eval's internal
+    # gather_object() calling the global process group while lm_eval
+    # only sees dp_world_size workers.
+    # dp_rank > 0 ranks participate in consolidation/barrier then skip.
+    # ------------------------------------------------------------------
+    _has_dp_peers = (
+        is_stem_initialized() and get_stem_data_parallel_world_size() > 1
+    )
+    _eval_participates = True
+    if _has_dp_peers and get_stem_data_parallel_rank() != 0:
+        _eval_participates = False
+
+    # Check if checkpoint is already consolidated
+    ckpt_path = Path(cfg.ckpt_dir)
     if (
-        Path(cfg.ckpt_dir).exists()
-        and (Path(cfg.ckpt_dir) / "params.json").exists()
-        and next(Path(cfg.ckpt_dir).glob("*.pth"), None) is not None
+        ckpt_path.exists()
+        and (ckpt_path / "params.json").exists()
+        and next(ckpt_path.glob("*.pth"), None) is not None
     ):
-        consolidate_path = Path(cfg.ckpt_dir)
+        consolidate_path = ckpt_path
     else:
-        consolidate_path = Path(cfg.ckpt_dir) / CONSOLIDATE_FOLDER
-        if not consolidate_path.exists() and get_global_rank() == 0:
-            consolidate_path = consolidate_checkpoints(cfg.ckpt_dir)
+        consolidate_path = ckpt_path / CONSOLIDATE_FOLDER
+        if not consolidate_path.exists():
+            rank = get_global_rank() if torch.distributed.is_initialized() else 0
+            if rank == 0:
+                consolidate_path = consolidate_checkpoints(cfg.ckpt_dir)
 
     Path(cfg.dump_dir).mkdir(parents=True, exist_ok=True)
     dump_config(cfg, Path(cfg.dump_dir) / "config.yaml", log_config=False)
 
     consolidate_path = str(consolidate_path)
-    torch.distributed.barrier()
-    logger.info("Loading model")
+    
+    # All ranks wait for checkpoint consolidation
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+    
+    # Non-participating ranks: wait for eval-participating ranks to finish
+    if not _eval_participates:
+        logger.info("dp_rank != 0 — skipping eval, waiting at barrier")
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+        return
+    
+    # ----- Only dp_rank == 0 (or non-hybrid) ranks continue below -----
+
+    logger.info("Loading STEM model")
     model, tokenizer, train_cfg = load_consolidated_model_and_tokenizer(
         consolidate_path,
-        model_cls=LMTransformer,
-        model_args_cls=LMTransformerArgs,
+        model_cls=StemLMTransformer,
+        model_args_cls=StemLMTransformerArgs,
     )
-    logger.info("Model loaded")
+    logger.info("STEM model loaded")
     model.eval()
     generator = PackedCausalTransformerGenerator(cfg.generator, model, tokenizer)
 
     wrap = EvalHarnessLM(generator)
     results = simple_evaluate(wrap, **asdict(cfg.harness))
-    val_results =  None
+    
+    val_results = None
     if cfg.validation:
         val_results = eval_on_val(generator, cfg.validation, train_cfg)
-    if get_global_rank() == 0:
+    
+    rank = get_global_rank() if torch.distributed.is_initialized() else 0
+    if rank == 0:
         with open(Path(cfg.dump_dir) / "results.json", "w") as f:
             # Filter out non-serializable keys (configs contains function objects)
             safe_keys = ['results', 'versions', 'n-shot', 'higher_is_better', 
@@ -264,7 +331,8 @@ def launch_eval(cfg: EvalArgs):
             with open(Path(cfg.dump_dir) / "validation.json", "w") as f:
                 f.write(json.dumps(val_results))
             logger.info(f"All validation results: {val_results}")
-    if cfg.metric_log_dir and get_global_rank() == 0:
+    
+    if cfg.metric_log_dir and rank == 0:
         metric_log_path = Path(cfg.metric_log_dir) / "metrics.eval.jsonl"
 
         logger.info(f"Writing metric logs to {metric_log_path}")
@@ -286,9 +354,9 @@ def launch_eval(cfg: EvalArgs):
                 file=open(val_log_path, mode="a"),
                 flush=True,
             )
-
-    # Log eval results to wandb (rank 0 only)
-    if get_global_rank() == 0:
+            
+        # Log eval results to wandb (rank 0 only)
+    if rank == 0:
         _wandb_initialized_here = False
         # Async eval: cfg.wandb is set but no active run yet → init one
         if wandb.run is None and cfg.wandb is not None:
@@ -319,8 +387,12 @@ def launch_eval(cfg: EvalArgs):
             # In sync eval, the training loop's MetricLogger owns the run.
             if _wandb_initialized_here:
                 wandb.finish()
-
+    
     del generator
+
+    # Sync with non-participating ranks (they are waiting at a matching barrier)
+    if _has_dp_peers and torch.distributed.is_initialized():
+        torch.distributed.barrier()
 
 
 def main():
@@ -332,17 +404,17 @@ def main():
     @dataclass
     class DummyArgs:
         name: str
-        model: LMTransformerArgsgs
+        model: StemLMTransformerArgs
 
     @dataclass
-    class LMTransformerArgsgs:
+    class StemLMTransformerArgs:
         dim: int
 
-    Then you can pass model.dim=32 to change values in LMTransformerArgsgs
+    Then you can pass model.dim=32 to change values in StemLMTransformerArgs
     or just name=tictac for top level attributes.
 
     The behavior here is as follows:
-    1. We instantiate EvalArgs with its default values
+    1. We instantiate StemEvalArgs with its default values
     2. We override those default values with the ones in the provided config file
     3. We override the result with the additional arguments provided through command line
 
@@ -352,26 +424,27 @@ def main():
         dim: 128
         n_layers: 4
 
-    and you call eval.py with eval.py model.dim=64
+    and you call stem_eval.py with stem_eval.py model.dim=64
 
-    Then the final TrainArgs will have
+    Then the final StemEvalArgs will have
 
     model:
         dim: 64
         n_layers: 4
 
-    Plus all the default values in EvalArgs dataclass.
+    Plus all the default values in StemEvalArgs dataclass.
     """
     cli_args = OmegaConf.from_cli()
     file_cfg = OmegaConf.load(cli_args.config)
     # We remove 'config' attribute from config as the underlying DataClass does not have it
     del cli_args.config
 
-    default_cfg = OmegaConf.structured(EvalArgs())
+    default_cfg = OmegaConf.structured(StemEvalArgs())
     cfg = OmegaConf.merge(default_cfg, file_cfg, cli_args)
     cfg = OmegaConf.to_object(cfg)
-    launch_eval(cfg)
+    launch_stem_eval(cfg)
 
 
 if __name__ == "__main__":
     main()
+
