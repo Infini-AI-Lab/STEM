@@ -63,17 +63,6 @@ class StemEvalArgs:
 
 
 class StemMockAccelerator:
-    """Accelerator stub used by lm_eval.
-
-    With Option C eval, only one model-parallel group (dp_rank == 0) runs
-    eval and lm_eval sees world_size=1.  Therefore gather is a no-op and
-    barriers must stay within the active MP group (not the global group,
-    since dp_rank > 0 ranks are waiting at a different barrier).
-
-    When STEM is not initialised (stem_parallel_size <= 1) the standard
-    global-group behaviour is used instead.
-    """
-
     def gather(self, tensor):
         if is_stem_initialized():
             # Only one MP group is running eval (world_size=1 for lm_eval).
@@ -101,11 +90,6 @@ class EvalHarnessLM(LM):
         super().__init__()
         self.generator = generator
         self.accelerator = StemMockAccelerator()
-        # When STEM is initialised, only one MP group runs eval (Option C).
-        # lm_eval sees world_size=1 so it does NOT split requests or call
-        # gather_object — avoiding conflicts with the global process group.
-        # All ranks in that MP group get the same requests, which is what
-        # ParallelEmbedding collectives require.
         if is_stem_initialized():
             self._rank = 0
             self._world_size = 1
@@ -178,9 +162,6 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
             srcs[path] = 1.0
 
     # Determine effective DP rank/degree for validation data splitting.
-    # When STEM is initialised only one MP group runs eval (Option C),
-    # so dp_rank=0 and dp_degree=1 — all validation data is processed by
-    # this single group.  When STEM is off, standard full DP is used.
     if is_stem_initialized():
         dp_rank = 0
         dp_degree = 1
@@ -222,9 +203,7 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
         
         for m in metrics:
             metrics[m] = sum(metrics[m]) / len(metrics[m])
-        # Only average metrics when there are multiple eval workers.
-        # With STEM (Option C) dp_degree=1, so skip to avoid hanging on
-        # the global process group (dp_rank > 0 ranks are not participating).
+
         if dp_degree > 1 and torch.distributed.is_initialized():
             metrics.update(dist_mean_dict(metrics))
         logger.info(f"Validation on {src} done. Metrics: {metrics}")
@@ -253,13 +232,6 @@ def launch_stem_eval(cfg: StemEvalArgs):
         initialize_stem_process_group(cfg.stem_parallel_size)
         logger.info(f"Initialized STEM process groups with parallel size: {cfg.stem_parallel_size}")
     
-    # ------------------------------------------------------------------
-    # Option C: When dp_size > 1, only one data-parallel replica
-    # (dp_rank == 0) runs eval.  This avoids lm_eval's internal
-    # gather_object() calling the global process group while lm_eval
-    # only sees dp_world_size workers.
-    # dp_rank > 0 ranks participate in consolidation/barrier then skip.
-    # ------------------------------------------------------------------
     _has_dp_peers = (
         is_stem_initialized() and get_stem_data_parallel_world_size() > 1
     )
@@ -298,8 +270,6 @@ def launch_stem_eval(cfg: StemEvalArgs):
             torch.distributed.barrier()
         return
     
-    # ----- Only dp_rank == 0 (or non-hybrid) ranks continue below -----
-
     logger.info("Loading STEM model")
     model, tokenizer, train_cfg = load_consolidated_model_and_tokenizer(
         consolidate_path,

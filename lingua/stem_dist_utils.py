@@ -487,12 +487,7 @@ class ParallelEmbedding(torch.nn.Module):
         self.init_method = init_method
         self.reset_parameters()
 
-    def forward(self, input_: torch.Tensor) -> torch.Tensor:  # type: ignore
-        # All STEM ranks in the same model-parallel group must receive the
-        # same input shape.  During eval this is guaranteed by having the
-        # evaluation harness use the STEM *data-parallel* rank/world_size
-        # (see EvalHarnessLM in stem_eval.py) so every rank in a model-
-        # parallel group processes the same requests.
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:  
         input_parallel = gather_tokens_for_stem(input_)
         output_parallel = F.embedding(
             input_parallel,
