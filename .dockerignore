@@ -1,0 +1,24 @@
+# Version control
+.git
+.gitignore
+
+# Python artifacts
+*.pyc
+__pycache__
+*.egg-info
+
+# IDE
+.vscode
+.cursor
+
+# Data and checkpoints (large files - mount at runtime instead)
+data/
+checkpoints/
+logs/
+wandb/
+tokenizer/
+
+# Misc
+*.ipynb
+slurm-*.out
+*.log

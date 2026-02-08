@@ -10,3 +10,5 @@ logs
 **/__pycache__
 inference/checkpoints
 inference/tests/Data
+checkpoints/
+logs/
