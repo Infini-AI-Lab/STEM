@@ -103,6 +103,11 @@ logger = logging.getLogger()
 @dataclass
 class StemTrainArgs(TrainArgs):
     model: StemLMTransformerArgs = field(default_factory=StemLMTransformerArgs)
+
+    # Separate learning rate and weight decay for stem_embeddings.
+    # When None, falls back to the values in ``optim``.
+    stem_lr: Optional[float] = None
+    stem_weight_decay: Optional[float] = None
     
     
 preemption_flag = dict(flag=False)
@@ -244,11 +249,15 @@ def train(args: StemTrainArgs):
         )
         
         # Create optimizer for stem_embeddings (regular Tensors)
+        # Use dedicated stem lr / weight_decay when provided, else fall back to main optim values
+        stem_lr = args.stem_lr if args.stem_lr is not None else args.optim.lr
+        stem_wd = args.stem_weight_decay if args.stem_weight_decay is not None else args.optim.weight_decay
+        logger.info(f"Stem optimizer: lr={stem_lr}, weight_decay={stem_wd}")
         stem_optimizer = AdamW(
             model.stem_embeddings.parameters(),
-            lr=args.optim.lr,
+            lr=stem_lr,
             betas=(args.optim.beta1, args.optim.beta2),
-            weight_decay=args.optim.weight_decay,
+            weight_decay=stem_wd,
             eps=args.optim.epsilon,
             fused=False,  # Disable fused for regular tensors
         )
@@ -345,6 +354,7 @@ def train(args: StemTrainArgs):
 
             # get batch
             curr_lr = float(optimizer["lm"].param_groups[0]["lr"])
+            curr_stem_lr = float(optimizer["stem"].param_groups[0]["lr"])
             data_load_start = timer()
             batch, train_state.data_loader_state = next(data_loader)
             batch = torch.tensor(
@@ -529,6 +539,7 @@ def train(args: StemTrainArgs):
                 optim_dict = {
                     "grad_norm": grad_norm,
                     "lr": curr_lr,
+                    "stem_lr": curr_stem_lr,
                     "total_tokens": total_tokens,
                 }
                 # Add stem gradient norm if available
@@ -575,6 +586,7 @@ def train(args: StemTrainArgs):
                     f"  iter: {curr_iter_time:>7}"
                     f"  data: {data_load_time:>5}"
                     f"  lr: {curr_lr:.2e}"
+                    f"  stem_lr: {curr_stem_lr:.2e}"
                     f"  mem: {gpu_mem_stats.max_active_pct:.0f}%"
                     f"  pow: {gpu_mem_stats.power_draw/1000} W"
                 )
