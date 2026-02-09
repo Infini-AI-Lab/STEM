@@ -1,7 +1,7 @@
 apiVersion: "kubeflow.org/v1"
 kind: PyTorchJob
 metadata:
-  name: beidchen-stem-finetune-lm-245 # JOB_NAME like  <alias>-<pod/mpijob/torchjob>-<p4/g5/r5>-<project>-<task>[-<note>]
+  name: beidchen-rl-finetune-scale-243 # JOB_NAME like  <alias>-<pod/mpijob/torchjob>-<p4/g5/r5>-<project>-<task>[-<note>]
   namespace: default
 spec:
   elasticPolicy:
@@ -10,7 +10,7 @@ spec:
     maxReplicas: 1
     maxRestarts: 1
     nProcPerNode: &gpus_per_node 8
-    rdzvId: beidchen-stem-finetune-lm-245
+    rdzvId: beidchen-rl-finetune-scale-243
   runPolicy:
     ttlSecondsAfterFinished: 180 # give enough time to push any logs
     schedulingPolicy:
@@ -36,7 +36,7 @@ spec:
                         values:
                           - p5en.48xlarge
           tolerations:
-            - key: yadunanr-knowledge-stem-5e-p5en
+            - key: ikiss-swe-skills
               operator: Equal
               value: "True"
               effect: NoSchedule
