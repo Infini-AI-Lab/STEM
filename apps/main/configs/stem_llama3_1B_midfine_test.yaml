@@ -1,6 +1,6 @@
 dump_dir: logs/debug
 name: "stem_llama3_1B"
-steps: 100_000
+steps: 10_000
 probe_freq: 100
 seed: 777
 
@@ -38,7 +38,7 @@ data:
     root_dir: /dev/shm/
     sources:
         dolmino-mix_shuffled: 1.0
-    batch_size: 4
+    batch_size: 8
     prefetch_size: 1024
     seq_len: 4096
     n_views: 2
