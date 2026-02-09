@@ -3,18 +3,27 @@
 
 """
 Layerwise finetuning of STEM embeddings using MSE loss against the pretrained
-up projections (w3) of the original model.
+FFN of the original model.
+
+Three loss types are supported (set via ``loss_type``):
+
+  up_proj   – MSE(stem_emb(ids), w3(x))
+              Matches the raw up-projection output.
+
+  gate_up   – MSE(SiLU(w1(x)) * stem_emb(ids), SiLU(w1(x)) * w3(x))
+              Matches the gated intermediate (after element-wise gate).
+
+  down_proj – MSE(w2(SiLU(w1(x)) * stem_emb(ids)), w2(SiLU(w1(x)) * w3(x)))
+              Matches the full FFN output (after the down projection).
 
 The approach:
 1. Load the pretrained LLaMA model (with standard FeedForward that has w1, w2, w3)
 2. Freeze all model parameters
 3. Create trainable STEM embeddings (ParallelEmbedding) for each stem layer
 4. For each training batch:
-   a. Run the frozen forward pass through the pretrained model
-   b. Capture w3 outputs at each stem layer via forward hooks
-   c. Compute STEM embedding predictions for each stem layer
-   d. MSE loss between predictions and w3 targets
-   e. Backprop to update only the STEM embeddings
+   a. Run the frozen forward pass, capturing FFN intermediates via hooks
+   b. Compute STEM embedding predictions and MSE loss per the chosen loss type
+   c. Backprop to update only the STEM embeddings
 """
 
 import gc
@@ -124,6 +133,12 @@ class LayerwiseFinetuneArgs:
     stem_epsilon: float = 1e-8
     stem_clip: float = 1.0
 
+    # Loss type: "up_proj", "gate_up", or "down_proj"
+    #   up_proj  : MSE(stem_emb(ids), w3(x))
+    #   gate_up  : MSE(SiLU(w1(x)) * stem_emb(ids), SiLU(w1(x)) * w3(x))
+    #   down_proj: MSE(w2(SiLU(w1(x)) * stem_emb(ids)), w2(SiLU(w1(x)) * w3(x)))
+    loss_type: str = "up_proj"
+
     # LR schedule
     stem_scheduler: str = "cosine"
     stem_warmup: int = 500
@@ -180,53 +195,87 @@ def compute_ffn_hidden_dim(dim: int, multiple_of: int, ffn_dim_multiplier: Optio
     return hidden_dim
 
 
-def collect_w3_targets(
+def collect_ffn_intermediates(
     model: LMTransformer,
     input_ids: torch.Tensor,
     stem_layer_indices: List[int],
+    loss_type: str = "up_proj",
     target: Optional[torch.Tensor] = None,
-) -> Tuple[Dict[int, torch.Tensor], Optional[torch.Tensor]]:
+) -> Tuple[Dict[int, Dict[str, torch.Tensor]], Optional[torch.Tensor]]:
     """
-    Run the frozen pretrained model forward and capture the w3 (up-projection)
-    outputs at each stem layer via forward hooks.  Optionally also compute the
-    original model's NLL loss (cross-entropy on the logits vs ``target``).
+    Run the frozen pretrained model forward and capture FFN intermediates at
+    each stem layer via forward hooks.  Optionally compute original NLL.
+
+    Captured intermediates depend on ``loss_type``:
+      * ``"up_proj"``  : w3 output only.
+      * ``"gate_up"``  : w3 and w1 outputs.
+      * ``"down_proj"``: w3, w1 outputs and w2 weight (cloned while unsharded).
 
     Args:
-        model: Frozen pretrained LMTransformer (with standard FeedForward w1/w2/w3).
+        model: Frozen pretrained LMTransformer (with standard FeedForward).
         input_ids: Input token IDs [batch, seq_len].
-        stem_layer_indices: Layer indices at which to capture w3 outputs.
-        target: Optional target token IDs [batch, seq_len] for NLL computation.
+        stem_layer_indices: Layer indices at which to capture intermediates.
+        loss_type: One of ``"up_proj"``, ``"gate_up"``, ``"down_proj"``.
+        target: Optional target token IDs for NLL computation.
 
     Returns:
-        (w3_outputs, original_nll)
-        - w3_outputs: Dict mapping layer_idx -> w3_output tensor [batch, seq_len, hidden_dim].
-          All tensors are detached (no grad).
-        - original_nll: Scalar cross-entropy loss (detached) or None if ``target`` is None.
+        (intermediates, original_nll)
+        - intermediates: ``{layer_idx: {"w3": …, ["w1": …], ["w2_weight": …]}}``.
+          All tensors are detached.
+        - original_nll: Scalar CE loss (detached) or ``None``.
     """
-    w3_outputs: Dict[int, torch.Tensor] = {}
+    intermediates: Dict[int, Dict[str, torch.Tensor]] = {
+        idx: {} for idx in stem_layer_indices
+    }
     hooks = []
 
-    def _make_hook(layer_idx: int):
+    # -- w3 hooks (always) -------------------------------------------------
+    def _w3_hook(layer_idx: int):
         def hook_fn(module, inp, out):
-            w3_outputs[layer_idx] = out.detach()
+            intermediates[layer_idx]["w3"] = out.detach()
         return hook_fn
 
-    # Register hooks on the w3 linear in each stem layer's FFN
     for layer_idx in stem_layer_indices:
-        layer = model.layers[layer_idx]
-        h = layer.feed_forward.w3.register_forward_hook(_make_hook(layer_idx))
-        hooks.append(h)
+        ffn = model.layers[layer_idx].feed_forward
+        hooks.append(ffn.w3.register_forward_hook(_w3_hook(layer_idx)))
 
-    # Run the full frozen forward pass (no grad)
+    # -- w1 hooks (gate_up / down_proj) ------------------------------------
+    if loss_type in ("gate_up", "down_proj"):
+        def _w1_hook(layer_idx: int):
+            def hook_fn(module, inp, out):
+                intermediates[layer_idx]["w1"] = out.detach()
+            return hook_fn
+
+        for layer_idx in stem_layer_indices:
+            ffn = model.layers[layer_idx].feed_forward
+            hooks.append(ffn.w1.register_forward_hook(_w1_hook(layer_idx)))
+
+    # -- w2 weight capture (down_proj) -------------------------------------
+    #    We use a *pre*-forward hook on w2 so we grab its weight while
+    #    FSDP still has it unsharded.
+    if loss_type == "down_proj":
+        def _w2_pre_hook(layer_idx: int):
+            def hook_fn(module, inp):
+                weight = module.weight.detach()
+                if isinstance(weight, DTensor):
+                    weight = weight.full_tensor()
+                intermediates[layer_idx]["w2_weight"] = weight.clone()
+            return hook_fn
+
+        for layer_idx in stem_layer_indices:
+            ffn = model.layers[layer_idx].feed_forward
+            hooks.append(ffn.w2.register_forward_pre_hook(_w2_pre_hook(layer_idx)))
+
+    # -- Forward pass (no grad) --------------------------------------------
     with torch.no_grad():
         output = model(input_ids, target=target)
 
-    # Remove hooks
+    # -- Cleanup -----------------------------------------------------------
     for h in hooks:
         h.remove()
 
     original_nll = output.detach() if target is not None else None
-    return w3_outputs, original_nll
+    return intermediates, original_nll
 
 
 def compute_stem_nll(
@@ -497,7 +546,12 @@ def train(args: LayerwiseFinetuneArgs):
             assert hasattr(model.layers[idx].feed_forward, "w3"), (
                 f"Layer {idx} FeedForward has no w3 – is this a standard LMTransformer?"
             )
+        assert args.loss_type in ("up_proj", "gate_up", "down_proj"), (
+            f"Invalid loss_type: {args.loss_type!r}. "
+            f"Must be one of: up_proj, gate_up, down_proj"
+        )
         logger.info(f"STEM layers: {stem_layers}")
+        logger.info(f"Loss type: {args.loss_type}")
 
         # ---- Compute stem embedding dim (= FFN hidden dim) ----
         stem_embedding_dim = compute_ffn_hidden_dim(
@@ -619,13 +673,14 @@ def train(args: LayerwiseFinetuneArgs):
 
             bsz, seqlen = input_ids.shape
 
-            # ---- Forward: collect w3 targets and original NLL from frozen model ----
+            # ---- Forward: collect FFN intermediates and original NLL ----
             start_timer = torch.cuda.Event(enable_timing=True)
             end_timer = torch.cuda.Event(enable_timing=True)
             start_timer.record()
 
-            w3_targets, original_nll = collect_w3_targets(
-                model, input_ids, stem_layers, target=target,
+            intermediates, original_nll = collect_ffn_intermediates(
+                model, input_ids, stem_layers,
+                loss_type=args.loss_type, target=target,
             )
 
             # ---- Compute NLL with stem embeddings replacing w3 (no grad) ----
@@ -640,11 +695,35 @@ def train(args: LayerwiseFinetuneArgs):
 
             for layer_idx in stem_layers:
                 stem_idx = layer_to_stem_idx[layer_idx]
-                w3_target = w3_targets[layer_idx]  # [batch, seq_len, hidden_dim], detached
-                pred = stem_embeddings[stem_idx](input_ids)  # [batch, seq_len, hidden_dim]
+                data = intermediates[layer_idx]
+                stem_out = stem_embeddings[stem_idx](input_ids)  # [B, S, hidden_dim]
 
-                # MSE loss in float32 for numerical stability
-                layer_loss = F.mse_loss(pred.float(), w3_target.float())
+                if args.loss_type == "up_proj":
+                    # MSE between stem embedding and w3 output
+                    layer_loss = F.mse_loss(
+                        stem_out.float(), data["w3"].float()
+                    )
+
+                elif args.loss_type == "gate_up":
+                    # MSE after applying the gate: SiLU(w1(x)) * {stem_emb, w3}
+                    gate = F.silu(data["w1"].float())  # detached
+                    pred_gated = gate * stem_out.float()
+                    tgt_gated = gate * data["w3"].float()
+                    layer_loss = F.mse_loss(pred_gated, tgt_gated)
+
+                elif args.loss_type == "down_proj":
+                    # MSE at the FFN output: w2(SiLU(w1(x)) * {stem_emb, w3})
+                    gate = F.silu(data["w1"].float())  # detached
+                    w2_weight = data["w2_weight"].float()  # detached
+                    pred_down = F.linear(gate * stem_out.float(), w2_weight)
+                    tgt_down = F.linear(
+                        gate * data["w3"].float(), w2_weight
+                    ).detach()
+                    layer_loss = F.mse_loss(pred_down, tgt_down)
+
+                else:
+                    raise ValueError(f"Unknown loss_type: {args.loss_type}")
+
                 total_loss = total_loss + layer_loss
                 per_layer_losses[layer_idx] = layer_loss.detach().item()
 
