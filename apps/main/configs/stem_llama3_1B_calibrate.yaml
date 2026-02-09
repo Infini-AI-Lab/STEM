@@ -1,0 +1,82 @@
+# Layerwise finetuning of STEM embeddings via MSE loss against
+# the pretrained up-projections (w3) of the original LLaMA model.
+#
+# Usage:
+#   torchrun --nproc_per_node=8 -m apps.main.stem_layerwise_finetune \
+#       config=apps/main/configs/stem_layerwise_finetune.yaml
+
+dump_dir: logs/stem_layerwise_finetune
+name: "stem_layerwise_finetune_1B"
+steps: 10_000
+seed: 42
+
+# Which layers get a STEM embedding (replaces w3 in those layers)
+stem_layers: [3, 6, 9, 12]
+
+# Optimizer / schedule for the STEM embeddings
+stem_lr: 1e-3
+stem_weight_decay: 0.0
+stem_beta1: 0.9
+stem_beta2: 0.95
+stem_epsilon: 1e-8
+stem_clip: 1.0
+stem_scheduler: cosine
+stem_warmup: 500
+stem_lr_min_ratio: 0.01
+
+grad_acc_steps: 1
+
+distributed:
+    fsdp_type: full_shard
+    compile: false          # hooks require compilation to be off
+    model_dtype: bf16
+    matmul_allow_tf32: false
+    selective_activation_checkpointing: false
+    tp_size: 1
+    stem_parallel_size: 8   # ParallelEmbedding sharding across GPUs
+
+model:
+    dim: 2048
+    ffn_dim_multiplier: 1.5
+    n_layers: 16
+    n_heads: 32
+    n_kv_heads: 8
+    head_dim: 64
+    weight_tying: true
+    init_base_std: 0.02
+    init_std_factor: disabled
+    max_seqlen: 8192
+    rope_theta: 500000.0
+
+data:
+    root_dir: data/shuffled
+    sources:
+        fineweb_edu_10bt: 1.0
+    batch_size: 4
+    prefetch_size: 1024
+    seq_len: 4096
+    n_views: 2
+    load_async: true
+    add_bos: true
+    add_eos: true
+    tokenizer:
+        name: tiktoken
+        path: tokenizer/original/tokenizer.model
+
+profiling:
+    run: false
+
+checkpoint:
+    init_ckpt_path: checkpoints/Llama-3.2-1B/distcp   # pretrained LLaMA checkpoint
+    dump:
+        every: 2000
+        keep: 2
+    eval:
+        every: 20000
+        keep: 1
+
+logging:
+    freq: 10
+    wandb:
+        project: "stem"
+        name: "stem-layerwise-finetune-1B"
