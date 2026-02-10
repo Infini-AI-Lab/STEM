@@ -21,7 +21,7 @@ for f in "$dir"/*.yaml; do
   echo "adding yaml to submit $f" 
   
   # printf 'kubectl apply -f amyaml_submit/%s\n' "$f" >> submit.sh 
-  printf 'kraken --project-name Obsidian jobs create -i amyaml_submit/%s\n' "$f" >> submit.sh 
+  printf 'kubectl apply -f amyaml_submit/%s\n' "$f" >> submit.sh 
 
 done 
 

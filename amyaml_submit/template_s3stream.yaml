@@ -36,7 +36,7 @@ spec:
                         values:
                           - p5en.48xlarge
           tolerations:
-            - key: guparpit-nb-swe-ac
+            - key: ikiss-swe-skills
               operator: Equal
               value: "True"
               effect: NoSchedule
@@ -104,6 +104,9 @@ spec:
                   wandb login --relogin $WANDB_API_KEY &&
                   mkdir -p /workspace/wandb &&
                   export WANDB_DIR=/workspace/wandb &&
+                  apt-get update &&
+                  apt-get install -y zip &&
+                  apt install -y zstd &&
                   cd /dev/shm/ &&
                   curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" &&
                   unzip -q awscliv2.zip &&
