@@ -104,15 +104,18 @@ spec:
                   wandb login --relogin $WANDB_API_KEY &&
                   mkdir -p /workspace/wandb &&
                   export WANDB_DIR=/workspace/wandb &&
+                  apt-get update &&
+                  apt-get install -y zip &&
+                  apt install -y zstd &&
                   cd /dev/shm/ &&
                   curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" &&
                   unzip awscliv2.zip &&
                   ./aws/install &&
-                  aws s3 cp s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dolma3_dolmino_mix-100B-1125/ . --region us-east-2 && 
+                  aws s3 sync s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dolma3_dolmino_mix-100B-1125/data/ingredient1-code-meta-reasoning/ ./dolma3_dolmino_mix-100B-1125 --region us-east-2 && 
                   cd /code-fsx/beidchen-sandbox/STEM &&
                   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True &&
-                  python3 setup/aws_prepare_hf_dataset.py --local_dir /dev/shm/dolma3_dolmino_mix-100B-1125 --out_dir /dev/shm/dolmino-mix-subset_shuffled --dataset dolmino-mix-subset --filter_pattern ingredient1-code-meta-reasoning --num_nodes 1 --nchunks 8 &&
-                  torchrun --nproc_per_node=8 --rdzv-conf="timeout=7200,read_timeout=7200,join_timeout=7200" -m apps.main.stem_train config=apps/main/configs/stem_llama3_1B_midfine_test.yaml data.root_dir=/dev/shm data.sources.dolmino-mix-subset_shuffled=1.0 dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-half-midfine checkpoint.init_ckpt_path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/distcp data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model logging.wandb.name=lm1b-half-midfine-singlenode stem_lr=5e-4 stem_weight_decay=0.0 | tee /code-fsx/beidchen-sandbox/finetune_stem_singlenode.log
+                  python3 setup/aws_prepare_hf_dataset.py --local_dir /dev/shm/dolma3_dolmino_mix-100B-1125 --out_dir /dev/shm/dolmino-mix_shuffled --dataset dolmino-mix --num_nodes 1 --nchunks 8 &&
+                  torchrun --nproc_per_node=8 --rdzv-conf="timeout=7200,read_timeout=7200,join_timeout=7200" -m apps.main.stem_train config=apps/main/configs/stem_llama3_1B_midfine_test.yaml data.root_dir=/dev/shm dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-half-midfine checkpoint.init_ckpt_path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/distcp data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model logging.wandb.name=lm1b-half-midfine-singlenode stem_lr=5e-4 stem_weight_decay=0.0 | tee /code-fsx/beidchen-sandbox/finetune_stem_singlenode.log
               image: 767397878797.dkr.ecr.us-east-1.amazonaws.com/agif-mm-pt-base:stem.v1
               imagePullPolicy: Always
               securityContext:

@@ -11,7 +11,7 @@ steps: 10_000
 seed: 42
 
 # Which layers get a STEM embedding (replaces w3 in those layers)
-stem_layers: [3, 6, 9, 12]
+stem_layers: [2, 6, 10, 14]
 
 # Optimizer / schedule for the STEM embeddings
 stem_lr: 1e-3

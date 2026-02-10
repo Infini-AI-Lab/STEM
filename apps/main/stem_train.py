@@ -304,12 +304,24 @@ def train(args: StemTrainArgs):
                     model_key="model"
                 )
             model.rope_embeddings.reset_parameters() # For RoPe initialization since it's a buffer it might not be loaded
-            # Ensure stem_embeddings are initialized even when loading from checkpoint
-            # (in case they're not in the checkpoint)
-            with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
-                torch.manual_seed(args.model.seed)
-                model.reset_stem_embeddings()
-            # Ensure stem_embeddings are identical across DP ranks after reset
+            # Only reset stem_embeddings if pre-computed embeddings were NOT found
+            # in the init checkpoint.  If stem_shards/ exists (e.g. produced by
+            # prepare_stem_checkpoint.py), the loaded values are kept as-is.
+            stem_shards_dir = Path(args.checkpoint.init_ckpt_path) / "stem_shards"
+            if stem_shards_dir.exists() and any(stem_shards_dir.glob("stem_model_mp*.pt")):
+                logger.info(
+                    "Pre-computed stem embeddings found in init checkpoint, "
+                    "skipping random reset"
+                )
+            else:
+                logger.info(
+                    "No pre-computed stem embeddings in init checkpoint, "
+                    "initializing randomly"
+                )
+                with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+                    torch.manual_seed(args.model.seed)
+                    model.reset_stem_embeddings()
+            # Ensure stem_embeddings are identical across DP ranks
             sync_stem_embeddings_across_dp(model)
         
         # Load from latest checkpoint (or continue from init checkpoint)
