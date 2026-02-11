@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-half-midfine"
+experiment_name="lm1b-half-midfine-randominit"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -28,7 +28,7 @@ echo "WANDB_MODE: $WANDB_MODE"
 # NOTE: remove or comment out the "aws s3 sync" line in template.yaml when
 #       using --s3_uri mode, since this script streams directly from S3.
 python3 setup/aws_prepare_hf_dataset.py \
-    --s3_uri s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dolma3_dolmino_mix-100B-1125 \
+    --s3_uri s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dolma3_dolmino_mix-10B-1025 \
     --region us-east-2 \
     --out_dir /dev/shm/dolmino-mix_shuffled \
     --dataset dolmino-mix \

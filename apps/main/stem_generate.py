@@ -59,7 +59,10 @@ def load_consolidated_model_and_tokenizer(
     
     
     backbone_dict = torch.load(ckpt_path / CONSOLIDATE_NAME, weights_only=True)
-    model.load_state_dict(backbone_dict["model"], strict=False)
+    if "model" in backbone_dict:
+        backbone_dict = backbone_dict["model"]
+    backbone_dict = {k.replace("model.", ""): v for k, v in backbone_dict.items()}
+    model.load_state_dict(backbone_dict, strict=False)
     
     if is_stem_initialized():
         # Distributed: load sharded stem weights for this STEM MP rank

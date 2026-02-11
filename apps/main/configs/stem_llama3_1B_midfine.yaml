@@ -1,6 +1,6 @@
 dump_dir: logs/debug
 name: "stem_llama3_1B"
-steps: 100_000
+steps: 200_000
 probe_freq: 100
 seed: 777
 
@@ -8,7 +8,7 @@ optim:
     lr: 2e-5
     weight_decay: 0.033
     warmup: 2000
-    lr_min_ratio: 0.0001
+    lr_min_ratio: 0.01
     clip: 1.0
 
 distributed:                                                                                                        
