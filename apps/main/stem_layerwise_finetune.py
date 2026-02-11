@@ -97,6 +97,9 @@ from apps.main.transformer import (
     build_fsdp_grouping_plan,
     get_no_recompute_ops,
 )
+from apps.main.stem import (
+    extract_pretrained_w3_stats,
+)
 from apps.main.train import TrainState, validate_train_args, every_n_steps
 
 import wandb
@@ -132,6 +135,12 @@ class LayerwiseFinetuneArgs:
     stem_beta2: float = 0.95
     stem_epsilon: float = 1e-8
     stem_clip: float = 1.0
+
+    # Initialization strategy for STEM embeddings:
+    #   "default"            : Xavier normal (ParallelEmbedding default)
+    #   "pretrained_stats"    : E_stem[v] ~ N(μ_j, σ_j) for each neuron j
+    #   "from_lm_transformer": E_stem[v] = tok_emb[v] @ W3^T
+    stem_init_type: str = "default"
 
     # Loss type: "up_proj", "gate_up", or "down_proj"
     #   up_proj  : MSE(stem_emb(ids), w3(x))
@@ -428,6 +437,51 @@ def load_finetune_checkpoint(
     logger.info(f"Checkpoint loaded from {ckpt_dir}")
 
 
+def compute_stem_init_from_w3(
+    tok_emb_weight: torch.Tensor,
+    w3_weight: torch.Tensor,
+    layer_idx: int,
+    stem_embedding_dim: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Compute E_stem = E_tok @ W3^T for a single layer.
+
+    At early transformer layers, the residual stream h ≈ tok_emb[token_id],
+    so W3 @ h ≈ W3 @ tok_emb[token_id].  Pre-computing this product for
+    every token produces a per-token embedding that is functionally
+    equivalent to the pretrained up-projection at initialization time.
+
+    Args:
+        tok_emb_weight: Token embedding matrix  (V, d_model)
+        w3_weight:      Up-projection weight    (d_ffn, d_model)
+        layer_idx:      For error messages only.
+        stem_embedding_dim: Expected d_ffn (validated against w3).
+        device:         Compute device.
+
+    Returns:
+        (V, d_ffn) tensor in float32.
+    """
+    V, d_model = tok_emb_weight.shape
+    d_ffn, d_model_w3 = w3_weight.shape
+
+    if d_model != d_model_w3:
+        raise ValueError(
+            f"Layer {layer_idx}: tok_embeddings d_model={d_model} != "
+            f"w3 input dim={d_model_w3}"
+        )
+    if d_ffn != stem_embedding_dim:
+        raise ValueError(
+            f"Layer {layer_idx}: w3 output dim ({d_ffn}) != "
+            f"stem_embedding_dim ({stem_embedding_dim})"
+        )
+
+    tok_f32 = tok_emb_weight.to(device=device, dtype=torch.float32)
+    w3_f32 = w3_weight.to(device=device, dtype=torch.float32)
+    full_init = tok_f32 @ w3_f32.t()  # (V, d_ffn)
+    del tok_f32, w3_f32
+    return full_init
+
+
 # ---------------------------------------------------------------------------
 # Main training function
 # ---------------------------------------------------------------------------
@@ -553,6 +607,12 @@ def train(args: LayerwiseFinetuneArgs):
         logger.info(f"STEM layers: {stem_layers}")
         logger.info(f"Loss type: {args.loss_type}")
 
+        assert args.stem_init_type in ("default", "from_lm_transformer", "pretrained_stats"), (
+            f"Invalid stem_init_type: {args.stem_init_type!r}. "
+            f"Must be one of: default, from_lm_transformer, pretrained_stats"
+        )
+        logger.info(f"STEM init type: {args.stem_init_type}")
+
         # ---- Compute stem embedding dim (= FFN hidden dim) ----
         stem_embedding_dim = compute_ffn_hidden_dim(
             args.model.dim, args.model.multiple_of, args.model.ffn_dim_multiplier
@@ -573,11 +633,147 @@ def train(args: LayerwiseFinetuneArgs):
         for param in stem_embeddings.parameters():
             param.requires_grad = True
 
+        # ---- Initialize STEM embeddings ----
+        if args.stem_init_type == "from_lm_transformer":
+            # ----------------------------------------------------------------
+            # Pretrained-approximate init: E_stem[v] = tok_emb[v] @ W3^T
+            #
+            # The pretrained model is already loaded and frozen above with
+            # w3 weights available at model.layers[idx].feed_forward.w3.
+            # We extract them, compute the matmul per layer, and load the
+            # result into each ParallelEmbedding (column-shard-aware).
+            # ----------------------------------------------------------------
+            logger.info(
+                "Initializing STEM embeddings via from_lm_transformer: "
+                "E_stem = E_tok @ W3^T"
+            )
+
+            # Token embeddings (shared across all layers)
+            tok_emb_weight = model.tok_embeddings.weight.data.clone()
+
+            for layer_idx in stem_layers:
+                stem_idx = layer_to_stem_idx[layer_idx]
+                emb = stem_embeddings[stem_idx]
+
+                # Extract w3 weight from frozen pretrained model
+                w3_weight = model.layers[layer_idx].feed_forward.w3.weight.data
+                # Handle FSDP DTensor wrapping
+                if isinstance(w3_weight, DTensor):
+                    w3_weight = w3_weight.full_tensor()
+                w3_weight = w3_weight.clone()
+
+                # Compute full init: (V, d_ffn) in float32
+                full_init = compute_stem_init_from_w3(
+                    tok_emb_weight, w3_weight, layer_idx,
+                    stem_embedding_dim, device,
+                )
+
+                # Load into ParallelEmbedding (handles column sharding)
+                emb.load_full_weight(full_init)
+
+                logger.info(
+                    f"  Layer {layer_idx} → stem[{stem_idx}]: "
+                    f"weight_norm={emb.weight.norm().item():.4f}"
+                )
+                del w3_weight, full_init
+
+            del tok_emb_weight
+            torch.cuda.empty_cache()
+
+        elif args.stem_init_type == "pretrained_stats":
+            # ----------------------------------------------------------------
+            # Statistical init: E_stem[v, j] ~ N(μ_j, σ_j)
+            #
+            # Extract per-neuron activation statistics of E_tok @ W3^T from
+            # the pretrained model, then draw each token's embedding from a
+            # per-neuron Gaussian.  This preserves activation scale while
+            # allowing stochastic diversity in the init.
+            # ----------------------------------------------------------------
+            logger.info(
+                "Initializing STEM embeddings via pretrained_stats: "
+                "E_stem[v, j] ~ N(μ_j, σ_j)"
+            )
+
+            pretrained_w3_stats = extract_pretrained_w3_stats(
+                model.state_dict(), stem_layers,
+                tok_emb_key="tok_embeddings.weight",
+                w3_key_template="layers.{layer_idx}.feed_forward.w3.weight",
+            )
+
+            from lingua.stem_dist_utils import (
+                get_stem_model_parallel_world_size as _ws,
+                get_stem_model_parallel_rank as _rank,
+            )
+
+            for layer_idx in stem_layers:
+                stem_idx = layer_to_stem_idx[layer_idx]
+                emb = stem_embeddings[stem_idx]
+
+                if layer_idx not in pretrained_w3_stats:
+                    raise KeyError(
+                        f"pretrained_w3_stats missing entry for layer {layer_idx}. "
+                        f"Available: {sorted(pretrained_w3_stats.keys())}"
+                    )
+
+                layer_stats = pretrained_w3_stats[layer_idx]
+                full_mean = layer_stats["mean"]  # (d_ffn,)
+                full_std = layer_stats["std"]    # (d_ffn,)
+
+                # Validate against expected dim
+                if full_mean.shape[0] != stem_embedding_dim:
+                    raise ValueError(
+                        f"Layer {layer_idx}: stats mean has dim {full_mean.shape[0]} "
+                        f"but stem_embedding_dim={stem_embedding_dim}"
+                    )
+
+                # Handle ParallelEmbedding column sharding
+                local_dim = emb.weight.shape[1]
+                world_size = _ws()
+                rank = _rank()
+
+                if world_size > 1:
+                    shard_start = rank * local_dim
+                    shard_end = shard_start + local_dim
+                    local_mean = full_mean[shard_start:shard_end].to(
+                        device=device, dtype=torch.float32
+                    )
+                    local_std = full_std[shard_start:shard_end].to(
+                        device=device, dtype=torch.float32
+                    )
+                else:
+                    local_mean = full_mean.to(device=device, dtype=torch.float32)
+                    local_std = full_std.to(device=device, dtype=torch.float32)
+
+                # Draw from N(0,1) then scale/shift per neuron
+                emb.weight.data.normal_(mean=0.0, std=1.0)
+                w_f32 = emb.weight.data.float()
+                w_f32.mul_(local_std.unsqueeze(0))    # (V, d_local) * (1, d_local)
+                w_f32.add_(local_mean.unsqueeze(0))   # (V, d_local) + (1, d_local)
+                emb.weight.data.copy_(w_f32.to(emb.weight.dtype))
+
+                logger.info(
+                    f"  Layer {layer_idx} → stem[{stem_idx}]: pretrained_stats, "
+                    f"mean_range=[{local_mean.min().item():.4f}, {local_mean.max().item():.4f}], "
+                    f"std_range=[{local_std.min().item():.4f}, {local_std.max().item():.4f}], "
+                    f"weight_norm={emb.weight.norm().item():.4f}"
+                )
+
+            del pretrained_w3_stats
+            torch.cuda.empty_cache()
+
+        elif args.stem_init_type == "default":
+            # Xavier normal (original behavior)
+            with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+                torch.manual_seed(args.seed)
+                for emb in stem_embeddings:
+                    emb.reset_parameters()
+        else:
+            raise ValueError(
+                f"Unknown stem_init_type: {args.stem_init_type!r}. "
+                f"Must be one of: 'default', 'from_lm_transformer', 'pretrained_stats'."
+            )
+
         # Sync across DP ranks so every replica starts identically
-        with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
-            torch.manual_seed(args.seed)
-            for emb in stem_embeddings:
-                emb.reset_parameters()
         sync_stem_embeddings_across_dp(stem_embeddings)
 
         stem_param_count = sum(p.numel() for p in stem_embeddings.parameters())

@@ -539,6 +539,63 @@ class ParallelEmbedding(torch.nn.Module):
             with torch.no_grad():
                 self.init_method(self.weight)
 
+    def load_full_weight(self, full_weight: torch.Tensor) -> None:
+        """Load from a full (unsharded) weight tensor, slicing the correct
+        column shard for this STEM model-parallel rank.
+
+        ParallelEmbedding shards along the embedding dimension (columns),
+        so each rank holds weight of shape:
+            (num_embeddings, embedding_dim_per_partition)
+
+        Args:
+            full_weight: Tensor of shape (num_embeddings, embedding_dim),
+                the complete unsharded embedding table.
+
+        Raises:
+            ValueError: On shape mismatches.
+        """
+        V_full, D_full = full_weight.shape
+        V_local, D_local = self.weight.shape
+
+        # Vocabulary (row) validation
+        if V_full != self.num_embeddings:
+            raise ValueError(
+                f"full_weight has {V_full} rows but ParallelEmbedding expects "
+                f"num_embeddings={self.num_embeddings}."
+            )
+        if V_local != V_full:
+            raise ValueError(
+                f"Local weight has {V_local} rows but full_weight has {V_full}. "
+                f"ParallelEmbedding should not shard vocabulary rows."
+            )
+
+        # Embedding dimension (column) validation
+        if D_full != self.embedding_dim:
+            raise ValueError(
+                f"full_weight has embedding_dim={D_full} but ParallelEmbedding "
+                f"expects embedding_dim={self.embedding_dim}."
+            )
+
+        # Slice the correct column shard
+        world_size = get_stem_model_parallel_world_size()
+        rank = get_stem_model_parallel_rank()
+
+        if world_size <= 1:
+            self.weight.data.copy_(full_weight.to(dtype=self.weight.dtype))
+        else:
+            assert D_full % world_size == 0, (
+                f"embedding_dim={D_full} not divisible by world_size={world_size}"
+            )
+            shard_size = D_full // world_size
+            assert shard_size == D_local, (
+                f"Shard size {shard_size} != local dim {D_local}"
+            )
+            col_start = rank * shard_size
+            col_end = col_start + shard_size
+            self.weight.data.copy_(
+                full_weight[:, col_start:col_end].to(dtype=self.weight.dtype)
+            )
+
 
 # ---------------------------------------------------------------------------
 # Verification / self-test
