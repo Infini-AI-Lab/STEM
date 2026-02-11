@@ -1,1 +1,1 @@
-kubectl apply -f amyaml_submit/scripts/beidchen-lm1b-half-midfine-195549.yaml
+kubectl apply -f amyaml_submit/scripts/beidchen-lm1b-half-midfine-234616.yaml
