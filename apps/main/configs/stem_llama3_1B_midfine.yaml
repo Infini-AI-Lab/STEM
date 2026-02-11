@@ -74,7 +74,11 @@ eval:
         dtype: bf16
         temperature: 1.0
         top_p: 0.95
-    harness: null
+    harness: 
+        tasks:
+            - hellaswag
+            - piqa
+        limit: 1000
     validation:
         max_steps: 100
 

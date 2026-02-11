@@ -10,7 +10,7 @@ for f in "$dir"/*.sh; do
   base="${f##*/}"      # drop path -> "foo.sh"
   name="${base%.sh}"   # drop trailing .sh -> "foo" 
 
-  bash env_add_tmpl.sh $name 2 $base # hardcoding 4 nodes for now 
+  bash env_add_tmpl.sh $name 4 $base # hardcoding 4 nodes for now 
 done 
 
 # clear submit.sh 
