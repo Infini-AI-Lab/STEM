@@ -36,7 +36,7 @@ spec:
                         values:
                           - p5en.48xlarge
           tolerations:
-            - key: barijit-173b-pipeline-nn4b
+            - key: fuersth-infofm-p5en
               operator: Equal
               value: "True"
               effect: NoSchedule
