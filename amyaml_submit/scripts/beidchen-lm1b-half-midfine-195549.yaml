@@ -1,7 +1,7 @@
 apiVersion: "kubeflow.org/v1"
 kind: PyTorchJob
 metadata:
-  name: beidchen-lm1b-half-midfine-193852 # JOB_NAME like  <alias>-<pod/mpijob/torchjob>-<p4/g5/r5>-<project>-<task>[-<note>]
+  name: beidchen-lm1b-half-midfine-195549 # JOB_NAME like  <alias>-<pod/mpijob/torchjob>-<p4/g5/r5>-<project>-<task>[-<note>]
   namespace: default
 spec:
   elasticPolicy:
@@ -10,7 +10,7 @@ spec:
     maxReplicas: 2
     maxRestarts: 2
     nProcPerNode: &gpus_per_node 8
-    rdzvId: beidchen-lm1b-half-midfine-193852
+    rdzvId: beidchen-lm1b-half-midfine-195549
   runPolicy:
     ttlSecondsAfterFinished: 180 # give enough time to push any logs
     schedulingPolicy:
@@ -112,7 +112,7 @@ spec:
                   unzip -q awscliv2.zip &&
                   ./aws/install &&
                   cd /code-fsx/beidchen-sandbox/STEM &&
-                  bash amyaml_submit/scripts/lm1b-half-midfine.sh | tee "/code-fsx/beidchen-sandbox/beidchen-lm1b-half-midfine-193852.log"
+                  bash amyaml_submit/scripts/lm1b-half-midfine.sh | tee "/code-fsx/beidchen-sandbox/beidchen-lm1b-half-midfine-195549.log"
               image: 767397878797.dkr.ecr.us-east-1.amazonaws.com/agif-mm-pt-base:stem.v1
               imagePullPolicy: Always
               securityContext:
