@@ -1,7 +1,7 @@
 name: "stem_eval"
 dump_dir: logs/stem_eval
-ckpt_dir: logs/debug/checkpoints/0000000500
-stem_parallel_size: 4  # must match training stem_parallel_size
+ckpt_dir: logs/extended_pretraining/checkpoints/0000006600
+stem_parallel_size: 8  # must match training stem_parallel_size
 
 generator:
     max_tokens: 4096
@@ -12,7 +12,17 @@ generator:
 harness:
     tasks:
         - hellaswag
+        - task: nq_open
+          num_fewshot: 5
         - piqa
+        # - task: social_iqa
+        #   dataset_kwargs:
+        #     trust_remote_code: true
+        # - triviaqa
+        # - winogrande
+        - openbookqa
+        - arc_easy
+        - arc_challenge
     batch_size: 8
     num_fewshot: 0
     limit: 100
