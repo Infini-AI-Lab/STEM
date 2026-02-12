@@ -1,29 +1,30 @@
 name: "debug_evals"
-ckpt_dir: checkpoints/Llama-3.2-1B/distcp
+ckpt_dir: checkpoints/Llama-3.2-1B/distcp/
 dump_dir: logs/evals
 generator:
   max_tokens: 4096
   dtype: bf16
-  temperature: 1.0
+  temperature: 0.0
   top_p: 0.95
   show_progress: true
+
 harness:
   tasks:
     # - hellaswag
     # - task: boolq
     #   dataset_kwargs:
     #     trust_remote_code: true
-    - task: nq_open
-      num_fewshot: 5
-    # - piqa
+    # - task: nq_open
+    #   num_fewshot: 5
+    - piqa
     # - task: social_iqa
     #   dataset_kwargs:
     #     trust_remote_code: true
     # - triviaqa
     # - winogrande
-    - openbookqa
-    - arc_easy
-    - arc_challenge
+    # - openbookqa
+    # - arc_easy
+    # - arc_challenge
     # - race
     # - commonsense_qa
     # - coqa
@@ -32,5 +33,6 @@ harness:
     # - bbh
     # - mmlu
     # - mmlu_pro
-validation: null
-  # max_steps: 100
+  batch_size: 16
+validation: 
+  max_steps: 1000

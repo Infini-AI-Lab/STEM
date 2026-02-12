@@ -1,6 +1,6 @@
 name: "stem_eval"
 dump_dir: logs/stem_eval
-ckpt_dir: logs/extended_pretraining/checkpoints/0000006600
+ckpt_dir: checkpoints/STEM-1B-pretrain1T-midtrain100B-stem/
 stem_parallel_size: 8  # must match training stem_parallel_size
 
 generator:
@@ -8,25 +8,34 @@ generator:
     dtype: bf16
     temperature: 0.0
     top_p: 0.95
+    show_progress: true
 
 harness:
-    tasks:
-        - hellaswag
-        - task: nq_open
-          num_fewshot: 5
-        - piqa
-        # - task: social_iqa
-        #   dataset_kwargs:
-        #     trust_remote_code: true
-        # - triviaqa
-        # - winogrande
-        - openbookqa
-        - arc_easy
-        - arc_challenge
-    batch_size: 8
-    num_fewshot: 0
-    limit: 100
-
-validation: 
-    max_steps: 100
+  tasks:
+    - hellaswag
+    - task: boolq
+      dataset_kwargs:
+        trust_remote_code: true
+    # - task: nq_open
+    #   num_fewshot: 5
+    - piqa
+    # - task: social_iqa
+    #   dataset_kwargs:
+    #     trust_remote_code: true
+    # - triviaqa
+    - winogrande
+    - openbookqa
+    - arc_easy
+    - arc_challenge
+    - race
+    # - commonsense_qa
+    # - coqa
+    # - copa
+    # - gsm8k
+    # - bbh
+    # - mmlu
+    # - mmlu_pro
+  batch_size: 16
+validation:
+  max_steps: 1000
 

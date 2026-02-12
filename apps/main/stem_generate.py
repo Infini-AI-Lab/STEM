@@ -18,7 +18,7 @@ from apps.main.transformer import LMTransformer, LMTransformerArgs
 from apps.main.stem import StemLMTransformer, StemLMTransformerArgs
 from lingua.args import dataclass_from_dict
 from lingua.checkpoint import CONSOLIDATE_NAME, consolidate_checkpoints
-from lingua.stem_checkpoint import CONSOLIDATE_STEM_NAME, consolidate_stem_shards, load_stem_shards
+from lingua.stem_checkpoint import CONSOLIDATE_STEM_NAME, consolidate_stem_shards, load_stem_shards_resharded
 from lingua.stem_dist_utils import ParallelEmbedding, is_stem_initialized
 from lingua.tokenizer import Tokenizer, build_tokenizer
 from lingua.transformer import (
@@ -57,18 +57,21 @@ def load_consolidated_model_and_tokenizer(
     tokenizer = build_tokenizer(config.data.tokenizer.name, config.data.tokenizer.path)
     model = model_cls(model_args)
     
-    
     backbone_dict = torch.load(ckpt_path / CONSOLIDATE_NAME, weights_only=True)
     if "model" in backbone_dict:
         backbone_dict = backbone_dict["model"]
-    backbone_dict = {k.replace("model.", ""): v for k, v in backbone_dict.items()}
-    model.load_state_dict(backbone_dict, strict=False)
+    if next(iter(backbone_dict.keys())).startswith("model"):
+        backbone_dict = {k.replace("model.", "lm_transformer."): v for k, v in backbone_dict.items()}
+    # relax strict loading only for stem_embeddings
+    missing_keys, unexpected_keys = model.load_state_dict(backbone_dict, strict=False)
+    assert len(missing_keys) == len(model.lm_transformer.stem_layers) and all(key.startswith("stem_embeddings.") for key in missing_keys), f"Missing keys: {missing_keys}"
+    assert len(unexpected_keys) == 0, f"Unexpected keys: {unexpected_keys}"
     
     if is_stem_initialized():
         # Distributed: load sharded stem weights for this STEM MP rank
         # Use the parent dir (pre-consolidation checkpoint dir) which contains stem_shards/
         ckpt_parent = Path(os.path.dirname(ckpt_path))
-        load_stem_shards(model, ckpt_parent)
+        load_stem_shards_resharded(model, ckpt_parent)
     else:
         # Non-distributed: load consolidated (full) stem weights
         if not (ckpt_path / CONSOLIDATE_STEM_NAME).exists():

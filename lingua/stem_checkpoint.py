@@ -23,6 +23,7 @@ from lingua.stem_dist_utils import (
     ParallelEmbedding, 
     get_stem_model_parallel_rank, 
     get_stem_data_parallel_rank,
+    get_stem_model_parallel_world_size,
 )
 from lingua.distributed import get_is_master
 from lingua.checkpoint import CheckpointManager, load_from_checkpoint as load_backbone_from_checkpoint
@@ -252,6 +253,7 @@ def load_stem_shards(
 ):
     """
     Load STEM shards (model params and optionally optimizer states) for current STEM MP rank.
+    Assumes the checkpoint was saved with the same model parallel world size as the current run.
     
     Args:
         model: The model containing ParallelEmbedding modules
@@ -324,6 +326,172 @@ def load_stem_shards(
             logger.info(f"Loaded stem optimizer shard for mp_rank={mp_rank} from {optim_shard_path}")
         else:
             logger.warning(f"Stem optimizer shard for mp_rank={mp_rank} not found at {optim_shard_path}, starting with fresh optimizer state")
+
+
+SOURCE_STEM_MP_SIZE = 8  # Default: checkpoints are always saved with 8-way sharding
+
+
+def load_stem_shards_resharded(
+    model: nn.Module,
+    ckpt_dir: Path,
+    stem_optimizer: Optional[torch.optim.Optimizer] = None,
+    map_location: Optional[Union[str, torch.device]] = None,
+):
+    """
+    Generalized STEM shard loader that handles resharding from ``source_mp_size``
+    shards to the current STEM model-parallel world size.
+
+    The source checkpoint is assumed to have ``source_mp_size`` shards (default 8).
+    The current model-parallel world size must be <= ``source_mp_size`` and must
+    evenly divide it.  When loading with fewer ranks than source shards,
+    consecutive source shards are concatenated along the embedding dimension
+    (dim=1 of the weight tensor) for each target rank.
+
+    Examples with source_mp_size=8:
+      - target_mp_size=8: rank i loads shard i              (1-to-1)
+      - target_mp_size=4: rank i loads shards [2i, 2i+1]    (merge 2)
+      - target_mp_size=2: rank i loads shards [4i .. 4i+3]  (merge 4)
+      - target_mp_size=1: rank 0 loads all 8 shards          (merge 8)
+
+    Args:
+        model: The model containing ParallelEmbedding modules.
+        ckpt_dir: Root checkpoint directory (must contain a ``stem_shards/`` sub-dir).
+        stem_optimizer: Optional optimizer for stem embeddings to restore state into.
+        map_location: Device to map loaded tensors to (defaults to current CUDA device).
+        source_mp_size: Number of model-parallel shards the checkpoint was saved with.
+    """
+    stem_dir = ckpt_dir / STEM_SUBDIR_NAME
+    if not stem_dir.exists():
+        logger.info("No stem_shards directory found, skipping stem checkpoint load")
+        return
+
+    source_mp_size = len(list(stem_dir.glob("stem_model_mp*.pt")))
+    target_mp_size = get_stem_model_parallel_world_size()
+    mp_rank = get_stem_model_parallel_rank()
+    load_loc = map_location or torch.device("cuda", torch.cuda.current_device())
+
+    # --- Validate resharding geometry ---
+    assert source_mp_size >= target_mp_size, (
+        f"Source MP size ({source_mp_size}) must be >= target MP size ({target_mp_size})"
+    )
+    assert source_mp_size % target_mp_size == 0, (
+        f"Source MP size ({source_mp_size}) must be evenly divisible by "
+        f"target MP size ({target_mp_size})"
+    )
+
+    shards_per_rank = source_mp_size // target_mp_size
+    source_shard_start = mp_rank * shards_per_rank
+    source_shard_indices = list(range(source_shard_start, source_shard_start + shards_per_rank))
+
+    logger.info(
+        f"Resharding STEM: source_mp_size={source_mp_size}, target_mp_size={target_mp_size}, "
+        f"mp_rank={mp_rank}, loading source shards {source_shard_indices}"
+    )
+
+    # ------------------------------------------------------------------
+    # 1) Load & merge model parameters
+    # ------------------------------------------------------------------
+    merged_model_sd: Dict[str, list] = {}
+    for src_rank in source_shard_indices:
+        shard_path = stem_dir / STEM_MODEL_FILE_TEMPLATE.format(mp_rank=src_rank)
+        if shard_path.exists():
+            shard_sd = torch.load(shard_path, map_location=load_loc)
+            for k, v in shard_sd.items():
+                merged_model_sd.setdefault(k, []).append(v)
+        else:
+            logger.warning(f"Source stem model shard not found at {shard_path}")
+
+    # Concatenate along embedding dim (dim=1 for weight shape [V, D/source_mp_size])
+    for k in merged_model_sd:
+        merged_model_sd[k] = torch.cat(merged_model_sd[k], dim=1)
+
+    # Copy merged weights into the model's ParallelEmbedding parameters
+    with torch.no_grad():
+        for module_name, module in model.named_modules():
+            if isinstance(module, ParallelEmbedding):
+                for p_name, p in module.named_parameters(recurse=False):
+                    fq_name = f"{module_name}.{p_name}" if module_name else p_name
+                    if fq_name in merged_model_sd:
+                        p.copy_(merged_model_sd[fq_name].to(p.device))
+
+    logger.info(
+        f"Loaded & merged stem model shards {source_shard_indices} "
+        f"for mp_rank={mp_rank}"
+    )
+
+    # ------------------------------------------------------------------
+    # 2) Load & merge optimizer states
+    # ------------------------------------------------------------------
+    if stem_optimizer is None:
+        return
+
+    # Collect optimizer states from all source shards for this rank.
+    # Structure: param_name -> state_key -> [tensor_from_each_shard]
+    merged_optim_state: Dict[str, Dict[str, list]] = {}
+    any_loaded = False
+
+    for src_rank in source_shard_indices:
+        optim_path = stem_dir / STEM_OPTIM_FILE_TEMPLATE.format(mp_rank=src_rank)
+        if not optim_path.exists():
+            logger.warning(f"Source stem optimizer shard not found at {optim_path}")
+            continue
+        shard_optim = torch.load(optim_path, map_location=load_loc)
+        any_loaded = True
+
+        for param_name, param_state in shard_optim.get("state", {}).items():
+            if param_name not in merged_optim_state:
+                merged_optim_state[param_name] = {}
+            for state_key, state_value in param_state.items():
+                merged_optim_state[param_name].setdefault(state_key, []).append(
+                    state_value
+                )
+
+    if not any_loaded:
+        logger.warning(
+            "No stem optimizer shards found, starting with fresh optimizer state"
+        )
+        return
+
+    # Build the state dict that can be loaded into the current optimizer
+    param_name_to_obj = {name: param for name, param in _iter_stem_params(model)}
+    current_optim_sd = stem_optimizer.state_dict()
+
+    state_dict_to_load: Dict[str, Any] = {
+        "state": {},
+        "param_groups": current_optim_sd["param_groups"],  # keep current structure
+    }
+
+    for param_name, per_key_values in merged_optim_state.items():
+        if param_name not in param_name_to_obj:
+            continue
+        param_obj = param_name_to_obj[param_name]
+        merged_state: Dict[str, Any] = {}
+
+        for state_key, values in per_key_values.items():
+            first = values[0]
+            if isinstance(first, torch.Tensor):
+                if first.dim() >= 2:
+                    # 2-D+ state (exp_avg, exp_avg_sq, …) — concat along
+                    # the embedding dimension (dim=1), mirroring the weight
+                    merged_state[state_key] = torch.cat(values, dim=1).to(load_loc)
+                elif first.dim() == 1:
+                    # 1-D state — unusual for embeddings but handle safely
+                    merged_state[state_key] = torch.cat(values, dim=0).to(load_loc)
+                else:
+                    # 0-D (scalar) tensor (e.g. ``step``) — identical across
+                    # shards, take the first
+                    merged_state[state_key] = first.to(load_loc)
+            else:
+                # Non-tensor scalars (int / float step counters)
+                merged_state[state_key] = first
+
+        state_dict_to_load["state"][param_obj] = merged_state
+
+    stem_optimizer.load_state_dict(state_dict_to_load)
+    logger.info(
+        f"Loaded & merged stem optimizer shards {source_shard_indices} "
+        f"for mp_rank={mp_rank}"
+    )
                         
 
 def load_from_checkpoint(
@@ -362,7 +530,7 @@ def load_from_checkpoint(
 
     # 3) Load STEM shards (model params and optimizer states) for current STEM MP rank
     #    (no-op if stem_shards dir doesn't exist, e.g. old checkpoints)
-    load_stem_shards(model, ckpt_path, stem_optimizer=stem_optimizer)
+    load_stem_shards_resharded(model, ckpt_path, stem_optimizer=stem_optimizer)
   
 
 def consolidate_stem_shards(ckpt_dir: str):

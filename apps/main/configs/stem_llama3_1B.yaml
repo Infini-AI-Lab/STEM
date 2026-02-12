@@ -5,7 +5,7 @@ probe_freq: 100
 seed: 777
 
 optim:
-    lr: 2e-5
+    lr: 1e-5
     weight_decay: 0.033
     warmup: 2000
     lr_min_ratio: 0.000001
@@ -13,7 +13,7 @@ optim:
 
 # Separate learning rate and weight decay for stem_embeddings
 # (omit or set to null to use the main optim values)
-stem_lr: 1e-3
+stem_lr: 5e-4
 stem_weight_decay: 0.0
 
 distributed:
@@ -23,7 +23,7 @@ distributed:
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
     tp_size: 1
-    stem_parallel_size: 8
+    stem_parallel_size: 4
 
 model:
     dim: 2048
@@ -59,7 +59,7 @@ profiling:
 
 checkpoint:
     # path: logs/debug/checkpoints
-    init_ckpt_path: checkpoints/Llama-3.2-1B-proj-init
+    init_ckpt_path: checkpoints/Llama-1B-init-start2-stl4/
     dump:
         every: 200
         keep: 1
@@ -85,7 +85,6 @@ eval:
             - piqa
             # - task: nq_open
             #   num_fewshot: 5
-        limit: 100
     validation:
         max_steps: 100
 

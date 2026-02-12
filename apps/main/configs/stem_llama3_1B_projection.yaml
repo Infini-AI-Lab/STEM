@@ -27,8 +27,8 @@ loss_type: mse
 init_from_w3: true
 
 # Optimizer / schedule for the projections
-proj_lr: 4e-3
-proj_weight_decay: 0.0
+proj_lr: 2e-3
+proj_weight_decay: 0.05
 proj_beta1: 0.9
 proj_beta2: 0.95
 proj_epsilon: 1e-8
@@ -46,7 +46,7 @@ distributed:
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
     tp_size: 1
-    stem_parallel_size: 8   # used for saving derived STEM embedding shards
+    stem_parallel_size: 4   # used for saving derived STEM embedding shards
 
 model:
     dim: 2048
@@ -65,7 +65,7 @@ data:
     root_dir: /raid/user_data/rsadhukh
     sources:
         dclm-baseline_shuffled: 1.0
-    batch_size: 4
+    batch_size: 16
     prefetch_size: 1024
     seq_len: 4096
     n_views: 2
@@ -82,7 +82,7 @@ profiling:
 checkpoint:
     init_ckpt_path: checkpoints/Llama-3.2-1B/distcp   # pretrained LLaMA checkpoint
     dump:
-        every: 5000
+        every: 2500
         keep: 1
     eval:
         every: 20000
