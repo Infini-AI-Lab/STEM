@@ -30,8 +30,13 @@ model:
     weight_tying: True
     init_base_std: 0.02
     init_std_factor: disabled
-    max_seqlen: 8192
+    max_seqlen: 131072
     rope_theta: 500000.0
+    rope_scaling:
+        factor: 8.0
+        low_freq_factor: 1.0
+        high_freq_factor: 4.0
+        original_max_position_embeddings: 8192
     stem_layers: [1, 3, 5, 7, 9, 11, 13, 15]
 
 data:

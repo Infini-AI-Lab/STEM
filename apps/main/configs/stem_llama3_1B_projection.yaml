@@ -18,7 +18,7 @@ steps: 10_000
 seed: 42
 
 # Which layers get a projection (replaces w3 input with token embeddings)
-stem_layers: [2, 6, 10, 14]
+stem_layers: [2, 5, 8, 11, 14]
 
 # Loss type: "mse" (layerwise distillation) or "nll" (end-to-end)
 loss_type: mse
@@ -46,7 +46,7 @@ distributed:
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
     tp_size: 1
-    stem_parallel_size: 4   # used for saving derived STEM embedding shards
+    stem_parallel_size: 8   # used for saving derived STEM embedding shards
 
 model:
     dim: 2048
@@ -65,7 +65,7 @@ data:
     root_dir: /raid/user_data/rsadhukh
     sources:
         dclm-baseline_shuffled: 1.0
-    batch_size: 16
+    batch_size: 8
     prefetch_size: 1024
     seq_len: 4096
     n_views: 2

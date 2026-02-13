@@ -66,8 +66,10 @@ class MetricLogger:
             and self.args.logging.wandb is not None
             and get_is_master()
         ):
+            cfg_for_wandb = asdict(self.args)
+            cfg_for_wandb.pop("name", None)  # avoid overriding wandb run name
             run = wandb.init(
-                config=asdict(self.args),
+                config=cfg_for_wandb,
                 **asdict(self.args.logging.wandb),
             )
 
