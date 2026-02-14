@@ -1,0 +1,104 @@
+# =============================================================================
+# STEM Adapter Finetuning — No Warmup Variant
+# =============================================================================
+#
+# Same as stem_adapter_finetune.yaml but WITHOUT warmup phase.
+# The backbone is unfrozen from step 0, training everything jointly.
+#
+# Usage:
+#   torchrun --nproc-per-node 8 -m apps.main.stem_adapter_finetune \
+#       config=apps/main/configs/stem_adapter_finetune_no_warmup.yaml
+# =============================================================================
+
+dump_dir: logs/stem_adapter_finetune_no_warmup
+name: "stem_adapter_finetune_no_warmup_llama3_1B"
+seed: 42
+
+steps: 10000
+grad_acc_steps: 1
+gc_collect_freq: 1000
+
+# Adapter
+stem_layers: [1, 3, 5, 7, 9, 11, 13, 15]
+stem_init_type: xavier_uniform
+alpha_init: -5.0
+
+# NO warmup: backbone is unfrozen from step 0
+use_warmup: false
+warmup_steps: 0
+
+# Optimizers
+stem_lr: 1e-3
+stem_weight_decay: 0.0
+stem_beta1: 0.9
+stem_beta2: 0.95
+stem_epsilon: 1e-8
+stem_clip: 1.0
+
+alpha_lr: 1e-2
+alpha_weight_decay: 0.0
+
+backbone_lr: 2e-5
+backbone_weight_decay: 0.033
+backbone_clip: 1.0
+
+scheduler: cosine
+warmup_lr_steps: 500
+lr_min_ratio: 0.01
+
+cpu_offload_stem_optim: false
+
+model:
+    dim: 2048
+    ffn_dim_multiplier: 1.5
+    n_layers: 16
+    n_heads: 32
+    n_kv_heads: 8
+    head_dim: 64
+    weight_tying: true
+    init_base_std: 0.02
+    init_std_factor: disabled
+    max_seqlen: 4096
+    rope_theta: 500000.0
+
+distributed:
+    fsdp_type: full_shard
+    compile: false
+    model_dtype: bf16
+    matmul_allow_tf32: false
+    selective_activation_checkpointing: false
+    tp_size: 1
+    stem_parallel_size: 8
+
+data:
+    root_dir: /dev/shm/
+    sources:
+        dolmino-mix_shuffled: 1.0
+    batch_size: 4
+    prefetch_size: 1024
+    seq_len: 4096
+    n_views: 2
+    load_async: true
+    add_bos: true
+    add_eos: true
+    tokenizer:
+        name: tiktoken
+        path: tokenizer/original/tokenizer.model
+
+checkpoint:
+    init_ckpt_path: checkpoints/Llama-3.2-1B/distcp
+    dump:
+        every: 2000
+        keep: 3
+    eval:
+        every: 2000
+        keep: 1
+
+logging:
+    freq: 10
+    wandb:
+        project: "stem"
+        name: "stem-adapter-no-warmup"
+
+profiling:
+    run: false

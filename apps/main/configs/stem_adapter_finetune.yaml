@@ -1,0 +1,133 @@
+# =============================================================================
+# STEM Adapter Finetuning Configuration
+# =============================================================================
+#
+# Finetunes a pretrained Llama-3.2-1B by adding STEM embeddings in parallel
+# with existing FFN up-projection layers, blended via learnable gating alphas.
+#
+# Usage:
+#   torchrun --nproc-per-node 8 -m apps.main.stem_adapter_finetune \
+#       config=apps/main/configs/stem_adapter_finetune.yaml
+#
+# Override any field via CLI:
+#   torchrun --nproc-per-node 8 -m apps.main.stem_adapter_finetune \
+#       config=apps/main/configs/stem_adapter_finetune.yaml \
+#       warmup_steps=500 stem_lr=5e-4 use_warmup=false
+# =============================================================================
+
+dump_dir: logs/stem_adapter_finetune
+name: "stem_adapter_finetune_llama3_1B"
+seed: 42
+
+# Total training steps (including warmup)
+steps: 10000
+
+# Gradient accumulation
+grad_acc_steps: 1
+gc_collect_freq: 1000
+
+# ---- Adapter configuration ----
+# Which transformer layers get a parallel STEM embedding adapter
+# For 16-layer Llama-3.2-1B, every other layer starting from layer 1
+stem_layers: [1, 3, 5, 7, 9, 11, 13, 15]
+
+# Initialization: "xavier_uniform", "xavier_normal", or "normal_0.02"
+stem_init_type: xavier_uniform
+
+# Alpha init: sigmoid(-5) ≈ 0.007 (nearly pure w3 output at start)
+alpha_init: -5.0
+
+# ---- Warmup phase ----
+# When use_warmup=true, the backbone is frozen for warmup_steps steps,
+# training only STEM embeddings and alpha gating parameters.
+# After warmup, the backbone is unfrozen for full finetuning.
+use_warmup: true
+warmup_steps: 1000
+
+# ---- STEM embedding optimizer ----
+stem_lr: 1e-3
+stem_weight_decay: 0.0
+stem_beta1: 0.9
+stem_beta2: 0.95
+stem_epsilon: 1e-8
+stem_clip: 1.0
+
+# ---- Alpha (gating) optimizer ----
+alpha_lr: 1e-2
+alpha_weight_decay: 0.0
+
+# ---- Backbone optimizer (active after warmup) ----
+backbone_lr: 2e-5
+backbone_weight_decay: 0.033
+backbone_clip: 1.0
+
+# ---- LR schedule ----
+scheduler: cosine
+warmup_lr_steps: 500    # LR warmup ramp (not the adapter warmup phase)
+lr_min_ratio: 0.01
+
+# ---- CPU offloading ----
+# Set to true to offload STEM embedding optimizer states to CPU
+# Saves ~2x STEM embedding size in GPU memory
+cpu_offload_stem_optim: false
+
+# ---- Model architecture (Llama-3.2-1B) ----
+model:
+    dim: 2048
+    ffn_dim_multiplier: 1.5
+    n_layers: 16
+    n_heads: 32
+    n_kv_heads: 8
+    head_dim: 64
+    weight_tying: true
+    init_base_std: 0.02
+    init_std_factor: disabled
+    max_seqlen: 4096
+    rope_theta: 500000.0
+
+# ---- Distributed training ----
+distributed:
+    fsdp_type: full_shard
+    compile: false          # Must be false for hook compatibility
+    model_dtype: bf16
+    matmul_allow_tf32: false
+    selective_activation_checkpointing: false
+    tp_size: 1
+    stem_parallel_size: 8
+
+# ---- Data ----
+data:
+    root_dir: /dev/shm/
+    sources:
+        dolmino-mix_shuffled: 1.0
+    batch_size: 4
+    prefetch_size: 1024
+    seq_len: 4096
+    n_views: 2
+    load_async: true
+    add_bos: true
+    add_eos: true
+    tokenizer:
+        name: tiktoken
+        path: tokenizer/original/tokenizer.model
+
+# ---- Checkpointing ----
+checkpoint:
+    init_ckpt_path: checkpoints/Llama-3.2-1B/distcp
+    dump:
+        every: 2000
+        keep: 3
+    eval:
+        every: 2000
+        keep: 1
+
+# ---- Logging ----
+logging:
+    freq: 10
+    wandb:
+        project: "stem"
+        name: "stem-adapter-finetune"
+
+# ---- Profiling ----
+profiling:
+    run: false
