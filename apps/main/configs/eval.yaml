@@ -11,9 +11,9 @@ generator:
 harness:
   tasks:
     - hellaswag
-    - task: boolq
-      dataset_kwargs:
-        trust_remote_code: true
+    # - task: boolq
+    #   dataset_kwargs:
+    #     trust_remote_code: true
     # - task: nq_open
     #   num_fewshot: 5
     - piqa
@@ -21,11 +21,11 @@ harness:
     #   dataset_kwargs:
     #     trust_remote_code: true
     # - triviaqa
-    - winogrande
-    - openbookqa
-    - arc_easy
-    - arc_challenge
-    - race
+    # - winogrande
+    # - openbookqa
+    # - arc_easy
+    # - arc_challenge
+    # - race
     # - commonsense_qa
     # - coqa
     # - copa
@@ -34,5 +34,4 @@ harness:
     # - mmlu
     # - mmlu_pro
   batch_size: 16
-validation: 
-  max_steps: 1000
+validation: null

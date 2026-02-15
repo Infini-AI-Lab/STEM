@@ -1,0 +1,26 @@
+name: "qwen3_evals"
+ckpt_dir: checkpoints/Qwen3-1.7B-Base-lingua/
+dump_dir: logs/qwen3_evals
+model_type: qwen3
+generator:
+  max_tokens: 4096
+  dtype: bf16
+  temperature: 0.0
+  top_p: 0.95
+  show_progress: true
+
+harness:
+  tasks:
+    - hellaswag
+    - task: boolq
+      dataset_kwargs:
+        trust_remote_code: true
+    - piqa
+    - winogrande
+    - openbookqa
+    - arc_easy
+    - arc_challenge
+    - race
+  batch_size: 16
+validation: null
+

@@ -187,6 +187,70 @@ class TikTokenTokenizer(Tokenizer):
         return substrs, offsets
 
 
+class HuggingFaceTokenizer(Tokenizer):
+    """Wraps any HuggingFace tokenizer (AutoTokenizer).
+
+    Works for models like Qwen3 that use vocab.json + merges.txt (GPT-2 BPE)
+    rather than tiktoken or SentencePiece.
+
+    ``path`` should be the directory containing the HF tokenizer files
+    (tokenizer.json, tokenizer_config.json, vocab.json, merges.txt, etc.)
+    or any HuggingFace model identifier.
+    """
+
+    def __init__(self, model_path: str) -> None:
+        from transformers import AutoTokenizer
+
+        self.hf_tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+
+        # n_words = full vocab size the tokenizer can produce (incl. added special tokens)
+        self.n_words: int = len(self.hf_tok)
+
+        # BOS – Qwen3 has bos_token=None; fall back to eos if missing
+        if self.hf_tok.bos_token_id is not None:
+            self.bos_id: int = self.hf_tok.bos_token_id
+        else:
+            # Use eos as a "start" sentinel (common for Qwen / GPT-2 family)
+            self.bos_id: int = self.hf_tok.eos_token_id
+            logger.warning(
+                f"HuggingFace tokenizer has no bos_token; using eos_token "
+                f"(id={self.bos_id}) as bos fallback"
+            )
+
+        self.eos_id: int = self.hf_tok.eos_token_id
+        self.pad_id: int = (
+            self.hf_tok.pad_token_id
+            if self.hf_tok.pad_token_id is not None
+            else self.eos_id
+        )
+
+        logger.info(
+            f"HuggingFace tokenizer loaded from {model_path} – "
+            f"#words: {self.n_words}, BOS ID: {self.bos_id}, EOS ID: {self.eos_id}"
+        )
+
+    def encode(self, s: str, add_bos: bool = False, add_eos: bool = False) -> List[int]:
+        assert isinstance(s, str)
+        tokens = self.hf_tok.encode(s, add_special_tokens=False)
+        if add_bos:
+            tokens = [self.bos_id] + tokens
+        if add_eos:
+            tokens = tokens + [self.eos_id]
+        return tokens
+
+    def decode(self, tokens: List[int]) -> str:
+        return self.hf_tok.decode(tokens, skip_special_tokens=False)
+
+    def get_token_offsets(
+        self, text: str, tokens: Optional[List[int]] = None
+    ) -> Tuple[List[str], List[int]]:
+        enc = self.hf_tok(text, return_offsets_mapping=True, add_special_tokens=False)
+        offsets_map = enc["offset_mapping"]  # list of (start, end)
+        substrs = [text[s:e] for s, e in offsets_map]
+        offsets = [s for s, _ in offsets_map]
+        return substrs, offsets
+
+
 def build_tokenizer(name: str, path: Optional[str] = None) -> Tokenizer:
     if name == "bytes":
         return ByteTokenizer()
@@ -196,5 +260,7 @@ def build_tokenizer(name: str, path: Optional[str] = None) -> Tokenizer:
         return SentencePieceTokenizer(path)
     elif name == "tiktoken":
         return TikTokenTokenizer(path)
+    elif name == "huggingface":
+        return HuggingFaceTokenizer(path)
     else:
         raise NotImplementedError(f"{name} tokenizer type is not implemented")

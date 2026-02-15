@@ -83,6 +83,13 @@ eval:
         tasks:
             - hellaswag
             - piqa
+            - winogrande
+            - openbookqa
+            - arc_easy
+            - arc_challenge
+            - race
+            - gsm8k
+            - mmlu
         limit: 1000
     validation:
         max_steps: 100

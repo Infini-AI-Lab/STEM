@@ -24,6 +24,14 @@ from lingua.transformer import (
     lengths_to_local_ids,
     lengths_to_start_ids,
 )
+from apps.main.qwen3 import Qwen3Attention
+from apps.main.olmo3 import OLMo3Attention
+
+
+def _is_attention_module(module):
+    """Check if a module is an attention layer (works for Llama, Qwen3, OLMo3, etc.)."""
+    return isinstance(module, (Attention, Qwen3Attention, OLMo3Attention))
+
 from torch.nn.attention.flex_attention import create_block_mask
 
 
@@ -190,7 +198,7 @@ class PackedCausalTransformerGenerator:
 
     def clear_cache(self, offset):
         for module in self.model.modules():
-            if isinstance(module, Attention):
+            if _is_attention_module(module):
                 if not hasattr(module, "kv_cache"):
                     module.kv_cache = KVCache(
                         1,
@@ -273,7 +281,7 @@ class PackedCausalTransformerGenerator:
     def setup_generation(self, lengths):
         # KV Cache offset is set to the start of the padded documents
         for module in self.model.modules():
-            if isinstance(module, Attention):
+            if _is_attention_module(module):
                 module.kv_cache.offset = self.padded_doc_start
         # The token ids during generations correspond to the lengths of each doc
         # current_tok_id will be incremented during generation
@@ -422,6 +430,8 @@ def load_consolidated_model_and_tokenizer(
     first_key = next(iter(st_dict.keys()))    
     if first_key.startswith("model"):
         st_dict = {k.replace("model.", ""): v for k, v in st_dict.items()}
+    if "output.tied_module.weight" not in st_dict and "tok_embeddings.weight" in st_dict:
+        st_dict["output.tied_module.weight"] = st_dict["tok_embeddings.weight"]
     model.load_state_dict(st_dict)
     model = model.cuda().eval()
     for param in model.parameters():

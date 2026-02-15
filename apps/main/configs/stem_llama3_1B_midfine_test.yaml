@@ -35,9 +35,9 @@ model:
     stem_layers: [1, 3, 5, 7, 9, 11, 13, 15]
 
 data:
-    root_dir: /dev/shm/
+    root_dir: /raid/user_data/rsadhukh
     sources:
-        dolmino-mix_shuffled: 1.0
+        dclm-baseline_shuffled: 1.0
     batch_size: 8
     prefetch_size: 1024
     seq_len: 4096

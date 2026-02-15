@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-midfine-warmup-s2l4"
+experiment_name="lm1b-midfine-warmup-s2l4-highlr"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -36,15 +36,13 @@ python3 setup/aws_prepare_hf_dataset.py \
     --nchunks 8 \
     --seed 42
 
-rm -r /checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-half-midfine
-
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     config=apps/main/configs/stem_llama3_1B_midfine.yaml \
     data.root_dir=/dev/shm \
-    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-midfine-warmup-s2l4 \
+    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
     checkpoint.init_ckpt_path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-1B-init-start2-stl4 \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
     logging.wandb.name=${experiment_name} \
     model.stem_layers=[2,6,10,14] \
-    stem_lr=5e-4 \
+    stem_lr=1e-3 \
     stem_weight_decay=0.0

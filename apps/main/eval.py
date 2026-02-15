@@ -20,6 +20,8 @@ from apps.main.generate import (
     load_consolidated_model_and_tokenizer,
 )
 from apps.main.transformer import LMTransformer, LMTransformerArgs
+from apps.main.qwen3 import Qwen3LMTransformer, Qwen3LMTransformerArgs
+from apps.main.olmo3 import OLMo3LMTransformer, OLMo3LMTransformerArgs
 from lingua.args import dump_config
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
 from lingua.data import init_choice_state, setup_sources
@@ -32,6 +34,13 @@ from lingua.distributed import (
 )
 
 EVAL_FOLDER_NAME = "{:010d}"
+
+# Registry mapping model_type strings to (model_cls, model_args_cls)
+MODEL_REGISTRY = {
+    "llama": (LMTransformer, LMTransformerArgs),
+    "qwen3": (Qwen3LMTransformer, Qwen3LMTransformerArgs),
+    "olmo3": (OLMo3LMTransformer, OLMo3LMTransformerArgs),
+}
 
 logger = logging.getLogger()
 
@@ -75,6 +84,7 @@ class EvalArgs:
     dump_dir: Optional[str] = None
     metric_log_dir: Optional[str] = None
     ckpt_dir: str = ""
+    model_type: str = "llama"  # "llama", "qwen3", or "olmo3"
     generator: PackedCausalTransformerGeneratorArgs = field(
         default_factory=PackedCausalTransformerGeneratorArgs
     )
@@ -252,11 +262,19 @@ def launch_eval(cfg: EvalArgs):
 
     consolidate_path = str(consolidate_path)
     torch.distributed.barrier()
-    logger.info("Loading model")
+
+    # Resolve model class from model_type
+    if cfg.model_type not in MODEL_REGISTRY:
+        raise ValueError(
+            f"Unknown model_type '{cfg.model_type}'. "
+            f"Available: {list(MODEL_REGISTRY.keys())}"
+        )
+    model_cls, model_args_cls = MODEL_REGISTRY[cfg.model_type]
+    logger.info(f"Loading model (type={cfg.model_type})")
     model, tokenizer, train_cfg = load_consolidated_model_and_tokenizer(
         consolidate_path,
-        model_cls=LMTransformer,
-        model_args_cls=LMTransformerArgs,
+        model_cls=model_cls,
+        model_args_cls=model_args_cls,
     )
     logger.info("Model loaded")
     model.eval()

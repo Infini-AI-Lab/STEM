@@ -59,10 +59,26 @@ from lingua.tokenizer import build_tokenizer
 from apps.main.transformer import (
     LMTransformerArgs,
     LMTransformer,
-    get_num_flop_per_token,
-    build_fsdp_grouping_plan,
-    tp_parallelize,
-    get_no_recompute_ops,
+    get_num_flop_per_token as llama_get_num_flop_per_token,
+    build_fsdp_grouping_plan as llama_build_fsdp_grouping_plan,
+    tp_parallelize as llama_tp_parallelize,
+    get_no_recompute_ops as llama_get_no_recompute_ops,
+)
+from apps.main.qwen3 import (
+    Qwen3LMTransformerArgs,
+    Qwen3LMTransformer,
+    get_num_flop_per_token as qwen3_get_num_flop_per_token,
+    build_fsdp_grouping_plan as qwen3_build_fsdp_grouping_plan,
+    tp_parallelize as qwen3_tp_parallelize,
+    get_no_recompute_ops as qwen3_get_no_recompute_ops,
+)
+from apps.main.olmo3 import (
+    OLMo3LMTransformerArgs,
+    OLMo3LMTransformer,
+    get_num_flop_per_token as olmo3_get_num_flop_per_token,
+    build_fsdp_grouping_plan as olmo3_build_fsdp_grouping_plan,
+    tp_parallelize as olmo3_tp_parallelize,
+    get_no_recompute_ops as olmo3_get_no_recompute_ops,
 )
 from lingua.probe import AutoProbeD
 from lingua.stool import StoolArgs, launch_job
@@ -71,6 +87,29 @@ import wandb
 
 logger = logging.getLogger()
 
+# ---------------------------------------------------------------------------
+# Model registry: model_type -> (model_cls, args_cls,
+#                                 build_fsdp_grouping_plan, tp_parallelize,
+#                                 get_no_recompute_ops, get_num_flop_per_token)
+# ---------------------------------------------------------------------------
+MODEL_REGISTRY = {
+    "llama": (
+        LMTransformer, LMTransformerArgs,
+        llama_build_fsdp_grouping_plan, llama_tp_parallelize,
+        llama_get_no_recompute_ops, llama_get_num_flop_per_token,
+    ),
+    "qwen3": (
+        Qwen3LMTransformer, Qwen3LMTransformerArgs,
+        qwen3_build_fsdp_grouping_plan, qwen3_tp_parallelize,
+        qwen3_get_no_recompute_ops, qwen3_get_num_flop_per_token,
+    ),
+    "olmo3": (
+        OLMo3LMTransformer, OLMo3LMTransformerArgs,
+        olmo3_build_fsdp_grouping_plan, olmo3_tp_parallelize,
+        olmo3_get_no_recompute_ops, olmo3_get_num_flop_per_token,
+    ),
+}
+
 
 @dataclass
 class TrainArgs:
@@ -78,6 +117,9 @@ class TrainArgs:
     dump_dir: str = ""
 
     seed: int = 42
+
+    # Model type: "llama", "qwen3", or "olmo3"
+    model_type: str = "llama"
 
     # Number of gradient accumulation steps
     # Total batch size is batch_size*grad_acc_steps
@@ -260,12 +302,27 @@ def train(args: TrainArgs):
         logger.info(f"Running on dp rank : {dp_rank}")
         logger.info(f"Running on dp size : {dp_degree}")
 
+        # ------------------------------------------------------------------
+        # Resolve model class & helpers from the registry
+        # ------------------------------------------------------------------
+        if args.model_type not in MODEL_REGISTRY:
+            raise ValueError(
+                f"Unknown model_type '{args.model_type}'. "
+                f"Available: {list(MODEL_REGISTRY.keys())}"
+            )
+        (
+            model_cls, model_args_cls,
+            _build_fsdp_grouping_plan, _tp_parallelize,
+            _get_no_recompute_ops, _get_num_flop_per_token,
+        ) = MODEL_REGISTRY[args.model_type]
+        logger.info(f"Using model type: {args.model_type} ({model_cls.__name__})")
+
         torch.manual_seed(args.seed)
         logger.info("Building model")
 
         # Initializing Model in meta device allows us to initialize models much bigger than 1 gpu's memory
         with torch.device("meta"):
-            model = LMTransformer(args.model)
+            model = model_cls(args.model)
         logger.info("Model is built !")
 
         model_param_count = get_num_params(model)
@@ -275,9 +332,9 @@ def train(args: TrainArgs):
             world_mesh,
             args.model,
             args.distributed,
-            fsdp_grouping_plan=build_fsdp_grouping_plan(args.model),
-            tp_parallelize=tp_parallelize,
-            no_recompute_ops=get_no_recompute_ops(),
+            fsdp_grouping_plan=_build_fsdp_grouping_plan(args.model),
+            tp_parallelize=_tp_parallelize,
+            no_recompute_ops=_get_no_recompute_ops(),
         )
 
         # Once we shard the model on different gpus we can actually initialize the model
@@ -489,7 +546,7 @@ def train(args: TrainArgs):
                 # if you change the architecture
                 # Use xformer's analyze profile trace to get actual measurement
                 FLOPS = (
-                    get_num_flop_per_token(
+                    _get_num_flop_per_token(
                         model_param_count - args.model.vocab_size * args.model.dim,
                         args.model.n_layers,
                         args.model.dim,
@@ -564,6 +621,7 @@ def train(args: TrainArgs):
 
                 eval_args = dataclass_from_dict(EvalArgs, args.eval)
 
+                eval_args.model_type = args.model_type
                 eval_args.global_step = train_state.step
                 eval_args.ckpt_dir = str(checkpoint.existing_saves[-1])
                 eval_args.dump_dir = str(
