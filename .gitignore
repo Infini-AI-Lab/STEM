@@ -13,3 +13,4 @@ inference/tests/Data
 logs
 checkpoints
 tests
+run.sh

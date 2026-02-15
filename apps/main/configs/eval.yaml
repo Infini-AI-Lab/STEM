@@ -10,28 +10,36 @@ generator:
 
 harness:
   tasks:
-    - hellaswag
+    - task: hellaswag
+      dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
     # - task: boolq
-    #   dataset_kwargs:
-    #     trust_remote_code: true
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/super_glue
     # - task: nq_open
     #   num_fewshot: 5
-    - piqa
+    - task: piqa
+      dataset_path: /raid/user_data/rsadhukh/test_data/piqa
     # - task: social_iqa
     #   dataset_kwargs:
     #     trust_remote_code: true
     # - triviaqa
-    # - winogrande
-    # - openbookqa
-    # - arc_easy
-    # - arc_challenge
-    # - race
+    # - task: winogrande
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/winogrande
+    # - task: openbookqa
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/openbookqa
+    # - task: arc_easy
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
+    # - task: arc_challenge
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
+    # - task: race
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/race
     # - commonsense_qa
     # - coqa
     # - copa
-    # - gsm8k
+    # - task: gsm8k
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/gsm8k
     # - bbh
-    # - mmlu
+    # - task: mmlu
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/mmlu
     # - mmlu_pro
   batch_size: 16
 validation: null
