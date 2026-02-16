@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export PYTHONPATH=/home/rsadhukh/STEM:$PYTHONPATH
+export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 
 apt-get update &&
 apt-get install -y zip &&
