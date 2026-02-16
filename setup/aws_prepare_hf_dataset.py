@@ -109,6 +109,64 @@ def list_s3_files(s3_uri, region, pattern=".jsonl.zst"):
     return keys
 
 
+def list_s3_folders_with_sizes(s3_uri, region, pattern=".jsonl.zst"):
+    """Return list of (folder_name, total_bytes) for subdirectories under *s3_uri*.
+
+    Sizes are computed by summing all files matching *pattern* in each folder.
+    """
+    # List immediate subdirectories
+    cmd = f"aws s3 ls '{s3_uri}' --region {region}"
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
+    folders = []
+    for line in result.stdout.strip().split("\n"):
+        line = line.strip()
+        if line.startswith("PRE "):
+            folders.append(line[4:].rstrip("/"))
+    folders.sort()
+
+    # Get size of each folder
+    folder_sizes = []
+    for folder in folders:
+        folder_uri = f"{s3_uri}{folder}/"
+        cmd = f"aws s3 ls '{folder_uri}' --recursive --summarize --region {region}"
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
+        total_bytes = 0
+        for line in result.stdout.strip().split("\n"):
+            line = line.strip()
+            if line.startswith("Total Size:"):
+                # "Total Size: 123456789"
+                total_bytes = int(line.split(":")[-1].strip())
+                break
+        folder_sizes.append((folder, total_bytes))
+        print(f"  Folder {folder}: {total_bytes / (1024**3):.2f} GB", flush=True)
+
+    return folder_sizes
+
+
+def assign_folders_to_nodes(folder_sizes, num_nodes):
+    """Greedily assign folders to nodes to balance total bytes.
+
+    Sorts folders largest-first, then assigns each to the node with the
+    smallest current total (classic greedy bin-packing).
+
+    Returns a list of lists: ``result[node_rank]`` = list of folder names.
+    """
+    import heapq
+    # (current_total_bytes, node_rank)
+    heap = [(0, rank) for rank in range(num_nodes)]
+    heapq.heapify(heap)
+
+    assignments = [[] for _ in range(num_nodes)]
+
+    # Largest folders first for best balance
+    for folder, size in sorted(folder_sizes, key=lambda x: x[1], reverse=True):
+        total, rank = heapq.heappop(heap)
+        assignments[rank].append(folder)
+        heapq.heappush(heap, (total + size, rank))
+
+    return assignments
+
+
 def stream_lines_from_s3(s3_bucket, s3_key, region):
     """Stream-download *s3_key*, decompress on-the-fly, and yield lines."""
     cmd = f"aws s3 cp 's3://{s3_bucket}/{s3_key}' - --region {region} | zstd -d"
@@ -347,27 +405,37 @@ def main():
         s3_bucket = parts[0]
         s3_prefix = parts[1] if len(parts) > 1 else ""
 
-        all_keys = list_s3_files(s3_uri, args.region)
+        # Discover subfolders and their sizes, then assign to nodes by
+        # greedy bin-packing so each node gets roughly equal data.
+        print("Listing S3 folders and sizes ...", flush=True)
+        folder_sizes = list_s3_folders_with_sizes(s3_uri, args.region)
         if args.filter_pattern:
-            all_keys = [k for k in all_keys if args.filter_pattern in k]
-        print(f"Found {len(all_keys)} .jsonl.zst files in S3.", flush=True)
+            folder_sizes = [(f, s) for f, s in folder_sizes if args.filter_pattern in f]
+        print(f"Found {len(folder_sizes)} folders in S3.", flush=True)
 
-        # Assign subset to this node (round-robin)
-        my_keys = [k for i, k in enumerate(all_keys) if i % num_nodes == node_rank]
-        print(f"This node will process {len(my_keys)} files.", flush=True)
+        assignments = assign_folders_to_nodes(folder_sizes, num_nodes)
+        my_folders = assignments[node_rank]
+        my_total = sum(s for f, s in folder_sizes if f in my_folders)
+        print(
+            f"This node assigned {len(my_folders)} folders "
+            f"({my_total / (1024**3):.2f} GB): {my_folders}",
+            flush=True,
+        )
 
-        # Download all relevant .jsonl.zst files locally first (bulk download
-        # is much faster than line-by-line streaming from S3).
-        download_dir = os.path.join(args.out_dir, "_s3_downloads")
+        # Sync each assigned folder locally (fast parallel multi-part transfer)
+        download_dir = f"{args.out_dir.rstrip('/')}_s3_downloads"
         os.makedirs(download_dir, exist_ok=True)
-        my_local_files = []
-        for idx, key in enumerate(my_keys):
-            local_path = os.path.join(download_dir, os.path.basename(key))
-            s3_path = f"s3://{s3_bucket}/{key}"
-            print(f"[{idx + 1}/{len(my_keys)}] Downloading {s3_path} ...", flush=True)
-            run_command(f"aws s3 cp '{s3_path}' '{local_path}' --region {args.region}")
-            my_local_files.append(local_path)
+        for folder in my_folders:
+            folder_s3 = f"{s3_uri}{folder}/"
+            folder_local = os.path.join(download_dir, folder)
+            print(f"Syncing {folder_s3} → {folder_local} ...", flush=True)
+            run_command(
+                f"aws s3 sync '{folder_s3}' '{folder_local}' "
+                f"--region {args.region} --only-show-errors"
+            )
 
+        # Discover all downloaded .jsonl.zst files
+        my_local_files = list_local_files(download_dir)
         print(f"Downloaded {len(my_local_files)} files to {download_dir}", flush=True)
 
         # Process locally and delete each .zst after decompression to save space
