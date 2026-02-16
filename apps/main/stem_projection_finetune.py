@@ -109,10 +109,42 @@ from lingua.stem_checkpoint import (
 from apps.main.transformer import (
     LMTransformerArgs,
     LMTransformer,
-    build_fsdp_grouping_plan,
-    get_no_recompute_ops,
+    build_fsdp_grouping_plan as llama_build_fsdp_grouping_plan,
+    get_no_recompute_ops as llama_get_no_recompute_ops,
+)
+from apps.main.qwen3 import (
+    Qwen3LMTransformerArgs,
+    Qwen3LMTransformer,
+    build_fsdp_grouping_plan as qwen3_build_fsdp_grouping_plan,
+    get_no_recompute_ops as qwen3_get_no_recompute_ops,
+)
+from apps.main.olmo3 import (
+    OLMo3LMTransformerArgs,
+    OLMo3LMTransformer,
+    build_fsdp_grouping_plan as olmo3_build_fsdp_grouping_plan,
+    get_no_recompute_ops as olmo3_get_no_recompute_ops,
 )
 from apps.main.train import every_n_steps
+
+# ---------------------------------------------------------------------------
+# Model registry: model_type -> (model_cls, args_cls,
+#                                 build_fsdp_grouping_plan,
+#                                 get_no_recompute_ops)
+# ---------------------------------------------------------------------------
+PROJ_MODEL_REGISTRY = {
+    "llama": (
+        LMTransformer, LMTransformerArgs,
+        llama_build_fsdp_grouping_plan, llama_get_no_recompute_ops,
+    ),
+    "qwen3": (
+        Qwen3LMTransformer, Qwen3LMTransformerArgs,
+        qwen3_build_fsdp_grouping_plan, qwen3_get_no_recompute_ops,
+    ),
+    "olmo3": (
+        OLMo3LMTransformer, OLMo3LMTransformerArgs,
+        olmo3_build_fsdp_grouping_plan, olmo3_get_no_recompute_ops,
+    ),
+}
 
 import wandb
 
@@ -129,6 +161,9 @@ class ProjectionFinetuneArgs:
     dump_dir: str = ""
 
     seed: int = 42
+
+    # Model type: "llama", "qwen3", or "olmo3"
+    model_type: str = "llama"
 
     # Number of gradient accumulation steps
     grad_acc_steps: int = 1
@@ -220,7 +255,7 @@ def compute_ffn_hidden_dim(
 
 
 def capture_w3_weights(
-    model: LMTransformer,
+    model: torch.nn.Module,
     stem_layer_indices: List[int],
 ) -> Dict[int, torch.Tensor]:
     """
@@ -256,7 +291,7 @@ def capture_w3_weights(
 
 
 def collect_intermediates_and_tok_emb(
-    model: LMTransformer,
+    model: torch.nn.Module,
     input_ids: torch.Tensor,
     stem_layer_indices: List[int],
     target: Optional[torch.Tensor] = None,
@@ -340,7 +375,7 @@ def collect_intermediates_and_tok_emb(
 
 
 def compute_projection_nll(
-    model: LMTransformer,
+    model: torch.nn.Module,
     input_ids: torch.Tensor,
     target: torch.Tensor,
     stem_layer_indices: List[int],
@@ -409,7 +444,7 @@ def sync_projections_across_dp(projections: torch.nn.ModuleList):
 # ---------------------------------------------------------------------------
 
 def derive_and_save_stem_embeddings(
-    model: LMTransformer,
+    model: torch.nn.Module,
     projections: torch.nn.ModuleList,
     stem_layers: List[int],
     layer_to_proj_idx: Dict[int, int],
@@ -499,7 +534,7 @@ def save_projection_checkpoint(
     train_state: FinetuneTrainState,
     args: ProjectionFinetuneArgs,
     ckpt_dir: Path,
-    model: Optional[LMTransformer] = None,
+    model: Optional[torch.nn.Module] = None,
 ):
     """Save projection weights, derived STEM embeddings, and training state."""
     import json
@@ -661,12 +696,24 @@ def train(args: ProjectionFinetuneArgs):
             f"{args.distributed.stem_parallel_size}"
         )
 
-        # ---- Build the pretrained model (standard LMTransformer with w3) ----
+        # ---- Resolve model class & helpers from the registry ----
+        if args.model_type not in PROJ_MODEL_REGISTRY:
+            raise ValueError(
+                f"Unknown model_type '{args.model_type}'. "
+                f"Available: {list(PROJ_MODEL_REGISTRY.keys())}"
+            )
+        (
+            model_cls, model_args_cls,
+            _build_fsdp_grouping_plan, _get_no_recompute_ops,
+        ) = PROJ_MODEL_REGISTRY[args.model_type]
+        logger.info(f"Using model type: {args.model_type} ({model_cls.__name__})")
+
+        # ---- Build the pretrained model ----
         torch.manual_seed(args.seed)
-        logger.info("Building pretrained model (standard LMTransformer)")
+        logger.info(f"Building pretrained model ({model_cls.__name__})")
 
         with torch.device("meta"):
-            model = LMTransformer(args.model)
+            model = model_cls(args.model)
         logger.info("Pretrained model built on meta device")
 
         model_param_count = get_num_params(model)
@@ -679,9 +726,9 @@ def train(args: ProjectionFinetuneArgs):
             world_mesh,
             args.model,
             args.distributed,
-            fsdp_grouping_plan=build_fsdp_grouping_plan(args.model),
+            fsdp_grouping_plan=_build_fsdp_grouping_plan(args.model),
             tp_parallelize=None,
-            no_recompute_ops=get_no_recompute_ops(),
+            no_recompute_ops=_get_no_recompute_ops(),
         )
         args.distributed.compile = saved_compile
 
@@ -710,7 +757,7 @@ def train(args: ProjectionFinetuneArgs):
                 f"stem_layer index {idx} out of range [0, {len(model.layers)})"
             )
             assert hasattr(model.layers[idx].feed_forward, "w3"), (
-                f"Layer {idx} FeedForward has no w3 -- is this a standard LMTransformer?"
+                f"Layer {idx} FeedForward has no w3 -- model type '{args.model_type}' may not be compatible"
             )
         assert args.loss_type in ("nll", "mse"), (
             f"Invalid loss_type: {args.loss_type!r}. Must be 'nll' or 'mse'"

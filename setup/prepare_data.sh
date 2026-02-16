@@ -2,13 +2,13 @@
 
 export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 
-apt-get update &&
-apt-get install -y zip &&
-apt install -y zstd &&
-cd /dev/shm/ &&
-curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" &&
-unzip -q awscliv2.zip &&
-./aws/install &&
+apt-get update 
+apt-get install -y zip 
+apt install -y zstd 
+cd /dev/shm/ 
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" 
+unzip -q awscliv2.zip 
+./aws/install 
 cd /code-fsx/beidchen-sandbox/STEM
 
 set -euxo pipefail

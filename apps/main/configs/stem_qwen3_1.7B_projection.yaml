@@ -14,11 +14,12 @@
 
 dump_dir: logs/stem_projection_finetune
 name: "stem_projection_finetune_1B"
+model_type: qwen3
 steps: 10_000
 seed: 42
 
 # Which layers get a projection (replaces w3 input with token embeddings)
-stem_layers: [2, 5, 8, 11, 14, 17, 20, 23, 26]
+stem_layers: [3, 6, 9, 12, 15, 18, 21, 24]
 
 # Loss type: "mse" (layerwise distillation) or "nll" (end-to-end)
 loss_type: mse

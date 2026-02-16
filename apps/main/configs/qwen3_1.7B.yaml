@@ -57,7 +57,7 @@ profiling:
 checkpoint:
     init_ckpt_path: checkpoints/Qwen3-1.7B-Base-lingua
     dump:
-        every: 20
+        every: 200
         keep: 1
     eval:
         every: 200
