@@ -203,8 +203,12 @@ class HuggingFaceTokenizer(Tokenizer):
 
         self.hf_tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
-        # n_words = full vocab size the tokenizer can produce (incl. added special tokens)
-        self.n_words: int = len(self.hf_tok)
+        # n_words should match the model's embedding-table size, which may be
+        # larger than the number of tokens the tokenizer actually uses (e.g.
+        # Qwen3 pads vocab_size to a nice multiple for efficiency).
+        # If the model directory contains a config.json with an explicit
+        # vocab_size, prefer that; otherwise fall back to len(tokenizer).
+        self.n_words: int = self._resolve_vocab_size(model_path)
 
         # BOS – Qwen3 has bos_token=None; fall back to eos if missing
         if self.hf_tok.bos_token_id is not None:
@@ -228,6 +232,35 @@ class HuggingFaceTokenizer(Tokenizer):
             f"HuggingFace tokenizer loaded from {model_path} – "
             f"#words: {self.n_words}, BOS ID: {self.bos_id}, EOS ID: {self.eos_id}"
         )
+
+    def _resolve_vocab_size(self, model_path: str) -> int:
+        """Return the effective vocab size.
+
+        Many models (e.g. Qwen3) pad their embedding table to a larger
+        ``vocab_size`` than the number of tokens the tokenizer can actually
+        produce.  If ``model_path`` is a local directory containing a
+        ``config.json`` with an explicit ``vocab_size`` that is ≥ the
+        tokenizer length, we use that so the embedding / output layers are
+        sized correctly.  Otherwise we fall back to ``len(self.hf_tok)``.
+        """
+        import json
+
+        cfg_path = Path(model_path) / "config.json"
+        if cfg_path.is_file():
+            try:
+                with open(cfg_path) as f:
+                    model_cfg = json.load(f)
+                cfg_vocab = model_cfg.get("vocab_size")
+                if cfg_vocab is not None and cfg_vocab >= len(self.hf_tok):
+                    logger.info(
+                        f"Using vocab_size={cfg_vocab} from {cfg_path} "
+                        f"(tokenizer has {len(self.hf_tok)} tokens)"
+                    )
+                    return int(cfg_vocab)
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning(f"Could not read {cfg_path}: {exc}")
+
+        return len(self.hf_tok)
 
     def encode(self, s: str, add_bos: bool = False, add_eos: bool = False) -> List[int]:
         assert isinstance(s, str)

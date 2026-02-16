@@ -37,9 +37,9 @@ model:
   init_std_factor: disabled
 
 data:
-  root_dir: data/shuffled
+  root_dir: /raid/user_data/rsadhukh
   sources:
-      fineweb_edu_10bt: 1.0
+      dclm-baseline_shuffled: 1.0
   batch_size: 4
   prefetch_size: 1024
   seq_len: 4096
