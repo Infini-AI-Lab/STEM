@@ -354,18 +354,40 @@ def main():
 
         # Assign subset to this node (round-robin)
         my_keys = [k for i, k in enumerate(all_keys) if i % num_nodes == node_rank]
-        print(f"This node will stream {len(my_keys)} files.", flush=True)
+        print(f"This node will process {len(my_keys)} files.", flush=True)
 
-        line_iter_fn = lambda key: stream_lines_from_s3(s3_bucket, key, args.region)
+        # Download all relevant .jsonl.zst files locally first (bulk download
+        # is much faster than line-by-line streaming from S3).
+        download_dir = os.path.join(args.out_dir, "_s3_downloads")
+        os.makedirs(download_dir, exist_ok=True)
+        my_local_files = []
+        for idx, key in enumerate(my_keys):
+            local_path = os.path.join(download_dir, os.path.basename(key))
+            s3_path = f"s3://{s3_bucket}/{key}"
+            print(f"[{idx + 1}/{len(my_keys)}] Downloading {s3_path} ...", flush=True)
+            run_command(f"aws s3 cp '{s3_path}' '{local_path}' --region {args.region}")
+            my_local_files.append(local_path)
+
+        print(f"Downloaded {len(my_local_files)} files to {download_dir}", flush=True)
+
+        # Process locally and delete each .zst after decompression to save space
+        line_iter_fn = lambda path: stream_lines_from_local_zst(path)
         prepare_data(
             line_iterator_fn=line_iter_fn,
-            file_labels=my_keys,
+            file_labels=my_local_files,
             out_dir=args.out_dir,
             dataset=args.dataset,
             nchunks=args.nchunks,
             seed=args.seed + node_rank,  # different seed per node for diversity
             k_validation=args.k_validation,
+            delete_after=my_local_files,  # free space after each file
         )
+
+        # Clean up download directory
+        if os.path.isdir(download_dir):
+            import shutil
+            shutil.rmtree(download_dir)
+            print(f"Cleaned up {download_dir}", flush=True)
 
     else:
         # ---- local mode ----
