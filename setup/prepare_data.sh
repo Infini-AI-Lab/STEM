@@ -1,3 +1,5 @@
+#!/bin/bash
+
 export PYTHONPATH=/home/rsadhukh/STEM:$PYTHONPATH
 
 apt-get update &&
