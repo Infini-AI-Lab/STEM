@@ -43,7 +43,7 @@ freeze_output: false
 optim:
     lr: 2e-5
     weight_decay: 0.033
-    warmup: 500
+    warmup: 2000
     lr_min_ratio: 0.01
     clip: 1.0
     scheduler: cosine
@@ -78,7 +78,8 @@ distributed:
 data:
     root_dir: /dev/shm/
     sources:
-        dolmino-mix_shuffled: 1.0
+        # dolmino-mix_shuffled: 1.0
+        fineweb_edu_10bt_shuffled: 1.0
     batch_size: 4
     prefetch_size: 1024
     seq_len: 4096
