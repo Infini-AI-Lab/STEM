@@ -1,25 +1,32 @@
 # =============================================================================
-# STEM Adapter Finetuning Configuration
+# STEM Adapter Finetuning — Frozen Backbone (LoRA-style)
 # =============================================================================
 #
-# Finetunes a pretrained Llama-3.2-1B by adding STEM embeddings in parallel
-# with existing FFN up-projection layers, blended via learnable gating alphas.
+# Finetunes ONLY the STEM embedding adapters and alpha gating scalars while
+# keeping the pretrained Llama-3.2-1B backbone completely frozen throughout
+# training.  Analogous to LoRA-style adapter-only finetuning.
+#
+# Key differences from the full finetuning config:
+#   - freeze_backbone: true   → backbone never trains
+#   - use_warmup: false        → no warmup/unfreeze transition (irrelevant)
+#   - No backbone optimizer is created → saves ~2× backbone param memory
+#   - backbone_lr, backbone_weight_decay, backbone_clip are ignored at runtime
 #
 # Usage:
 #   torchrun --nproc-per-node 8 -m apps.main.stem_adapter_finetune \
-#       config=apps/main/configs/stem_adapter_finetune.yaml
+#       config=apps/main/configs/stem_adapter_frozen_backbone.yaml
 #
 # Override any field via CLI:
 #   torchrun --nproc-per-node 8 -m apps.main.stem_adapter_finetune \
-#       config=apps/main/configs/stem_adapter_finetune.yaml \
-#       warmup_steps=500 stem_lr=5e-4 use_warmup=false
+#       config=apps/main/configs/stem_adapter_frozen_backbone.yaml \
+#       stem_lr=5e-4 alpha_lr=5e-3 steps=20000
 # =============================================================================
 
-dump_dir: logs/stem_adapter_finetune
-name: "stem_adapter_finetune_llama3_1B"
+dump_dir: logs/stem_adapter_frozen_backbone
+name: "stem_adapter_frozen_llama3_1B"
 seed: 42
 
-# Total training steps (including warmup)
+# Total training steps
 steps: 10000
 
 # Gradient accumulation
@@ -27,22 +34,18 @@ grad_acc_steps: 1
 gc_collect_freq: 1000
 
 # ---- Adapter configuration ----
-# Which transformer layers get a parallel STEM embedding adapter
-# For 16-layer Llama-3.2-1B, every other layer starting from layer 1
 stem_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-
-# Initialization: "xavier_uniform", "xavier_normal", or "normal_0.02"
 stem_init_type: xavier_uniform
-
-# Alpha init: sigmoid(-5) ≈ 0.007 (nearly pure w3 output at start)
 alpha_init: -5.0
 
-# ---- Warmup phase ----
-# When use_warmup=true, the backbone is frozen for warmup_steps steps,
-# training only STEM embeddings and alpha gating parameters.
-# After warmup, the backbone is unfrozen for full finetuning.
-use_warmup: true
-warmup_steps: 1000
+# ---- Backbone freezing ----
+# This is the key flag: keeps the backbone frozen for the entire run.
+freeze_backbone: true
+
+# Warmup is irrelevant when freeze_backbone=true (backbone never unfreezes),
+# but we set it to false explicitly for clarity.
+use_warmup: false
+warmup_steps: 0
 
 # ---- STEM embedding optimizer ----
 stem_lr: 1e-3
@@ -56,19 +59,18 @@ stem_clip: 1.0
 alpha_lr: 1e-2
 alpha_weight_decay: 0.0
 
-# ---- Backbone optimizer (active after warmup) ----
-backbone_lr: 2e-5
-backbone_weight_decay: 0.033
+# ---- Backbone optimizer (unused when freeze_backbone=true) ----
+# These values are ignored at runtime but kept for config completeness.
+backbone_lr: 0.0
+backbone_weight_decay: 0.0
 backbone_clip: 1.0
 
 # ---- LR schedule ----
 scheduler: cosine
-warmup_lr_steps: 2000    # LR warmup ramp (not the adapter warmup phase)
+warmup_lr_steps: 2000
 lr_min_ratio: 0.01
 
 # ---- CPU offloading ----
-# Set to true to offload STEM embedding optimizer states to CPU
-# Saves ~2x STEM embedding size in GPU memory
 cpu_offload_stem_optim: false
 
 # ---- Model architecture (Llama-3.2-1B) ----
@@ -88,7 +90,7 @@ model:
 # ---- Distributed training ----
 distributed:
     fsdp_type: full_shard
-    compile: false          # Must be false for hook compatibility
+    compile: false
     model_dtype: bf16
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
@@ -122,8 +124,6 @@ checkpoint:
         keep: 1
 
 # ---- Evaluation ----
-# Uncomment to enable periodic evaluation (piqa, hellaswag, etc.)
-# Runs at every checkpoint.eval.every steps (see checkpoint section above).
 eval:
     generator:
         max_tokens: 4096
@@ -142,7 +142,7 @@ logging:
     freq: 10
     wandb:
         project: "stem"
-        name: "stem-adapter-finetune"
+        name: "stem-adapter-frozen-backbone"
 
 # ---- Profiling ----
 profiling:

@@ -26,7 +26,13 @@ Key features
    train only the STEM embeddings + gating alphas for a configurable number
    of warmup steps before unfreezing everything.
 
-4. **Multiple initialization strategies**: Xavier uniform, Xavier normal,
+4. **Frozen backbone (adapter-only) mode**: When ``freeze_backbone=True``,
+   the pretrained backbone remains frozen for the entire training run and
+   only STEM embeddings + gating alphas are trained — analogous to
+   LoRA-style adapter finetuning.  The backbone optimizer is not created,
+   saving ~2× backbone parameter memory from AdamW states.
+
+5. **Multiple initialization strategies**: Xavier uniform, Xavier normal,
    or small-std normal (std=0.02).
 
 Architecture
@@ -179,13 +185,24 @@ class StemAdapterFinetuneArgs:
     # Default: -5.0  =>  sigmoid(-5) ≈ 0.0067  ≈  0  (nearly pure w3 at start)
     alpha_init: float = -5.0
 
+    # ---- Backbone freezing ----
+
+    # When True, the pretrained backbone is frozen for the ENTIRE training
+    # run.  Only STEM embeddings and alpha gating scalars are trained —
+    # analogous to LoRA-style adapter-only finetuning.  This overrides
+    # use_warmup (warmup/unfreeze is meaningless when the backbone never
+    # trains) and skips creation of the backbone optimizer, saving
+    # significant GPU memory (~2× backbone parameter size for AdamW states).
+    freeze_backbone: bool = False
+
     # ---- Warmup configuration ----
+    # (Ignored when freeze_backbone=True)
 
     # Whether to use a warmup phase where the backbone is frozen
     use_warmup: bool = True
 
     # Number of warmup steps (backbone frozen, only STEM + alphas trained)
-    # Only used when use_warmup=True
+    # Only used when use_warmup=True and freeze_backbone=False
     warmup_steps: int = 1000
 
     # ---- Optimizer: STEM embeddings ----
@@ -1343,17 +1360,24 @@ def train(args_dict):
             fused=False,
         )
 
-        # --- Backbone optimizer (created with initial lr=0 if using warmup) ---
-        backbone_params = list(model.parameters())
-        backbone_initial_lr = 0.0 if args.use_warmup else args.backbone_lr
-        backbone_optimizer = AdamW(
-            backbone_params,
-            lr=backbone_initial_lr,
-            weight_decay=args.backbone_weight_decay,
-            fused=True,
-        )
-        # During warmup, we disable backbone grads entirely (more efficient than lr=0)
-        # The optimizer is created now so we can restore from checkpoint uniformly
+        # --- Backbone optimizer (only when backbone will be trained) ---
+        if args.freeze_backbone:
+            backbone_optimizer = None
+            logger.info(
+                "freeze_backbone=True: skipping backbone optimizer "
+                "(saves ~2× backbone param memory from AdamW states)"
+            )
+        else:
+            backbone_params = list(model.parameters())
+            backbone_initial_lr = 0.0 if args.use_warmup else args.backbone_lr
+            backbone_optimizer = AdamW(
+                backbone_params,
+                lr=backbone_initial_lr,
+                weight_decay=args.backbone_weight_decay,
+                fused=True,
+            )
+            # During warmup, we disable backbone grads entirely (more efficient than lr=0)
+            # The optimizer is created now so we can restore from checkpoint uniformly
 
         # --- LR schedulers ---
         stem_optim_args = OptimArgs(
@@ -1385,13 +1409,17 @@ def train(args_dict):
             lr_min_ratio=args.lr_min_ratio,
         )
         backbone_lr_fn = build_lr_fn(backbone_optim_args, total_optim_steps)
-        backbone_scheduler = lr_scheduler.LambdaLR(backbone_optimizer, backbone_lr_fn)
+        if backbone_optimizer is not None:
+            backbone_scheduler = lr_scheduler.LambdaLR(backbone_optimizer, backbone_lr_fn)
+        else:
+            backbone_scheduler = None
 
         schedulers = {
             "stem": stem_scheduler,
             "alpha": alpha_scheduler,
-            "backbone": backbone_scheduler,
         }
+        if backbone_scheduler is not None:
+            schedulers["backbone"] = backbone_scheduler
 
         # ================================================================
         # 5. Data loader & training state
@@ -1403,7 +1431,7 @@ def train(args_dict):
             acc_step=0,
             scheduler_states={},
             data_loader_state=data_loader_state,
-            is_warmup=args.use_warmup,
+            is_warmup=args.use_warmup and not args.freeze_backbone,
         )
 
         # ================================================================
@@ -1437,6 +1465,11 @@ def train(args_dict):
 
         def unfreeze_backbone():
             """Unfreeze backbone model parameters for full finetuning."""
+            if backbone_optimizer is None:
+                raise RuntimeError(
+                    "Cannot unfreeze backbone: no backbone optimizer "
+                    "(freeze_backbone=True). This should never happen."
+                )
             for param in model.parameters():
                 param.requires_grad = True
             model.train()
@@ -1461,7 +1494,13 @@ def train(args_dict):
             logger.info("Backbone UNFROZEN (full finetuning mode)")
 
         # Apply initial freeze state
-        if train_state.is_warmup:
+        if args.freeze_backbone:
+            freeze_backbone()
+            logger.info(
+                "freeze_backbone=True: backbone will remain frozen for "
+                "the entire training run (adapter-only finetuning)"
+            )
+        elif train_state.is_warmup:
             freeze_backbone()
         else:
             unfreeze_backbone()
@@ -1493,8 +1532,9 @@ def train(args_dict):
 
         logger.info(
             f"Starting training from step {train_state.step} "
-            f"(warmup={'ON' if train_state.is_warmup else 'OFF'}, "
-            f"warmup_steps={args.warmup_steps if args.use_warmup else 'N/A'}, "
+            f"(freeze_backbone={args.freeze_backbone}, "
+            f"warmup={'ON' if train_state.is_warmup else 'OFF'}, "
+            f"warmup_steps={args.warmup_steps if (args.use_warmup and not args.freeze_backbone) else 'N/A'}, "
             f"total_steps={args.steps})"
         )
 
@@ -1502,7 +1542,8 @@ def train(args_dict):
         while train_state.step < args.steps:
             # ---- Check warmup → full finetuning transition ----
             if (
-                args.use_warmup
+                not args.freeze_backbone
+                and args.use_warmup
                 and train_state.is_warmup
                 and train_state.step >= args.warmup_steps
             ):
@@ -1591,8 +1632,8 @@ def train(args_dict):
                         alpha_params, max_norm=10.0, foreach=False,
                     ).item()
 
-                # Clip backbone gradients (if unfrozen)
-                if not train_state.is_warmup:
+                # Clip backbone gradients (if unfrozen and optimizer exists)
+                if not train_state.is_warmup and backbone_optimizer is not None:
                     bb_params = [p for p in model.parameters() if p.grad is not None]
                     if bb_params:
                         grad_norm_backbone = torch.nn.utils.clip_grad_norm_(
@@ -1610,14 +1651,14 @@ def train(args_dict):
                 stem_scheduler.step()
                 alpha_scheduler.step()
 
-                if not train_state.is_warmup:
+                if not train_state.is_warmup and backbone_optimizer is not None:
                     backbone_optimizer.step()
                     backbone_scheduler.step()
 
                 # Zero gradients
                 stem_optimizer.zero_grad()
                 alpha_optimizer.zero_grad()
-                if not train_state.is_warmup:
+                if not train_state.is_warmup and backbone_optimizer is not None:
                     backbone_optimizer.zero_grad()
 
                 train_state.step += 1
@@ -1657,7 +1698,10 @@ def train(args_dict):
                      else stem_optimizer).param_groups[0]["lr"]
                 )
                 curr_alpha_lr = float(alpha_optimizer.param_groups[0]["lr"])
-                curr_bb_lr = float(backbone_optimizer.param_groups[0]["lr"])
+                curr_bb_lr = (
+                    float(backbone_optimizer.param_groups[0]["lr"])
+                    if backbone_optimizer is not None else 0.0
+                )
 
                 # Gate values
                 gate_vals = adapter.get_gate_values()
@@ -1667,6 +1711,7 @@ def train(args_dict):
                         "global_step": train_state.step,
                         "acc_step": train_state.acc_step,
                         "is_warmup": int(train_state.is_warmup),
+                        "freeze_backbone": int(args.freeze_backbone),
                         "speed": {
                             "wps": wps,
                             "curr_iter_time": curr_iter_time,
@@ -1706,7 +1751,7 @@ def train(args_dict):
                 )
                 logger.info(
                     f"step: {train_state.step}"
-                    f"  {'WARM' if train_state.is_warmup else 'FULL'}"
+                    f"  {'FROZEN' if args.freeze_backbone else ('WARM' if train_state.is_warmup else 'FULL')}"
                     f"  loss: {loss_for_log.item():.4f}"
                     f"  g_stem: {grad_norm_stem:.2e}"
                     f"  g_alpha: {grad_norm_alpha:.2e}"
