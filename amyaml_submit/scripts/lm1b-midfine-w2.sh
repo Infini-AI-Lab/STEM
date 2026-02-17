@@ -37,6 +37,8 @@ python3 setup/aws_prepare_hf_dataset.py \
     --node_rank ${NODE_RANK} \
     --nchunks 8 
 
+rm -rf /dev/shm/dolma3_dolmino_mix-100B-1025
+
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     config=apps/main/configs/stem_llama3_1B_midfine.yaml \
     data.root_dir=/dev/shm \
