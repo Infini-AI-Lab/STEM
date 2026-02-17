@@ -1,5 +1,6 @@
 dump_dir: logs/stem_qwen3_1.7b
 name: "stem_qwen3_1.7b"
+model_type: qwen3
 steps: 60_000
 probe_freq: 100
 seed: 777

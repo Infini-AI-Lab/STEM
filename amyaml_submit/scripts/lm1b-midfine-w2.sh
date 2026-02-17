@@ -21,6 +21,8 @@ else
     export WANDB_MODE=offline
 fi
 
+NODE_RANK=${HOSTNAME##*-}
+echo "NODE_RANK: $NODE_RANK"
 echo "WANDB_MODE: $WANDB_MODE"
 
 # Space-efficient data prep: each node streams only its 1/N share from S3
@@ -33,6 +35,7 @@ python3 setup/aws_prepare_hf_dataset.py \
     --out_dir /dev/shm/dolmino-mix_shuffled \
     --dataset dolmino-mix \
     --num_nodes ${NNODES} \
+    --node_rank ${NODE_RANK} \
     --nchunks 8 \
     --seed 42
 

@@ -61,10 +61,11 @@ from lingua.probe import AutoProbeD
 from lingua.stool import StoolArgs, launch_job
 
 from apps.main.train import TrainArgs, TrainState, validate_train_args, every_n_steps
-from apps.main.stem import StemLMTransformerArgs, StemLMTransformer, build_stem_lm_fsdp_grouping_plan
-from apps.main.transformer import (
-    get_no_recompute_ops,
-    get_num_flop_per_token,
+from apps.main.stem import (
+    StemLMTransformerArgs,
+    StemLMTransformer,
+    build_stem_lm_fsdp_grouping_plan,
+    STEM_MODEL_REGISTRY,
 )
 from lingua.stem_dist_utils import (
     initialize_stem_process_group,
@@ -153,12 +154,25 @@ def train(args: StemTrainArgs):
         initialize_stem_process_group(args.distributed.stem_parallel_size)
         logger.info(f"Initialized stem process groups with parallel size: {args.distributed.stem_parallel_size}")
 
+        # ---- Resolve model class & helpers from the registry ----
+        if args.model_type not in STEM_MODEL_REGISTRY:
+            raise ValueError(
+                f"Unknown model_type '{args.model_type}'. "
+                f"Available: {list(STEM_MODEL_REGISTRY.keys())}"
+            )
+        (
+            stem_model_cls, _stem_args_cls,
+            _build_fsdp_plan,
+            _get_no_recompute_ops, _get_num_flop_per_token,
+        ) = STEM_MODEL_REGISTRY[args.model_type]
+        logger.info(f"Using STEM model type: {args.model_type} ({stem_model_cls.__name__})")
+
         torch.manual_seed(args.seed)
         logger.info("Building model")
         
         # Initializing Model in meta device allows us to initialize models much bigger than 1 gpu's memory
         with torch.device("meta"):
-            model = StemLMTransformer(args.model)
+            model = stem_model_cls(args.model)
         logger.info("Model is built !")
         
         model_param_count = get_num_params(model)
@@ -168,9 +182,9 @@ def train(args: StemTrainArgs):
             world_mesh,
             args.model,
             args.distributed,
-            fsdp_grouping_plan=build_stem_lm_fsdp_grouping_plan(args.model),
+            fsdp_grouping_plan=_build_fsdp_plan(args.model),
             tp_parallelize=None,
-            no_recompute_ops=get_no_recompute_ops(),
+            no_recompute_ops=_get_no_recompute_ops(),
         )
         
         model = model.to_empty(device="cuda")
@@ -540,7 +554,7 @@ def train(args: StemTrainArgs):
                 # if you change the architecture
                 # Use xformer's analyze profile trace to get actual measurement
                 FLOPS = (
-                    get_num_flop_per_token(
+                    _get_num_flop_per_token(
                         model_param_count - args.model.vocab_size * args.model.dim,
                         args.model.n_layers,
                         args.model.dim,
@@ -628,6 +642,7 @@ def train(args: StemTrainArgs):
 
                 eval_args = dataclass_from_dict(StemEvalArgs, args.eval)
 
+                eval_args.model_type = args.model_type
                 eval_args.global_step = train_state.step
                 eval_args.ckpt_dir = str(checkpoint.existing_saves[-1])
                 eval_args.stem_parallel_size = args.distributed.stem_parallel_size

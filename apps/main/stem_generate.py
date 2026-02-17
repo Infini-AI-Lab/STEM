@@ -14,8 +14,7 @@ from omegaconf import OmegaConf
 from torch.nn import functional as F
 import xformers
 
-from apps.main.transformer import LMTransformer, LMTransformerArgs
-from apps.main.stem import StemLMTransformer, StemLMTransformerArgs
+from apps.main.stem import StemLMTransformer, StemLMTransformerArgs, STEM_MODEL_REGISTRY
 from lingua.args import dataclass_from_dict
 from lingua.checkpoint import CONSOLIDATE_NAME, consolidate_checkpoints
 from lingua.stem_checkpoint import CONSOLIDATE_STEM_NAME, consolidate_stem_shards, load_stem_shards_resharded
@@ -43,13 +42,25 @@ from apps.main.generate import (
 
 def load_consolidated_model_and_tokenizer(
     consolidated_path,
-    model_cls=StemLMTransformer,
-    model_args_cls=StemLMTransformerArgs,
+    model_cls=None,
+    model_args_cls=None,
 ):
     ckpt_path = Path(consolidated_path)
     config = ckpt_path / "params.json"
     config = OmegaConf.load(config)
-    
+
+    # Resolve model class from config's model_type when not explicitly provided
+    if model_cls is None or model_args_cls is None:
+        model_type = getattr(config, "model_type", "llama")
+        if model_type not in STEM_MODEL_REGISTRY:
+            raise ValueError(
+                f"Unknown model_type '{model_type}' in checkpoint config. "
+                f"Available: {list(STEM_MODEL_REGISTRY.keys())}"
+            )
+        reg_cls, reg_args_cls = STEM_MODEL_REGISTRY[model_type][:2]
+        model_cls = model_cls or reg_cls
+        model_args_cls = model_args_cls or reg_args_cls
+
     param_dtype = dict(fp32=torch.float32, fp16=torch.float16, bf16=torch.bfloat16)[
         config.distributed.model_dtype
     ]

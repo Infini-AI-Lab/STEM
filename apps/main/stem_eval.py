@@ -19,7 +19,7 @@ from apps.main.stem_generate import (
     PackedCausalTransformerGeneratorArgs,
     load_consolidated_model_and_tokenizer,
 )
-from apps.main.stem import StemLMTransformer, StemLMTransformerArgs
+from apps.main.stem import StemLMTransformer, StemLMTransformerArgs, STEM_MODEL_REGISTRY
 from apps.main.eval import LMHarnessArgs, ValidationArgs, all_dicts_same
 from lingua.args import dump_config
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
@@ -47,6 +47,7 @@ logger = logging.getLogger()
 @dataclass
 class StemEvalArgs:
     name: str = "stem_evals"
+    model_type: str = "llama"
     dump_dir: Optional[str] = None
     metric_log_dir: Optional[str] = None
     ckpt_dir: str = ""
@@ -270,11 +271,18 @@ def launch_stem_eval(cfg: StemEvalArgs):
             torch.distributed.barrier()
         return
     
-    logger.info("Loading STEM model")
+    # Resolve model class from registry
+    if cfg.model_type not in STEM_MODEL_REGISTRY:
+        raise ValueError(
+            f"Unknown model_type '{cfg.model_type}'. "
+            f"Available: {list(STEM_MODEL_REGISTRY.keys())}"
+        )
+    stem_model_cls, stem_args_cls = STEM_MODEL_REGISTRY[cfg.model_type][:2]
+    logger.info(f"Loading STEM model (type={cfg.model_type}, cls={stem_model_cls.__name__})")
     model, tokenizer, train_cfg = load_consolidated_model_and_tokenizer(
         consolidate_path,
-        model_cls=StemLMTransformer,
-        model_args_cls=StemLMTransformerArgs,
+        model_cls=stem_model_cls,
+        model_args_cls=stem_args_cls,
     )
     logger.info("STEM model loaded")
     model.eval()

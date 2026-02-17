@@ -199,6 +199,10 @@ class StemTransformerBlock(nn.Module):
         
      
 class StemTransformer(nn.Module):
+    # Subclasses can override this to use a different block class
+    # (e.g. Qwen3StemTransformerBlock, OLMo3StemTransformerBlock)
+    _block_cls = StemTransformerBlock
+
     def __init__(self, args: StemTransformerArgs):
         super().__init__()
         self.dim = args.dim
@@ -225,7 +229,7 @@ class StemTransformer(nn.Module):
         
         self.layers = nn.ModuleList()
         for layer_idx in range(args.n_layers):
-            self.layers.append(StemTransformerBlock(layer_idx, args))
+            self.layers.append(self._block_cls(layer_idx, args))
             
     def forward(
         self,

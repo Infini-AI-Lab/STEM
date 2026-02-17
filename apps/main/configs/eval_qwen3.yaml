@@ -11,8 +11,8 @@ generator:
 
 harness:
   tasks:
-    - task: hellaswag
-      dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
+    # - task: hellaswag
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
     # - task: boolq
     #   dataset_path: /raid/user_data/rsadhukh/test_data/super_glue
     # - task: piqa
@@ -27,10 +27,10 @@ harness:
     #   dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
     # - task: race
     #   dataset_path: /raid/user_data/rsadhukh/test_data/race
-    # - task: gsm8k
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/gsm8k
-    # - task: mmlu
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/mmlu
+    - task: gsm8k
+      dataset_path: /raid/user_data/rsadhukh/test_data/gsm8k
+    - task: mmlu
+      dataset_path: /raid/user_data/rsadhukh/test_data/mmlu
   batch_size: 16
 validation: null
 
