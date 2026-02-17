@@ -84,6 +84,7 @@ from lingua.metrics import (
     GPUMemoryMonitor,
     LoggingArgs,
     MetricLogger,
+    WandbArgs,
     get_num_params,
 )
 from lingua.optim import OptimArgs, build_optimizer, build_lr_fn
@@ -147,7 +148,14 @@ class BackboneFinetuneArgs:
 
     checkpoint: CheckpointArgs = field(default_factory=CheckpointArgs)
     profiling: ProfilerArgs = field(default_factory=ProfilerArgs)
-    logging: LoggingArgs = field(default_factory=LoggingArgs)
+    logging: LoggingArgs = field(
+        default_factory=lambda: LoggingArgs(
+            wandb=WandbArgs(
+                entity="randomresearch",
+                project="stem",
+            )
+        )
+    )
 
     # If set to None, eval is run locally otherwise it launches a new job
     async_eval_gpus: Optional[int] = None

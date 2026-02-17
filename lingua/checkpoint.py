@@ -68,16 +68,35 @@ def _get_key_step(name: str):
 
 def consolidate_checkpoints(ckpt_dir: str):
     """
-    Consolidates all FSDP checkpoints in a directory to a single file
-    Consolidate checkpoint is saved in a subdirectory of ckpt_dir
+    Consolidates all FSDP checkpoints in a directory to a single file.
+    Consolidate checkpoint is saved in a subdirectory of ckpt_dir.
+
+    Only attempts DCP-to-torch conversion when the checkpoint is in
+    Distributed Checkpoint format (indicated by a ``.metadata`` manifest).
+    For non-DCP checkpoints (e.g. LoRA adapter-only saves), the caller is
+    responsible for pre-creating ``consolidated/consolidated.pth`` before
+    invoking this function.
 
     Parameters:
         ckpt_dir: str - path to the directory containing the checkpoints
 
-    Returns the path to the consolidated checkpoint
+    Returns the path to the consolidated checkpoint directory.
+
+    Raises:
+        FileNotFoundError: if the checkpoint is neither a valid DCP directory
+            nor has a pre-existing consolidated file.
     """
     consolidate_path = Path(ckpt_dir) / CONSOLIDATE_FOLDER
     if not (consolidate_path / CONSOLIDATE_NAME).exists():
+        metadata_path = Path(ckpt_dir) / ".metadata"
+        if not metadata_path.exists():
+            raise FileNotFoundError(
+                f"Cannot consolidate checkpoint at '{ckpt_dir}': "
+                f"no DCP .metadata file found and no pre-existing "
+                f"'{CONSOLIDATE_FOLDER}/{CONSOLIDATE_NAME}'. "
+                f"If this is a LoRA checkpoint, create a merged "
+                f"consolidated checkpoint before running evaluation."
+            )
         consolidate_path.mkdir(exist_ok=True)
         logger.info(f"Consolidating to: {str(consolidate_path)}")
         dcp_to_torch_save(ckpt_dir, str(consolidate_path / CONSOLIDATE_NAME))

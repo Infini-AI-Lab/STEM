@@ -23,13 +23,13 @@ seed: 42
 steps: 10000
 
 # Gradient accumulation
-grad_acc_steps: 1
+grad_acc_steps: 4
 gc_collect_freq: 1000
 
 # ---- Adapter configuration ----
 # Which transformer layers get a parallel STEM embedding adapter
 # For 16-layer Llama-3.2-1B, every other layer starting from layer 1
-stem_layers: [1, 3, 5, 7, 9, 11, 13, 15]
+stem_layers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 
 # Initialization: "xavier_uniform", "xavier_normal", or "normal_0.02"
 stem_init_type: xavier_uniform
@@ -120,6 +120,22 @@ checkpoint:
     eval:
         every: 2000
         keep: 1
+
+# ---- Evaluation ----
+# Uncomment to enable periodic evaluation (piqa, hellaswag, etc.)
+# Runs at every checkpoint.eval.every steps (see checkpoint section above).
+eval:
+    generator:
+        max_tokens: 4096
+        dtype: bf16
+        device: cuda
+    harness:
+        tasks: [piqa, hellaswag, arc_easy, arc_challenge, winogrande]
+        batch_size: 8
+        num_fewshot: 0
+    validation:
+        max_steps: 100
+        use_val_from_train_src: true
 
 # ---- Logging ----
 logging:

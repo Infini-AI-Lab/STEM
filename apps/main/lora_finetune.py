@@ -64,7 +64,10 @@ from lingua.args import dataclass_from_dict, dump_config, flatten_dict
 from lingua.checkpoint import (
     CheckpointArgs,
     CheckpointManager,
+    consolidate_checkpoints,
     load_from_checkpoint,
+    CONSOLIDATE_FOLDER,
+    CONSOLIDATE_NAME,
     FOLDER_NAME,
     RE_FOLDER,
     CONFIG_NAME,
@@ -96,6 +99,7 @@ from lingua.metrics import (
     GPUMemoryMonitor,
     LoggingArgs,
     MetricLogger,
+    WandbArgs,
     get_num_params,
 )
 from lingua.optim import OptimArgs, build_lr_fn
@@ -306,7 +310,14 @@ class LoRAFinetuneArgs:
     env: EnvironmentArgs = field(default_factory=EnvironmentArgs)
     checkpoint: CheckpointArgs = field(default_factory=CheckpointArgs)
     profiling: ProfilerArgs = field(default_factory=ProfilerArgs)
-    logging: LoggingArgs = field(default_factory=LoggingArgs)
+    logging: LoggingArgs = field(
+        default_factory=lambda: LoggingArgs(
+            wandb=WandbArgs(
+                entity="randomresearch",
+                project="stem",
+            )
+        )
+    )
 
     async_eval_gpus: Optional[int] = None
     eval: Optional[Any] = None
@@ -334,6 +345,138 @@ class LoRATrainState(Stateful):
 # =============================================================================
 # Checkpoint helpers
 # =============================================================================
+
+def _adapter_key_to_model_key(adapter_key: str) -> str:
+    """Convert a LoRA adapter key to the corresponding base-model weight key.
+
+    Examples
+    --------
+    >>> _adapter_key_to_model_key("layers_0_attention_wq")
+    'layers.0.attention.wq.weight'
+    >>> _adapter_key_to_model_key("layers_12_feed_forward_w1")
+    'layers.12.feed_forward.w1.weight'
+    """
+    parts = adapter_key.split("_")
+    reconstructed: List[str] = []
+    i = 0
+    while i < len(parts):
+        if (i + 1 < len(parts)
+                and parts[i] == "feed" and parts[i + 1] == "forward"):
+            reconstructed.append("feed_forward")
+            i += 2
+        else:
+            reconstructed.append(parts[i])
+            i += 1
+    return ".".join(reconstructed) + ".weight"
+
+
+def create_merged_checkpoint(
+    init_ckpt_path: str,
+    lora_ckpt_dir: str,
+    lora_rank: int,
+    lora_alpha: float,
+) -> None:
+    """Create ``consolidated/consolidated.pth`` by merging LoRA deltas into the
+    base model checkpoint.
+
+    This runs entirely on CPU and only needs to execute on rank 0. If the
+    consolidated file already exists, the function returns immediately.
+
+    Parameters
+    ----------
+    init_ckpt_path : str
+        Path to the pretrained base-model checkpoint (DCP or already
+        consolidated).
+    lora_ckpt_dir : str
+        Path to the LoRA checkpoint directory containing
+        ``lora_weights.pt``.
+    lora_rank : int
+        LoRA rank (used for scaling).
+    lora_alpha : float
+        LoRA alpha (used for scaling).
+    """
+    ckpt_dir = Path(lora_ckpt_dir)
+    consolidated_dir = ckpt_dir / CONSOLIDATE_FOLDER
+    consolidated_file = consolidated_dir / CONSOLIDATE_NAME
+
+    if consolidated_file.exists():
+        logger.info(
+            f"Merged checkpoint already exists at {consolidated_file}")
+        return
+
+    lora_weights_path = ckpt_dir / "lora_weights.pt"
+    if not lora_weights_path.exists():
+        raise FileNotFoundError(
+            f"LoRA weights not found at {lora_weights_path}")
+
+    # -- Load base model state dict ----------------------------------------
+    base_consolidated_path = (
+        Path(init_ckpt_path) / CONSOLIDATE_FOLDER / CONSOLIDATE_NAME)
+    if not base_consolidated_path.exists():
+        logger.info(f"Consolidating base checkpoint at {init_ckpt_path}")
+        base_path = consolidate_checkpoints(init_ckpt_path)
+        base_consolidated_path = base_path / CONSOLIDATE_NAME
+
+    logger.info(f"Loading base model from {base_consolidated_path}")
+    base_state = torch.load(
+        str(base_consolidated_path), map_location="cpu", weights_only=True)
+
+    # The consolidated file may wrap the weights under a "model" key.
+    model_state = base_state.get("model", base_state)
+
+    # -- Load LoRA adapter weights -----------------------------------------
+    logger.info(f"Loading LoRA weights from {lora_weights_path}")
+    lora_state = torch.load(
+        str(lora_weights_path), map_location="cpu", weights_only=True)
+
+    # -- Group parameters by adapter and merge -----------------------------
+    scaling = lora_alpha / lora_rank
+
+    # Collect A/B matrices per adapter: {adapter_key: {"lora_A.weight": …}}
+    adapters: Dict[str, Dict[str, torch.Tensor]] = {}
+    for name, tensor in lora_state.items():
+        adapter_key = name.split(".")[0]
+        param_name = ".".join(name.split(".")[1:])
+        adapters.setdefault(adapter_key, {})[param_name] = tensor
+
+    n_merged = 0
+    for adapter_key, params in adapters.items():
+        A = params.get("lora_A.weight")
+        B = params.get("lora_B.weight")
+        if A is None or B is None:
+            logger.warning(
+                f"Incomplete adapter '{adapter_key}' (missing A or B), "
+                f"skipping")
+            continue
+
+        model_key = _adapter_key_to_model_key(adapter_key)
+        if model_key not in model_state:
+            logger.warning(
+                f"Base-model key '{model_key}' not found for adapter "
+                f"'{adapter_key}', skipping")
+            continue
+
+        # delta = (alpha / rank) * B @ A   — same formula as LoRAAdapter
+        delta = (scaling * (B.float() @ A.float())).to(
+            model_state[model_key].dtype)
+        model_state[model_key].add_(delta)
+        n_merged += 1
+
+    logger.info(
+        f"Merged {n_merged}/{len(adapters)} LoRA adapters into base model")
+
+    # -- Save --------------------------------------------------------------
+    consolidated_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(base_state, str(consolidated_file))
+
+    # Copy the config so the eval pipeline can read model hyperparameters.
+    config_src = ckpt_dir / CONFIG_NAME
+    config_dst = consolidated_dir / CONFIG_NAME
+    if config_src.exists():
+        config_dst.write_text(config_src.read_text())
+
+    logger.info(f"Saved merged checkpoint to {consolidated_file}")
+
 
 def save_lora_checkpoint(lora_manager, optimizer, train_state, args, ckpt_dir):
     if get_is_master():
@@ -600,10 +743,32 @@ def train(args_dict):
                 saved = True
 
             if args.eval is not None and every_n_steps(train_state, args.checkpoint.eval.every, acc_step=0):
+                eval_ckpt_dir = ckpt_base / FOLDER_NAME.format(train_state.step)
+
+                # Ensure the LoRA checkpoint exists (eval.every may
+                # differ from dump.every).
+                if not saved:
+                    save_lora_checkpoint(
+                        lora_manager, optimizer, train_state, args,
+                        eval_ckpt_dir)
+                    saved = True
+
+                # Create the merged consolidated checkpoint that the
+                # eval pipeline expects (base model + LoRA deltas).
+                if get_is_master():
+                    create_merged_checkpoint(
+                        args.checkpoint.init_ckpt_path,
+                        str(eval_ckpt_dir),
+                        args.lora_rank,
+                        args.lora_alpha,
+                    )
+                if torch.distributed.is_initialized():
+                    torch.distributed.barrier()
+
                 from apps.main.eval import launch_eval, EVAL_FOLDER_NAME, EvalArgs
                 eval_args = dataclass_from_dict(EvalArgs, args.eval)
                 eval_args.global_step = train_state.step
-                eval_args.ckpt_dir = str(ckpt_base / FOLDER_NAME.format(train_state.step))
+                eval_args.ckpt_dir = str(eval_ckpt_dir)
                 eval_args.dump_dir = str(os.path.join(args.dump_dir, "evals", EVAL_FOLDER_NAME.format(train_state.step)))
                 eval_args.metric_log_dir = args.dump_dir
                 if args.async_eval_gpus is None:

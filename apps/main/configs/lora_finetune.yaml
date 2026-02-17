@@ -24,7 +24,7 @@ seed: 42
 steps: 10000
 
 # Gradient accumulation
-grad_acc_steps: 1
+grad_acc_steps: 4
 gc_collect_freq: 1000
 
 # ---- LoRA configuration ----
