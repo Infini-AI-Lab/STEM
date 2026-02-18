@@ -4,7 +4,7 @@ set -x
 
 project_name="stem"
 experiment_name="lm1b-midfine-warmup-s2l4-100B"
-NNODES=4
+NNODES=2
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
 WANDB_DIR=/scratch/scratch/beidchen/projects/stem_wandb 
