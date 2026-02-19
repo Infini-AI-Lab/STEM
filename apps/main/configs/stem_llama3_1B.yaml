@@ -61,7 +61,7 @@ checkpoint:
     # path: logs/debug/checkpoints
     init_ckpt_path: checkpoints/Llama-1B-init-start2-stl4/
     dump:
-        every: 200
+        every: 20
         keep: 1
     eval:
         every: 200

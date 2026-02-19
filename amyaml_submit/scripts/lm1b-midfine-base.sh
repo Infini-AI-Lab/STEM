@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-midfine-base-100B"
+experiment_name="lm1b-midfine-base-10B"
 NNODES=2
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -32,14 +32,14 @@ echo "WANDB_MODE: $WANDB_MODE"
 # NOTE: remove or comment out the "aws s3 sync" line in template.yaml when
 #       using --s3_uri mode, since this script streams directly from S3.
 python3 setup/aws_prepare_hf_dataset.py \
-    --local_dir /dev/shm/dolma3_dolmino_mix-100B-1025 \
+    --local_dir /dev/shm/dolma3_dolmino_mix-10B-1025 \
     --out_dir /dev/shm/dolmino-mix_shuffled \
     --dataset dolmino-mix \
     --num_nodes ${NNODES} \
     --node_rank ${NODE_RANK} \
     --nchunks 8 
 
-rm -rf /dev/shm/dolma3_dolmino_mix-100B-1025
+rm -rf /dev/shm/dolma3_dolmino_mix-10B-1025
 
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
     config=apps/main/configs/llama3_1B_midfine.yaml \
