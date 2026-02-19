@@ -1,7 +1,7 @@
 apiVersion: "kubeflow.org/v1"
 kind: PyTorchJob
 metadata:
-  name: beidchen-lm1b-midfine-base-121022 # JOB_NAME like  <alias>-<pod/mpijob/torchjob>-<p4/g5/r5>-<project>-<task>[-<note>]
+  name: beidchen-lm1b-midfine-base-192551 # JOB_NAME like  <alias>-<pod/mpijob/torchjob>-<p4/g5/r5>-<project>-<task>[-<note>]
   namespace: default
 spec:
   elasticPolicy:
@@ -10,7 +10,7 @@ spec:
     maxReplicas: 2
     maxRestarts: 2
     nProcPerNode: &gpus_per_node 8
-    rdzvId: beidchen-lm1b-midfine-base-121022
+    rdzvId: beidchen-lm1b-midfine-base-192551
   runPolicy:
     ttlSecondsAfterFinished: 180 # give enough time to push any logs
     schedulingPolicy:
@@ -36,7 +36,7 @@ spec:
                         values:
                           - p5en.48xlarge
           tolerations:
-            - key: yadunanr-knowledge-stem-5e-p5en
+            - key: fuersth-infofm-p5en
               operator: Equal
               value: "True"
               effect: NoSchedule
@@ -113,7 +113,7 @@ spec:
                   ./aws/install &&
                   aws s3 sync s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dolma3_dolmino_mix-100B-1025/ . --region us-east-2 &&
                   cd /code-fsx/beidchen-sandbox/STEM &&
-                  bash amyaml_submit/scripts/lm1b-midfine-base.sh | tee "/code-fsx/beidchen-sandbox/beidchen-lm1b-midfine-base-121022.log"
+                  bash amyaml_submit/scripts/lm1b-midfine-base.sh | tee "/code-fsx/beidchen-sandbox/beidchen-lm1b-midfine-base-192551.log"
               image: 767397878797.dkr.ecr.us-east-1.amazonaws.com/agif-mm-pt-base:stem.v1
               imagePullPolicy: Always
               securityContext:
