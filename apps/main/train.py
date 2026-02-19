@@ -176,9 +176,12 @@ class TrainState(Stateful):
         
         # Handle both single scheduler and dict of schedulers (for stem training)
         scheduler_state = state_dict["scheduler"]
-        for key, sched in self.scheduler.items():
-            if key in scheduler_state:
-                sched.load_state_dict(scheduler_state[key])
+        if isinstance(self.scheduler, dict):
+            for key, sched in self.scheduler.items():
+                if key in scheduler_state:
+                    sched.load_state_dict(scheduler_state[key])
+        else:
+            self.scheduler.load_state_dict(scheduler_state)
 
 
 def validate_train_args(args: TrainArgs, output_size: int):
