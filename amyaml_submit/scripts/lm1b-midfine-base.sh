@@ -32,14 +32,14 @@ echo "WANDB_MODE: $WANDB_MODE"
 # NOTE: remove or comment out the "aws s3 sync" line in template.yaml when
 #       using --s3_uri mode, since this script streams directly from S3.
 python3 setup/aws_prepare_hf_dataset.py \
-    --local_dir /dev/shm/dolma3_dolmino_mix-10B-1025 \
+    --local_dir /dev/shm/data \
     --out_dir /dev/shm/dolmino-mix_shuffled \
     --dataset dolmino-mix \
     --num_nodes ${NNODES} \
     --node_rank ${NODE_RANK} \
     --nchunks 8 
 
-rm -rf /dev/shm/dolma3_dolmino_mix-10B-1025
+rm -rf /dev/shm/data
 
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
     config=apps/main/configs/llama3_1B_midfine.yaml \

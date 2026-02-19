@@ -13,7 +13,7 @@ optim:
 
 distributed:                                                                                                        
     fsdp_type: full_shard
-    compile: false
+    compile: true
     model_dtype: bf16
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
@@ -59,10 +59,10 @@ checkpoint:
     # path: logs/debug/checkpoints
     init_ckpt_path: checkpoints/Llama-3.2-1B/distcp
     dump:
-        every: 2000
+        every: 100  
         keep: 1
     eval:
-        every: 2000
+        every: 100
         keep: 1
 
 logging:
