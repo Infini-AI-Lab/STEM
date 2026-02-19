@@ -404,12 +404,14 @@ def train(args: TrainArgs):
         metric_logger = context_stack.enter_context(
             MetricLogger(Path(args.dump_dir) / "metrics.jsonl", args)
         )
+        logger.info("Loading data loader...")
         data_loader = context_stack.enter_context(
             build_dataloader_from_args(
                 args.data,
                 state=train_state.data_loader_state,
             )
         )
+        logger.info("Loaded data loader!")
         torch_profiler = context_stack.enter_context(
             maybe_run_profiler(args.dump_dir, model, args.profiling)
         )
