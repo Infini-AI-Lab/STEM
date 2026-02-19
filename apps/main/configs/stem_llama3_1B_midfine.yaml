@@ -13,7 +13,7 @@ optim:
 
 distributed:                                                                                                        
     fsdp_type: full_shard
-    compile: false
+    compile: true
     model_dtype: bf16
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
