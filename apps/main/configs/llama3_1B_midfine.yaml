@@ -79,26 +79,26 @@ eval:
         top_p: 0.95
     harness: 
         tasks:
-            - hellaswag
-                dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/hellaswag
-            - boolq
-                dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/super_glue
-            - piqa
-                dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/piqa
-            - winogrande
-                dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/winogrande
-            - openbookqa
-                dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/openbookqa
-            - arc_easy
-                dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/ai2_arc
-            - arc_challenge
-                dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/ai2_arc
-            - race
-                dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/race
-            - gsm8k
-                dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/gsm8k
-            - mmlu
-                dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/mmlu
+            - task: hellaswag
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/hellaswag
+            - task: boolq
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/super_glue
+            - task: piqa
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/piqa
+            - task: winogrande
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/winogrande
+            - task: openbookqa
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/openbookqa
+            - task: arc_easy
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/ai2_arc
+            - task: arc_challenge
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/ai2_arc
+            - task: race
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/race
+            - task: gsm8k
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/gsm8k
+            - task: mmlu
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/mmlu
         limit: 1000
     validation:
         max_steps: 100
