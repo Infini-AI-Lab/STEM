@@ -64,6 +64,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import sys
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -954,6 +955,68 @@ def launch_adapter_eval(
 # Checkpoint helpers
 # =============================================================================
 
+def cleanup_adapter_checkpoints(
+    ckpt_base: Path,
+    dump_every: int,
+    dump_keep: int,
+    eval_every: int,
+    eval_keep: int,
+):
+    """Remove old adapter checkpoint directories to free disk space.
+
+    Mirrors the strategy used by ``CheckpointManager.clean_up()`` in
+    ``lingua/checkpoint.py``.  Checkpoint folders whose step number aligns
+    with *dump_every* or *eval_every* are retained up to the respective
+    *keep* counts (most-recent-first).  Folders that belong to neither
+    category (e.g. preemption saves) are always kept.
+
+    Must be called **before** writing a new checkpoint so that disk space
+    is freed prior to writing potentially large DCP shards.
+    """
+    if not ckpt_base.exists():
+        return
+
+    RE_FOLDER = re.compile(r"\d{10}")
+    folders = sorted(
+        [p for p in ckpt_base.iterdir() if p.is_dir() and RE_FOLDER.fullmatch(p.name)],
+        key=lambda p: int(p.name),
+    )
+
+    dump_folders: List[Path] = []
+    eval_folders: List[Path] = []
+    other_folders: List[Path] = []
+    for p in folders:
+        step = int(p.name)
+        is_dump = step % dump_every == 0
+        is_eval = step % eval_every == 0
+        if is_dump:
+            dump_folders.append(p)
+        if is_eval:
+            eval_folders.append(p)
+        if not (is_dump or is_eval):
+            other_folders.append(p)
+
+    if dump_keep > 0:
+        dump_folders = dump_folders[-dump_keep:]
+    if eval_keep > 0:
+        eval_folders = eval_folders[-eval_keep:]
+
+    folder_to_keep = set(other_folders + dump_folders + eval_folders)
+    folder_to_remove = set(folders) - folder_to_keep
+
+    if folder_to_remove:
+        logger.info(f"Cleaning up {len(folder_to_remove)} old checkpoint(s): "
+                     f"{sorted(p.name for p in folder_to_remove)}")
+
+    if get_is_master():
+        for folder in folder_to_remove:
+            if folder.exists():
+                shutil.rmtree(folder)
+
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+
+
 def save_adapter_checkpoint(
     model,
     adapter: StemAdapterManager,
@@ -1718,12 +1781,12 @@ def train(args_dict):
                             "data_load_time": data_load_time,
                         },
                         "optim": {
+                            "grad_norm": grad_norm_backbone,
                             "stem_grad_norm": grad_norm_stem,
                             "alpha_grad_norm": grad_norm_alpha,
-                            "backbone_grad_norm": grad_norm_backbone,
+                            "lr": curr_bb_lr,
                             "stem_lr": curr_stem_lr,
                             "alpha_lr": curr_alpha_lr,
-                            "backbone_lr": curr_bb_lr,
                             "total_tokens": total_tokens,
                         },
                         "memory": gpu_mem_stats._asdict(),
@@ -1731,7 +1794,7 @@ def train(args_dict):
                     sep="/",
                 )
 
-                to_sync = {"loss/nll": loss_for_log.item()}
+                to_sync = {"loss/out": loss_for_log.item()}
                 for layer_idx, gv in gate_vals.items():
                     to_sync[f"gate/layer_{layer_idx}"] = gv
                 metrics.update(dist_mean_dict(to_sync))
@@ -1780,6 +1843,15 @@ def train(args_dict):
 
             if should_save or should_eval:
                 ckpt_dir = ckpt_base / f"{train_state.step:010d}"
+                # Free disk space from old checkpoints BEFORE writing
+                # the new (potentially very large) checkpoint.
+                cleanup_adapter_checkpoints(
+                    ckpt_base,
+                    dump_every=args.checkpoint.dump.every,
+                    dump_keep=args.checkpoint.dump.keep,
+                    eval_every=args.checkpoint.eval.every,
+                    eval_keep=args.checkpoint.eval.keep,
+                )
                 save_adapter_checkpoint(
                     model, adapter, stem_optimizer, alpha_optimizer,
                     backbone_optimizer, schedulers, train_state,
@@ -1802,6 +1874,13 @@ def train(args_dict):
             if preemption_flag["flag"]:
                 if not saved:
                     ckpt_dir = ckpt_base / f"{train_state.step:010d}"
+                    cleanup_adapter_checkpoints(
+                        ckpt_base,
+                        dump_every=args.checkpoint.dump.every,
+                        dump_keep=args.checkpoint.dump.keep,
+                        eval_every=args.checkpoint.eval.every,
+                        eval_keep=args.checkpoint.eval.keep,
+                    )
                     save_adapter_checkpoint(
                         model, adapter, stem_optimizer, alpha_optimizer,
                         backbone_optimizer, schedulers, train_state,
@@ -1813,6 +1892,13 @@ def train(args_dict):
         # ---- Final save ----
         if not saved:
             ckpt_dir = ckpt_base / f"{train_state.step:010d}"
+            cleanup_adapter_checkpoints(
+                ckpt_base,
+                dump_every=args.checkpoint.dump.every,
+                dump_keep=args.checkpoint.dump.keep,
+                eval_every=args.checkpoint.eval.every,
+                eval_keep=args.checkpoint.eval.keep,
+            )
             save_adapter_checkpoint(
                 model, adapter, stem_optimizer, alpha_optimizer,
                 backbone_optimizer, schedulers, train_state,
