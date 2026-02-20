@@ -1,6 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 import copy
+import shutil
 from typing import Optional, Union, Any
 import logging
 import json
@@ -477,6 +478,31 @@ class StemCheckpointManager(CheckpointManager):
         curr_save_dir = self._create_folder(path, FOLDER_NAME.format(train_state.step))
         logger.info(f"Saving to: {str(curr_save_dir)}")
 
+        # Register the new checkpoint and free disk space from old
+        # checkpoints BEFORE writing the (potentially very large) DCP
+        # shards.  Without this, the filesystem must hold all retained
+        # checkpoints AND the new one simultaneously, which can exhaust
+        # disk space / quota and cause
+        #   RuntimeError: [enforce fail at inline_container.cc:...]
+        #                  unexpected pos X vs Y
+        self.existing_saves.append(curr_save_dir)
+        self.clean_up()
+
+        # Validate available disk space before attempting the save.
+        try:
+            usage = shutil.disk_usage(str(curr_save_dir))
+            free_gb = usage.free / (1024 ** 3)
+            logger.info(f"Disk space available: {free_gb:.1f} GB")
+            if free_gb < 1.0:
+                logger.warning(
+                    f"Very low disk space ({free_gb:.2f} GB free). "
+                    f"Checkpoint save may fail. Consider increasing disk "
+                    f"quota or setting checkpoint.dump.keep / "
+                    f"checkpoint.eval.keep to limit retained checkpoints."
+                )
+        except OSError:
+            pass  # disk_usage may not work on all filesystems
+
         if dist.is_initialized():
             dist.barrier()
 
@@ -485,19 +511,34 @@ class StemCheckpointManager(CheckpointManager):
         stem_optimizer = None
         if isinstance(optimizer, dict):
             stem_optimizer = optimizer.get("stem")
-        
+
         fsdp_state_dict, stem_model_sd, stem_optim_sd = self.get_state_dict(
             model, optimizer, stem_optimizer=stem_optimizer
         )
 
-        # 1) Save backbone (FSDP/TP-managed) via DCP
-        dcp.save(fsdp_state_dict, checkpoint_id=curr_save_dir)
-        logger.info("Backbone model+optim state dict saved")
+        try:
+            # 1) Save backbone (FSDP/TP-managed) via DCP
+            dcp.save(fsdp_state_dict, checkpoint_id=curr_save_dir)
+            logger.info("Backbone model+optim state dict saved")
 
-        # 2) Save STEM embeddings and optimizer states via custom sharded checkpoint
-        save_stem_shards(stem_model_sd, curr_save_dir, model, stem_optim_sd=stem_optim_sd)
-        logger.info("STEM (ParallelEmbedding) model and optimizer shards saved")
-        
+            # 2) Save STEM embeddings and optimizer states via custom sharded checkpoint
+            save_stem_shards(stem_model_sd, curr_save_dir, model, stem_optim_sd=stem_optim_sd)
+            logger.info("STEM (ParallelEmbedding) model and optimizer shards saved")
+        except Exception as e:
+            logger.error(f"Checkpoint save failed: {e}")
+            # Clean up the partially-written checkpoint so it does not
+            # confuse subsequent resume attempts.
+            if dist.get_rank() == 0 and curr_save_dir.exists():
+                shutil.rmtree(curr_save_dir)
+                logger.warning(
+                    f"Removed partial checkpoint at {curr_save_dir}"
+                )
+            if curr_save_dir in self.existing_saves:
+                self.existing_saves.remove(curr_save_dir)
+            if dist.is_initialized():
+                dist.barrier()
+            raise
+
         logger.info("State dict saved!")
 
         if dist.is_initialized():
@@ -520,10 +561,6 @@ class StemCheckpointManager(CheckpointManager):
             with open(curr_save_dir / train_state_name, "w") as f:
                 json.dump(train_state.state_dict(), f)
             logger.info("Train state saved !")
-
-        self.existing_saves.append(curr_save_dir)
-
-        self.clean_up()
 
         if dist.is_initialized():
             dist.barrier()
