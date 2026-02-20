@@ -20,7 +20,7 @@ name: "backbone_finetune_llama3_1B"
 seed: 42
 
 # Total optimizer steps
-steps: 10000
+steps: 200000
 
 # Gradient accumulation
 grad_acc_steps: 1
@@ -78,7 +78,7 @@ distributed:
 data:
     root_dir: /dev/shm/
     sources:
-        dolmino-mix_shuffled: 1.0
+        dolma3_dolmino_mix-10B_shuffled: 1.0
         # fineweb_edu_10bt_shuffled: 1.0
     batch_size: 4
     prefetch_size: 1024
@@ -97,10 +97,10 @@ checkpoint:
     init_ckpt_path: checkpoints/Llama-3.2-1B/distcp
     dump:
         every: 2000
-        keep: 2
+        keep: 1
     eval:
         every: 2000
-        keep: 2
+        keep: 1
 
 # ---- Logging ----
 logging:
