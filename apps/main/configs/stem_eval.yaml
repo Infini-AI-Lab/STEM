@@ -1,6 +1,6 @@
 name: "stem_eval"
 dump_dir: logs/stem_eval
-ckpt_dir: checkpoints/STEM-1B-pretrain1T-midtrain100B-stem/
+ckpt_dir: /raid/user_data/rsadhukh/checkpoints/STEM-1B-pretrain1T-midtrain100B-stem/
 stem_parallel_size: 8  # must match training stem_parallel_size
 
 generator:
@@ -12,18 +12,18 @@ generator:
 
 harness:
   tasks:
-    # - task: hellaswag
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
+    - task: hellaswag
+      dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
     # - task: boolq
     #   dataset_path: /raid/user_data/rsadhukh/test_data/super_glue
-    - task: nq_open
-      num_fewshot: 5
-    # - task: piqa
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/piqa
+    # - task: nq_open
+    #   num_fewshot: 5
+    - task: piqa
+      dataset_path: /raid/user_data/rsadhukh/test_data/piqa
     # - task: social_iqa
     #   dataset_kwargs:
     #     trust_remote_code: true
-    - triviaqa
+    # - triviaqa
     # - task: winogrande
     #   dataset_path: /raid/user_data/rsadhukh/test_data/winogrande
     - task: openbookqa

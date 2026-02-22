@@ -590,7 +590,19 @@ def train(args: StemTrainArgs):
 
                 to_sync = {}
                 to_sync["loss/out"] = loss.item()
+
+                alpha_dict = {}
+                for layer_idx, layer in enumerate(model.lm_transformer.layers):
+                    ff = layer.feed_forward
+                    if hasattr(ff, "alpha"):
+                        alpha_val = ff.alpha
+                        if isinstance(alpha_val, DTensor):
+                            alpha_val = alpha_val.full_tensor()
+                        sig = torch.sigmoid(alpha_val).item()
+                        alpha_dict[f"optim/gate_{layer_idx}"] = sig
+
                 metrics.update(dist_mean_dict(to_sync))
+                metrics.update(alpha_dict)
 
                 if get_is_master():
                     metric_logger.log(metrics)
@@ -616,6 +628,9 @@ def train(args: StemTrainArgs):
                     f"  mem: {gpu_mem_stats.max_active_pct:.0f}%"
                     f"  pow: {gpu_mem_stats.power_draw/1000} W"
                 )
+                if alpha_dict:
+                    alpha_strs = [f"L{k.split('_')[1]}={v:.4f}" for k, v in alpha_dict.items()]
+                    log_msg += f"  gates: [{', '.join(alpha_strs)}]"
                 logger.info(log_msg)
 
             saved = False

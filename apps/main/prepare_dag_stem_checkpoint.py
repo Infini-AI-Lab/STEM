@@ -1,7 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 """
-Prepare STEM checkpoint by computing layerwise w3 × RMSNorm(tok_embeddings).
+Prepare DAG-STEM checkpoint by computing layerwise w3 x RMSNorm(tok_embeddings).
 
 For each stem layer *i*, computes:
 
@@ -10,30 +10,37 @@ For each stem layer *i*, computes:
 
 where ``RMSNorm_i`` uses the ``ffn_norm`` weights from layer *i*.
 
-i.e., for every token *t*:
+**Key difference from base STEM** (``prepare_stem_checkpoint.py``):
+    - Base STEM **removes** w3 from stem layers after computing stem embeddings
+      (the stem embedding completely replaces w3).
+    - DAG-STEM **keeps** w3 in stem layers and applies each layer's ``ffn_norm``
+      (RMSNorm) to the token embeddings before the w3 projection.  The DAG FFN
+      blends w3(x) with the stem embedding y via a learnable alpha gate:
 
-    stem_emb[t] = w3_i.weight @ RMSNorm_i(tok_embeddings.weight[t])
+          up = sigmoid(alpha) * w3(x) + (1 - sigmoid(alpha)) * y
 
-This initialises STEM embeddings so that each token's embedding matches the
-original FFN up-projection output (after normalization), providing a
-"functionally equivalent" starting point for STEM training.
+      With the default ``alpha_init=-5.0`` (sigmoid ~ 0.007), the model starts
+      by almost entirely using the stem embedding (like base STEM), and can
+      gradually learn to blend in w3(x) context during training.
 
 The output directory contains:
-  - A DCP backbone checkpoint with the w3 weights removed for stem layers
-  - An updated ``params.json`` with ``stem_layers`` and ``stem_parallel_size``
+  - A DCP backbone checkpoint with w3 weights **preserved** for stem layers
+  - An updated ``params.json`` with ``stem_layers``, ``stem_parallel_size``,
+    and ``alpha_init``
   - A ``stem_shards/`` subdirectory with the pre-computed embeddings, sharded
-    along the embedding dimension to match ``stem_parallel_size``.
+    along the embedding dimension to match ``stem_parallel_size``
 
 The resulting directory can be used directly as ``checkpoint.init_ckpt_path``
-in ``stem_train.py``.
+in ``stem_dag_train.py``.
 
 Usage
 -----
-    python apps/main/prepare_stem_checkpoint.py \\
+    python apps/main/prepare_dag_stem_checkpoint.py \\
         --ckpt-path checkpoints/Llama-3.2-1B/distcp \\
-        --output-dir checkpoints/Llama-3.2-1B-stem-init \\
-        --stem-layers 1 3 5 7 9 11 13 15 \\
-        --stem-parallel-size 8
+        --output-dir checkpoints/Llama-3.2-1B-dag-stem-init \\
+        --stem-layers 2 6 10 14 \\
+        --stem-parallel-size 4 \\
+        --alpha-init -5.0
 """
 
 import argparse
@@ -56,16 +63,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def load_consolidated_checkpoint(ckpt_path: str) -> Dict[str, torch.Tensor]:
-    """Load the consolidated ``.pth`` checkpoint.
-
-    Expects ``<ckpt_path>/consolidated/consolidated.pth`` to exist.
-    """
+    """Load the consolidated ``.pth`` checkpoint."""
     consolidated_path = Path(ckpt_path) / "consolidated" / "consolidated.pth"
     if not consolidated_path.exists():
         raise FileNotFoundError(
             f"Consolidated checkpoint not found at {consolidated_path}. "
-            f"Please run checkpoint consolidation first or provide a checkpoint "
-            f"directory that contains consolidated/consolidated.pth."
+            f"Please run checkpoint consolidation first."
         )
     logger.info(f"Loading consolidated checkpoint from {consolidated_path}")
     state_dict = torch.load(consolidated_path, map_location="cpu", weights_only=False)
@@ -82,7 +85,7 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.
     return x * torch.rsqrt((x * x).mean(-1, keepdim=True) + eps) * weight
 
 
-def compute_stem_embeddings(
+def compute_dag_stem_embeddings(
     state_dict: Dict[str, torch.Tensor],
     stem_layers: List[int],
 ) -> Dict[int, torch.Tensor]:
@@ -93,8 +96,10 @@ def compute_stem_embeddings(
     the runtime computation more closely since the FFN input is always
     RMSNorm'd.
 
-    Returns a dict mapping *stem_index* → ``(vocab_size, hidden_dim)`` tensor
-    (float32).
+    Unlike base STEM, w3 weights are **kept** in the state dict (not removed)
+    because the DAG FFN uses both w3(x) and the stem embedding y.
+
+    Returns a dict mapping *stem_index* -> ``(vocab_size, hidden_dim)`` tensor.
     """
     tok_emb_key = "model.tok_embeddings.weight"
     if tok_emb_key not in state_dict:
@@ -104,7 +109,6 @@ def compute_stem_embeddings(
         )
 
     tok_emb = state_dict[tok_emb_key].float()  # (vocab_size, dim)
-    vocab_size, dim = tok_emb.shape
     logger.info(f"Token embeddings: shape={tuple(tok_emb.shape)}, dtype=float32 (cast)")
 
     stem_weights: Dict[int, torch.Tensor] = {}
@@ -132,14 +136,11 @@ def compute_stem_embeddings(
 
         w3_weight = state_dict[w3_key].float()  # (hidden_dim, dim)
         ffn_norm_weight = state_dict[ffn_norm_key].float()  # (dim,)
-        hidden_dim = w3_weight.shape[0]
 
         normed_tok_emb = rms_norm(tok_emb, ffn_norm_weight)
         stem_weight = normed_tok_emb @ w3_weight.T
 
         stem_weights[stem_idx] = stem_weight
-        
-        del state_dict[w3_key]
 
         logger.info(
             f"  Layer {layer_idx:>2} (stem idx {stem_idx}): "
@@ -162,11 +163,7 @@ def save_stem_shards(
     output_dir: Path,
     stem_parallel_size: int,
 ):
-    """Save stem embeddings as sharded checkpoint files.
-
-    Creates ``<output_dir>/stem_shards/stem_model_mp{rank}.pt`` for each MP
-    rank.  The embedding dimension is split evenly across shards.
-    """
+    """Save stem embeddings as sharded checkpoint files."""
     stem_dir = output_dir / "stem_shards"
     stem_dir.mkdir(parents=True, exist_ok=True)
 
@@ -186,9 +183,6 @@ def save_stem_shards(
 
         for stem_idx, full_weight in stem_weights.items():
             key = f"stem_embeddings.{stem_idx}.weight"
-            # .clone() is critical: column-slicing creates a view that shares
-            # the full underlying storage; without clone torch.save would
-            # serialise the entire tensor for every shard.
             shard_dict[key] = full_weight[:, start:end].clone().cpu()
 
         shard_path = stem_dir / f"stem_model_mp{mp_rank}.pt"
@@ -197,8 +191,8 @@ def save_stem_shards(
             f"  Saved stem shard mp_rank={mp_rank}: {shard_path} "
             f"(shape per embedding: ({vocab_size}, {shard_size}))"
         )
-    
-    
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -206,8 +200,8 @@ def save_stem_shards(
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Prepare STEM checkpoint by computing layerwise "
-            "w3 × RMSNorm(tok_embeddings) and saving as stem_shards."
+            "Prepare DAG-STEM checkpoint by computing layerwise "
+            "w3 x RMSNorm(tok_embeddings) while keeping w3 in the backbone."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
@@ -215,10 +209,7 @@ def main():
     parser.add_argument(
         "--ckpt-path",
         required=True,
-        help=(
-            "Path to pretrained DCP checkpoint directory "
-            "(must contain consolidated/consolidated.pth)"
-        ),
+        help="Path to pretrained DCP checkpoint directory",
     )
     parser.add_argument(
         "--output-dir",
@@ -229,14 +220,24 @@ def main():
         "--stem-layers",
         nargs="+",
         type=int,
-        default=[1, 3, 5, 7, 9, 11, 13, 15],
+        default=[2, 6, 10, 14],
         help="Which transformer layers get stem embeddings (default: %(default)s)",
     )
     parser.add_argument(
         "--stem-parallel-size",
         type=int,
-        default=8,
+        default=4,
         help="Number of stem model-parallel shards (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--alpha-init",
+        type=float,
+        default=-5.0,
+        help=(
+            "Initial alpha value for DAG FFN gate. "
+            "sigmoid(-5.0) ~ 0.007 means almost pure stem embedding to start. "
+            "(default: %(default)s)"
+        ),
     )
     args = parser.parse_args()
 
@@ -255,23 +256,27 @@ def main():
     # ---- 1. Load consolidated checkpoint ----
     state_dict = load_consolidated_checkpoint(str(ckpt_path))
 
-    # ---- 2. Compute stem embeddings (also removes w3 keys from state_dict) ----
-    logger.info(f"Computing stem embeddings for layers: {args.stem_layers}")
-    stem_weights = compute_stem_embeddings(state_dict, args.stem_layers)
+    # ---- 2. Compute stem embeddings (w3 is KEPT in state_dict) ----
+    logger.info(f"Computing DAG stem embeddings for layers: {args.stem_layers}")
+    stem_weights = compute_dag_stem_embeddings(state_dict, args.stem_layers)
 
-    # ---- 3. Save modified backbone via DCP ----
+    # ---- 3. Inject alpha parameters for stem layers ----
+    for layer_idx in args.stem_layers:
+        alpha_key = f"model.layers.{layer_idx}.feed_forward.alpha"
+        state_dict[alpha_key] = torch.tensor([args.alpha_init])
+        logger.info(f"  Injected {alpha_key} = [{args.alpha_init}]")
+
+    # ---- 4. Save backbone via DCP (w3 preserved for DAG FFN) ----
     output_dir.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("MASTER_ADDR", "localhost")
     os.environ.setdefault("MASTER_PORT", "29512")
     dist.init_process_group(backend="gloo", world_size=1, rank=0)
 
-    logger.info(f"Saving modified backbone (w3 removed for stem layers) to {output_dir}")
+    logger.info(f"Saving backbone (w3 preserved for stem layers) to {output_dir}")
     dcp.save(state_dict, checkpoint_id=str(output_dir))
     logger.info("Backbone DCP checkpoint saved")
 
     dist.destroy_process_group()
-
-    # Free memory – we no longer need the full checkpoint
     del state_dict
 
     # ---- 4. Save updated params.json ----
@@ -279,13 +284,20 @@ def main():
         params_dict = json.load(f)
     if "model" not in params_dict:
         params_dict = {"model": params_dict}
+
     params_dict["model"]["stem_layers"] = args.stem_layers
+    params_dict["model"]["alpha_init"] = args.alpha_init
+    params_dict["model_type"] = "llama_dag"
     params_dict["distributed"] = params_dict.get("distributed", {})
     params_dict["distributed"]["stem_parallel_size"] = args.stem_parallel_size
+
     with open(output_dir / "params.json", "w") as f:
         json.dump(params_dict, f)
-    logger.info(f"Saved params.json with stem_layers={args.stem_layers}, "
-                f"stem_parallel_size={args.stem_parallel_size}")
+    logger.info(
+        f"Saved params.json with stem_layers={args.stem_layers}, "
+        f"alpha_init={args.alpha_init}, "
+        f"stem_parallel_size={args.stem_parallel_size}"
+    )
 
     # ---- 5. Save stem shards ----
     if not (output_dir / "stem_shards").exists():
@@ -298,17 +310,16 @@ def main():
 
     # ---- Done ----
     logger.info("")
-    logger.info(f"STEM checkpoint saved to: {output_dir}")
+    logger.info(f"DAG-STEM checkpoint saved to: {output_dir}")
     logger.info(
-        f"To use in stem_train.py, set:  checkpoint.init_ckpt_path={output_dir}"
+        f"To use in stem_dag_train.py, set:  checkpoint.init_ckpt_path={output_dir}"
     )
     logger.info(
         f"Stem layers: {args.stem_layers}  |  "
-        f"Parallel size: {args.stem_parallel_size}  |  "
-        f"Shards: {args.stem_parallel_size}"
+        f"Alpha init: {args.alpha_init}  |  "
+        f"Parallel size: {args.stem_parallel_size}"
     )
 
 
 if __name__ == "__main__":
     main()
-

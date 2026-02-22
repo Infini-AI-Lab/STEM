@@ -238,12 +238,7 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
 
 
 def _merge_shard_results(all_results):
-    """Merge lm_eval results from multiple DP shards by averaging numeric metrics.
-
-    Each shard evaluates a roughly equal round-robin slice of the dataset.
-    For simple means (accuracy, exact_match, …) averaging shard-level
-    aggregates is equivalent to the global aggregate.  Stderr values become
-    approximate but still useful.
+    """Merge lm_eval results from multiple DP shards with weighted averaging.
     """
     valid = [r for r in all_results if r is not None]
     if len(valid) <= 1:
@@ -256,17 +251,45 @@ def _merge_shard_results(all_results):
 
     if "results" in merged:
         for task_name in merged["results"]:
+            weights = []
+            for r in valid:
+                n_samples = r.get("n-samples", {}).get(task_name, {})
+                w = n_samples.get("effective", None) if isinstance(n_samples, dict) else None
+                weights.append(w)
+
+            has_weights = all(isinstance(w, (int, float)) and w > 0 for w in weights)
+
             for metric_name, value in merged["results"][task_name].items():
                 if not isinstance(value, (int, float)):
                     continue
-                values = [
-                    r["results"][task_name][metric_name]
-                    for r in valid
+                pairs = [
+                    (r["results"][task_name][metric_name], weights[i])
+                    for i, r in enumerate(valid)
                     if task_name in r.get("results", {})
                     and isinstance(r["results"][task_name].get(metric_name), (int, float))
                 ]
-                if values:
-                    merged["results"][task_name][metric_name] = sum(values) / len(values)
+                if not pairs:
+                    continue
+                if has_weights and len(pairs) == len(valid):
+                    total_w = sum(w for _, w in pairs)
+                    merged["results"][task_name][metric_name] = (
+                        sum(v * w for v, w in pairs) / total_w
+                    )
+                else:
+                    merged["results"][task_name][metric_name] = (
+                        sum(v for v, _ in pairs) / len(pairs)
+                    )
+
+    if "n-samples" in merged:
+        for task_name in merged["n-samples"]:
+            effectives = [
+                r["n-samples"][task_name]["effective"]
+                for r in valid
+                if task_name in r.get("n-samples", {})
+                and isinstance(r["n-samples"][task_name].get("effective"), (int, float))
+            ]
+            if effectives:
+                merged["n-samples"][task_name]["effective"] = sum(effectives)
 
     return merged
 
@@ -362,9 +385,15 @@ def launch_stem_eval(cfg: StemEvalArgs):
 
     # -- Gather and merge harness results across DP groups --
     if _has_dp_peers and results is not None:
+        safe_gather_keys = ['results', 'versions', 'n-shot', 'higher_is_better',
+                            'n-samples', 'git_hash', 'date', 'pretty_env_info',
+                            'transformers_version', 'lm_eval_version']
+        results_to_gather = {k: v for k, v in results.items() if k in safe_gather_keys}
+        results_to_gather = json.loads(json.dumps(results_to_gather, default=lambda o: None))
+
         dp_group = get_stem_data_parallel_group()
         gathered = [None] * dp_ws
-        torch.distributed.all_gather_object(gathered, results, group=dp_group)
+        torch.distributed.all_gather_object(gathered, results_to_gather, group=dp_group)
         results = _merge_shard_results(gathered)
         logger.info(f"Merged harness results from {dp_ws} DP shards")
 
