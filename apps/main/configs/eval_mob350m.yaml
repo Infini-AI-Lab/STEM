@@ -1,5 +1,5 @@
 name: "eval_mob350m"
-ckpt_dir: /raid/user_data/rsadhukh/checkpoints/MobileLLM-350M/distcp/
+ckpt_dir: /raid/user_data/rsadhukh/checkpoints/MobileLLM-350M-lingua/
 dump_dir: logs/eval_mob350m
 generator:
   max_tokens: 16384
@@ -14,6 +14,10 @@ harness:
       dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
     - task: piqa
       dataset_path: /raid/user_data/rsadhukh/test_data/piqa
+    - task: arc_easy
+      dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
+    - task: arc_challenge
+      dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
   batch_size: 16
 
 validation: null

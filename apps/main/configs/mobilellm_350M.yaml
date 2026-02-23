@@ -21,12 +21,12 @@ distributed:
 
 model:
   dim: 960
-  ffn_dim_multiplier: 0.675
+  ffn_dim_multiplier: null
   n_layers: 32
   n_heads: 15
   n_kv_heads: 5
   head_dim: 64
-  weight_tying: False
+  weight_tying: True
   vocab_size: 32000
   init_base_std: 0.02
   init_std_factor: disabled
