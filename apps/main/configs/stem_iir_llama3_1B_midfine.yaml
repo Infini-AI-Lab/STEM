@@ -67,10 +67,10 @@ checkpoint:
     # path: logs/debug/checkpoints
     init_ckpt_path: checkpoints/Llama-3.2-1B/distcp
     dump:
-        every: 2000
+        every: 10000
         keep: 1
     eval:
-        every: 2000
+        every: 10000
         keep: 1
 
 logging:
