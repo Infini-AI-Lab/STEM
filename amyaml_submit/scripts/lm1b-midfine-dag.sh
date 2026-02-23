@@ -39,11 +39,24 @@ python3 setup/aws_prepare_hf_dataset.py \
 
 rm -rf /dev/shm/data
 
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
-    config=apps/main/configs/stem_llama3_1B_midfine.yaml \
+python3 apps/main/prepare_dag_stem_checkpoint.py \
+    --ckpt-path /checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/distcp \
+    --output-dir /dev/shm/Llama-1B-dag-stem-init \
+    --stem-layers 2 6 10 14 \
+    --stem-parallel-size 8 \
+    --alpha-init -5.0
+
+# confirm the directory exists
+if [ ! -d "/dev/shm/Llama-1B-dag-stem-init" ]; then
+    echo "Error: /dev/shm/Llama-1B-dag-stem-init directory does not exist"
+    exit 1
+fi
+
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_dag_train \
+    config=apps/main/configs/stem_dag_llama3_1B_midfine.yaml \
     data.root_dir=/dev/shm \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
-    checkpoint.init_ckpt_path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-1B-init-start2-stl4 \
+    checkpoint.init_ckpt_path=/dev/shm/Llama-1B-dag-stem-init \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
     logging.wandb.name=${experiment_name} \
     model.stem_layers=[2,6,10,14] \
