@@ -1,8 +1,10 @@
-dump_dir: logs/debug
-name: large_lm
-steps: 200_000
+dump_dir: /raid/user_data/rsadhukh/logs/mobilellm_350M
+name: mobilellm_350M
+model_type: "llama"
+steps: 400_000
 probe_freq: null
 seed: 777
+grad_acc_steps: 4 
 
 optim:
   lr: 2e-3
@@ -35,7 +37,7 @@ model:
   rope_scaling: null
 
 data:
-  root_dir: /raid/user_data/rsadhukh
+  root_dir: /raid/user_data/rsadhukh/
   sources:
     dclm-baseline_shuffled: 1.0
   batch_size: 32
@@ -54,14 +56,17 @@ profiling:
 
 checkpoint:
     dump:
-        every: 2000
+        every: 5000
         keep: 1
     eval:
-        every: 2000
+        every: 5000
         keep: 1
 
 logging:
     freq: 10
+    wandb:
+        project: "stem"
+        name: "mobilellm_350M"
 
 eval:
     generator:
@@ -71,9 +76,21 @@ eval:
         top_p: 0.95
     harness:
         tasks:
-            - hellaswag
-            - piqa
-            - task: nq_open
-              num_fewshot: 5
+            - task: hellaswag
+              dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
+            - task: boolq
+              dataset_path: /raid/user_data/rsadhukh/test_data/super_glue
+            - task: piqa
+              dataset_path: /raid/user_data/rsadhukh/test_data/piqa
+            - task: arc_easy
+              dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
+            - task: arc_challenge
+              dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
+            - task: openbookqa
+              dataset_path: /raid/user_data/rsadhukh/test_data/openbookqa
+            - task: winogrande
+              dataset_path: /raid/user_data/rsadhukh/test_data/winogrande
+            - task: race
+              dataset_path: /raid/user_data/rsadhukh/test_data/race
     validation:
         max_steps: 100
