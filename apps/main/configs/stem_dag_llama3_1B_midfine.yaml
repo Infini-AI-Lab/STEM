@@ -1,5 +1,6 @@
 dump_dir: logs/debug
 name: "stem_dagger_llama3_1B"
+model_type: "llama_dag"
 steps: 200_000
 probe_freq: 100
 seed: 777
