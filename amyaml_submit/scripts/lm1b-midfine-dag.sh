@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-midfine-warmup-s2l4-100B"
+experiment_name="lm1b-stem-dag-midfine-100B"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 

@@ -80,6 +80,13 @@ class JSONLState(TypedDict):
     current_iter: int
 
 
+class MultiJSONLState(TypedDict):
+    """Represents iteration state over multiple JSONL chunks for one rank."""
+
+    chunk_states: list[JSONLState]
+    current_chunk_idx: int
+
+
 class MultiChoiceState(TypedDict):
     """Represents the current state of a Multi choice iterator.
 
@@ -207,6 +214,41 @@ def loop_on_jsonl(
             position = 0
     finally:
         it.close()
+
+
+def loop_on_jsonl_chunks(
+    chunk_states: list[JSONLState],
+    current_chunk_idx: int,
+):
+    """Round-robin over multiple chunk iterators for a single rank."""
+    assert len(chunk_states) > 0, "chunk_states must be non-empty"
+
+    states = deepcopy(chunk_states)
+    iters = [
+        loop_on_jsonl(
+            s["file_path"],
+            s["position"],
+            s["block_size"],
+            s["offset"],
+            s["current_iter"],
+        )
+        for s in states
+    ]
+
+    idx = current_chunk_idx % len(iters)
+    try:
+        while True:
+            content, state = next(iters[idx])
+            states[idx] = state
+            next_idx = (idx + 1) % len(iters)
+            yield content, MultiJSONLState(
+                chunk_states=deepcopy(states),
+                current_chunk_idx=next_idx,
+            )
+            idx = next_idx
+    finally:
+        for it in iters:
+            it.close()
 
 
 def tokenize(
@@ -470,13 +512,10 @@ def batch_and_shuffle_prefetched_sequences(
 
 
 def find_and_sanitize_chunks(dataset_path: str, world_size: int, file_pattern: str = TRAIN_DATA_FILE_PATTERN):
-    dataset_chunks = [str(p) for p in Path(dataset_path).glob(file_pattern)]
+    dataset_chunks = sorted(str(p) for p in Path(dataset_path).glob(file_pattern))
     n_chunks = len(dataset_chunks)
 
-    if n_chunks > world_size:
-        n_discard = n_chunks - world_size
-        dataset_chunks = dataset_chunks[:world_size]
-    else:
+    if n_chunks <= world_size:
         assert (
             world_size % n_chunks == 0
         ), "World size should be a multiple of number of chunks"
@@ -489,12 +528,33 @@ def find_and_sanitize_chunks(dataset_path: str, world_size: int, file_pattern: s
 def distribute_data_to_rank(dataset_path: str, rank: int, world_size: int, file_pattern: str):
     """
     Distributes the chunk files in a dataset path to each worker.
-    If world_size is smaller than the number of chunks, the extra chunks are discarded.
-    Otherwise, world_size is assumed to be a multiple of number of chunks.
-    In that case there are world_size//nb_chunks workers on each chunk file, reading with different offsets.
+    If number of chunks is larger than world_size, each rank receives multiple chunks
+    with a round-robin assignment over chunk indices.
+    Otherwise, world_size is assumed to be a multiple of number of chunks and there
+    are world_size//nb_chunks workers on each chunk file, reading with different offsets.
     """
     dataset_chunks = find_and_sanitize_chunks(dataset_path, world_size, file_pattern)
-    n_ranks_per_chunk = world_size // len(dataset_chunks)
+    n_chunks = len(dataset_chunks)
+
+    # More chunks than ranks: spread all chunks across ranks.
+    if n_chunks > world_size:
+        assigned_chunks = dataset_chunks[rank::world_size]
+        assert len(assigned_chunks) > 0, "Each rank should receive at least one chunk"
+        return MultiJSONLState(
+            chunk_states=[
+                JSONLState(
+                    file_path=chunk_path,
+                    position=0,
+                    block_size=1,
+                    offset=0,
+                    current_iter=0,
+                )
+                for chunk_path in assigned_chunks
+            ],
+            current_chunk_idx=0,
+        )
+
+    n_ranks_per_chunk = world_size // n_chunks
     rank_to_jsonl_iterator_params = []
     for chunk_path in dataset_chunks:
         for i in range(n_ranks_per_chunk):
@@ -590,13 +650,19 @@ def setup_sources(multi_state):
     path_to_iter = dict()
     for source in multi_state["sources"]:
         jsonl_state = multi_state["source_to_state"][source]
-        path_to_iter[source] = loop_on_jsonl(
-            jsonl_state["file_path"],
-            jsonl_state["position"],
-            jsonl_state["block_size"],
-            jsonl_state["offset"],
-            jsonl_state["current_iter"],
-        )
+        if "chunk_states" in jsonl_state:
+            path_to_iter[source] = loop_on_jsonl_chunks(
+                jsonl_state["chunk_states"],
+                jsonl_state["current_chunk_idx"],
+            )
+        else:
+            path_to_iter[source] = loop_on_jsonl(
+                jsonl_state["file_path"],
+                jsonl_state["position"],
+                jsonl_state["block_size"],
+                jsonl_state["offset"],
+                jsonl_state["current_iter"],
+            )
 
     return path_to_iter
 
