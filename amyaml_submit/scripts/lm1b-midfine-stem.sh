@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-stem-dag-midfine-100B"
+experiment_name="lm1b-midfine-stem-100B"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -39,26 +39,23 @@ python3 setup/aws_prepare_hf_dataset.py \
 
 rm -rf /dev/shm/data
 
-python3 apps/main/prepare_dag_stem_checkpoint.py \
+python3 apps/main/prepare_stem_checkpoint.py \
     --ckpt-path /checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/distcp \
-    --output-dir /dev/shm/Llama-1B-dag-stem-init \
+    --output-dir /dev/shm/Llama-1B-stem-init \
     --stem-layers 2 6 10 14 \
-    --stem-parallel-size 8 \
-    --alpha-init -5.0
+    --stem-parallel-size 8 
 
 # confirm the directory exists
-if [ ! -d "/dev/shm/Llama-1B-dag-stem-init" ]; then
-    echo "Error: /dev/shm/Llama-1B-dag-stem-init directory does not exist"
+if [ ! -d "/dev/shm/Llama-1B-stem-init" ]; then
+    echo "Error: /dev/shm/Llama-1B-stem-init directory does not exist"
     exit 1
 fi
 
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_dag_train \
-    config=apps/main/configs/stem_dag_llama3_1B_midfine.yaml \
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
+    config=apps/main/configs/stem_llama3_1B_midfine.yaml \
     data.root_dir=/dev/shm \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
-    checkpoint.init_ckpt_path=/dev/shm/Llama-1B-dag-stem-init \
+    checkpoint.init_ckpt_path=/dev/shm/Llama-1B-stem-init \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
     logging.wandb.name=${experiment_name} \
-    model.stem_layers=[2,6,10,14] \
-    stem_lr=1e-3 \
-    stem_weight_decay=0.0
+    model.stem_layers=[2,6,10,14] 
