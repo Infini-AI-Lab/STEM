@@ -5,11 +5,15 @@ probe_freq: 100
 seed: 777
 
 optim:
-    lr: 2e-5
-    weight_decay: 0.033
+    lr: 1e-4
+    weight_decay: 0.1
     warmup: 2000
     lr_min_ratio: 0.01
     clip: 1.0
+
+stem_lr: 5e-4
+stem_weight_decay: 0.0
+
 
 distributed:                                                                                                        
     fsdp_type: full_shard
@@ -40,9 +44,15 @@ model:
     stem_layers: [1, 3, 5, 7, 9, 11, 13, 15]
 
 data:
-    root_dir: /dev/shm/
+    root_dir: /dev/shm/dolmino-mix_shuffled
     sources:
-        dolmino-mix_shuffled: 1.0
+        CommonCrawlHQ: 22.5
+        Code_Main: 20.0
+        Math_Main: 18.06
+        InstQA_Main: 11.1
+        Reasoning_Traces: 7.49
+        STEM_Heavy: 10.0
+        Flashcards_RCQA: 8.9
     batch_size: 4
     prefetch_size: 1024
     seq_len: 4096
