@@ -40,30 +40,13 @@ model:
 data:
     root_dir: /dev/shm/dolmino-mix_shuffled
     sources:
-        common_crawl-high-quality: 22.5
-        olmocr_science_pdfs-high_quality: 5.0
-        stack_edu_fim: 10.0
-        stem-heavy-crawl: 5.0
-        cranecode: 10.0
-        cranemath: 5.63
-        megamatt: 1.73
-        dolmino-math: 10.7
-        omr-rewrite-fullthoughts: 0.85
-        tinymath-mind: 0.9
-        tinymath-pot: 0.24
-        reddit_to_flashcards: 5.9
-        wiki_to_rcqa: 3.0
-        nemotron-synth-qa: 5.0
-        tulu-3-sft: 1.1
-        dolmino_1-flan: 5.0
-        qwq-reasoning-traces: 1.87
-        gemini-reasoning-traces: 0.25
-        llama_nemotron-reasoning-traces: 1.25
-        openthoughts2-reasoning-traces: 1.25
-        program_verifiable: 0.16
-        math-meta-reasoning: 0.38
-        code-meta-reasoning: 0.46
-        general_reasoning_mix: 1.87
+        CommonCrawlHQ: 22.5
+        Code_Main: 20.0
+        Math_Main: 18.06
+        InstQA_Main: 11.1
+        Reasoning_Traces: 7.49
+        STEM_Heavy: 10.0
+        Flashcards_RCQA: 8.9
     batch_size: 4
     prefetch_size: 1024
     seq_len: 4096

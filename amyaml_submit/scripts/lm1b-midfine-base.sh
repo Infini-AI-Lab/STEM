@@ -32,7 +32,16 @@ python3 setup/prepare_hf_dataset_by_source.py \
     --out_dir /dev/shm/dolmino-mix_shuffled \
     --num_nodes ${NNODES} \
     --node_rank ${NODE_RANK} \
-    --nchunks 8 
+    --nchunks 8 \
+    --group_yaml setup/source_groups_reasoning.yaml
+
+empty_chunks=$(find /dev/shm/dolmino-mix_shuffled -type f -name "*.chunk.*.jsonl" -empty)
+if [ -n "${empty_chunks}" ]; then
+    echo "ERROR: Found empty chunk files. Aborting before training."
+    echo "${empty_chunks}"
+    exit 1
+fi
+echo "Chunk validation passed: no empty chunk files found."
 
 rm -rf /dev/shm/data
 

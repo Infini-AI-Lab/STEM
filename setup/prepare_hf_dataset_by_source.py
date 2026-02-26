@@ -42,6 +42,8 @@ import sys
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
+import yaml
+
 
 DEFAULT_PREFIX_TO_RATIO: Dict[str, float] = {
     "common_crawl-high-quality": 22.5,
@@ -79,6 +81,13 @@ class SourceAssignment:
     files: List[str]
     files_for_this_node: List[str]
     fallback_all_files: bool
+
+
+@dataclass
+class SourceGroup:
+    source: str
+    ratio: float
+    prefixes: List[str]
 
 
 def run_command(command: str):
@@ -168,6 +177,68 @@ def load_prefix_to_ratio(path: str) -> Dict[str, float]:
     return out
 
 
+def default_source_groups() -> List[SourceGroup]:
+    return [
+        SourceGroup(source=source, ratio=ratio, prefixes=[source])
+        for source, ratio in DEFAULT_PREFIX_TO_RATIO.items()
+    ]
+
+
+def load_source_groups_yaml(path: str) -> List[SourceGroup]:
+    with open(path, "r") as f:
+        payload = yaml.safe_load(f)
+
+    if not isinstance(payload, dict) or "groups" not in payload:
+        raise ValueError(
+            "--group_yaml must be a YAML object containing a top-level 'groups' list"
+        )
+
+    groups_payload = payload["groups"]
+    if not isinstance(groups_payload, list):
+        raise ValueError("'groups' must be a list")
+
+    out: List[SourceGroup] = []
+    seen_sources = set()
+    seen_prefixes = set()
+    for i, g in enumerate(groups_payload):
+        if not isinstance(g, dict):
+            raise ValueError(f"groups[{i}] must be an object")
+        source = str(g.get("source", "")).strip()
+        ratio = g.get("ratio", None)
+        prefixes = g.get("prefixes", None)
+        if not source:
+            raise ValueError(f"groups[{i}] missing non-empty 'source'")
+        if source in seen_sources:
+            raise ValueError(f"Duplicate source in group_yaml: '{source}'")
+        if ratio is None:
+            raise ValueError(f"groups[{i}] missing 'ratio'")
+        if not isinstance(prefixes, list) or len(prefixes) == 0:
+            raise ValueError(f"groups[{i}] must contain non-empty 'prefixes' list")
+        cleaned_prefixes: List[str] = []
+        for p in prefixes:
+            prefix = str(p).strip()
+            if not prefix:
+                continue
+            if prefix in seen_prefixes:
+                raise ValueError(
+                    f"Prefix '{prefix}' is mapped by more than one group in {path}"
+                )
+            seen_prefixes.add(prefix)
+            cleaned_prefixes.append(prefix)
+        if len(cleaned_prefixes) == 0:
+            raise ValueError(f"groups[{i}] has no valid prefixes")
+        out.append(
+            SourceGroup(
+                source=source,
+                ratio=float(ratio),
+                prefixes=cleaned_prefixes,
+            )
+        )
+        seen_sources.add(source)
+
+    return out
+
+
 def canonicalize_folder_name(folder_name: str) -> str:
     # Typical naming: ingredient1-<source-prefix>_<suffix>
     name = re.sub(r"^ingredient\d+-", "", folder_name)
@@ -186,6 +257,23 @@ def find_matching_prefix(folder_name: str, prefixes: List[str]) -> str:
     return matches[0]
 
 
+def find_matching_group(folder_name: str, groups: List[SourceGroup]) -> str:
+    canonical = canonicalize_folder_name(folder_name)
+
+    prefix_to_source = {}
+    for g in groups:
+        for prefix in g.prefixes:
+            prefix_to_source[prefix] = g.source
+
+    matches = [p for p in prefix_to_source if canonical.startswith(p)]
+    if not matches:
+        matches = [p for p in prefix_to_source if p in canonical]
+    if not matches:
+        return ""
+    matches.sort(key=len, reverse=True)
+    return prefix_to_source[matches[0]]
+
+
 def list_immediate_subdirs(path: str) -> List[str]:
     if not os.path.isdir(path):
         return []
@@ -200,23 +288,26 @@ def list_jsonl_zst_files(folder_path: str) -> List[str]:
 
 def assign_sources(
     data_dir: str,
-    prefix_to_ratio: Dict[str, float],
+    source_groups: List[SourceGroup],
     node_rank: int,
     num_nodes: int,
 ) -> Tuple[List[SourceAssignment], List[str]]:
-    source_to_folders: Dict[str, List[str]] = {k: [] for k in prefix_to_ratio}
+    source_to_folders: Dict[str, List[str]] = {
+        g.source: [] for g in source_groups
+    }
     unmatched_folders: List[str] = []
 
     all_folders = list_immediate_subdirs(data_dir)
     for folder in all_folders:
-        source = find_matching_prefix(folder, list(prefix_to_ratio.keys()))
+        source = find_matching_group(folder, source_groups)
         if source:
             source_to_folders[source].append(os.path.join(data_dir, folder))
         else:
             unmatched_folders.append(folder)
 
     assignments: List[SourceAssignment] = []
-    for source, ratio in prefix_to_ratio.items():
+    for group in source_groups:
+        source, ratio = group.source, group.ratio
         folders = sorted(source_to_folders.get(source, []))
         files: List[str] = []
         for folder_path in folders:
@@ -302,6 +393,15 @@ def main():
         default=None,
         help="Optional JSON file with {prefix: ratio}. Defaults to built-in map.",
     )
+    parser.add_argument(
+        "--group_yaml",
+        type=str,
+        default=None,
+        help=(
+            "Optional YAML file describing grouped sources with shape: "
+            "{groups: [{source, ratio, prefixes: [...]}, ...]}."
+        ),
+    )
     parser.add_argument("--num_nodes", type=int, default=None, help="Total nodes.")
     parser.add_argument("--node_rank", type=int, default=None, help="Current node rank.")
     parser.add_argument("--nchunks", type=int, default=8, help="Chunks per source (per node).")
@@ -326,9 +426,18 @@ def main():
         ws = os.environ.get("WORLD_SIZE")
         num_nodes = max(1, int(ws) // 8) if ws is not None else 1
 
-    prefix_to_ratio = (
-        load_prefix_to_ratio(args.ratio_json) if args.ratio_json else DEFAULT_PREFIX_TO_RATIO
-    )
+    if args.group_yaml:
+        source_groups = load_source_groups_yaml(args.group_yaml)
+    else:
+        prefix_to_ratio = (
+            load_prefix_to_ratio(args.ratio_json)
+            if args.ratio_json
+            else DEFAULT_PREFIX_TO_RATIO
+        )
+        source_groups = [
+            SourceGroup(source=k, ratio=v, prefixes=[k])
+            for k, v in prefix_to_ratio.items()
+        ]
 
     local_dir = args.local_dir.rstrip("/")
     if os.path.basename(local_dir) == "data":
@@ -345,7 +454,7 @@ def main():
 
     assignments, unmatched_folders = assign_sources(
         data_dir=data_dir,
-        prefix_to_ratio=prefix_to_ratio,
+        source_groups=source_groups,
         node_rank=node_rank,
         num_nodes=num_nodes,
     )
