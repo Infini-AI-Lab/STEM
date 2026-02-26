@@ -3,8 +3,8 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-midfine-base-100B"
-NNODES=4
+experiment_name="lm1b-prefine-base"
+NNODES=2
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
 WANDB_DIR=/scratch/scratch/beidchen/projects/stem_wandb 
@@ -27,22 +27,25 @@ echo "NODE_RANK: $NODE_RANK"
 echo "WANDB_MODE: $WANDB_MODE"
 
 
-# Space-efficient data prep: each node streams only its 1/N share from S3
-# and writes decompressed chunks directly (no 2x storage needed).
-# NOTE: remove or comment out the "aws s3 sync" line in template.yaml when
-#       using --s3_uri mode, since this script streams directly from S3.
 python3 setup/aws_prepare_hf_dataset.py \
-    --local_dir /dev/shm/data \
-    --out_dir /dev/shm/dolmino-mix_shuffled \
-    --dataset dolmino-mix \
+    --local_dir /data-fsx/beidchen-sandbox/data/olmo/dclm \
+    --out_dir /dev/shm/dclm_baseline_shuffled \
+    --dataset dclm-baseline \
+    --pattern "**/global-shard_01_of_10/local-shard_0_of_10/*.jsonl.zstd" \
     --num_nodes ${NNODES} \
     --node_rank ${NODE_RANK} \
     --nchunks 8 
 
-rm -rf /dev/shm/data
+empty_chunks=$(find /dev/shm/dclm_baseline_shuffled -type f -name "*.chunk.*.jsonl" -empty)
+if [ -n "${empty_chunks}" ]; then
+    echo "ERROR: Found empty chunk files. Aborting before training."
+    echo "${empty_chunks}"
+    exit 1
+fi
+echo "Chunk validation passed: no empty chunk files found."
 
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
-    config=apps/main/configs/llama3_1B_midfine.yaml \
+    config=apps/main/configs/llama3_1B_prefine.yaml \
     data.root_dir=/dev/shm \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
     checkpoint.init_ckpt_path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/distcp/ \
