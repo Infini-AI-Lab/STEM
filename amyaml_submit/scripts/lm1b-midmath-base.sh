@@ -35,7 +35,7 @@ python3 setup/aws_prepare_hf_dataset.py \
     --node_rank ${NODE_RANK} \
     --nchunks 8 
 
-rm -rf /dev/shm/data
+rm -rf /dev/shm/dolmino_math-mix
 
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
     config=apps/main/configs/llama3_1B_midmath.yaml \
