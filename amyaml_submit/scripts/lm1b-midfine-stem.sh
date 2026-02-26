@@ -55,6 +55,8 @@ if [ ! -d "/dev/shm/Llama-1B-stem-init" ]; then
     exit 1
 fi
 
+echo "Starting training"
+
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     config=apps/main/configs/stem_llama3_1B_midfine.yaml \
     data.root_dir=/dev/shm \
