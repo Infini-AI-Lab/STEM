@@ -4,7 +4,7 @@ set -x
 
 project_name="stem"
 experiment_name="lm1b-midtrain-stem-100B"
-NNODES=2
+NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
 WANDB_DIR=/scratch/scratch/beidchen/projects/stem_wandb 
@@ -59,7 +59,7 @@ echo "Starting training"
 
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     config=apps/main/configs/stem_llama3_1B_midfine.yaml \
-    data.root_dir=/dev/shm \
+    data.root_dir=/dev/shm/dolmino-mix_shuffled \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
     checkpoint.init_ckpt_path=/dev/shm/Llama-1B-stem-init \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
