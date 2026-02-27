@@ -1,1 +1,2 @@
-kubectl apply -f amyaml_submit/scripts/beidchen-lm1b-prefine-stem-012526.yaml
+kubectl apply -f amyaml_submit/scripts/beidchen-lm1b-prefine-iir-120646.yaml
+kubectl apply -f amyaml_submit/scripts/beidchen-lm1b-prefine-stem-120646.yaml
