@@ -3,7 +3,9 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-prefine-stem-100B"
+experiment_name="lm1b-prefine-stem-100B-twostage"
+stage1_name="lm1b-prefine-stem-100B-stage1"
+stage2_name="lm1b-prefine-stem-100B-stage2"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -57,10 +59,50 @@ fi
 
 echo "Starting training"
 
+# Stage 1: 0 - 10k (freeze base, train STEM only)
+DUMP_DIR=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     config=apps/main/configs/stem_llama3_1B_prefine.yaml \
-    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
+    dump_dir=${DUMP_DIR} \
     checkpoint.init_ckpt_path=/dev/shm/Llama-1B-stem-init \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
-    logging.wandb.name=${experiment_name} \
-    model.stem_layers=[2,6,10,14] 
+    logging.wandb.name=${stage1_name} \
+    model.stem_layers=[2,6,10,14] \
+    stem_lr=1e-3 \
+    stem_weight_decay=1e-4 \
+    optim.warmup=1000 \
+    stem_warmup=1000 \
+    optim.lr_min_ratio=0.25 \
+    steps=10000 \
+    train_stage=0 
+    
+echo "########################################################"
+echo "Stage 1 completed"
+echo "########################################################"
+
+STAGE1_FINAL_CKPT=${DUMP_DIR}/checkpoints/0000010000
+if [ ! -d "${STAGE1_FINAL_CKPT}" ]; then
+    echo "Error: Stage 1 checkpoint ${STAGE1_FINAL_CKPT} does not exist"
+    exit 1
+fi
+
+echo "########################################################"
+echo "Stage 2 starting"
+echo "########################################################"
+
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
+    config=apps/main/configs/stem_llama3_1B_prefine.yaml \
+    dump_dir=${DUMP_DIR} \
+    checkpoint.init_ckpt_path=/dev/shm/Llama-1B-stem-init \
+    data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
+    logging.wandb.name=${stage2_name} \
+    model.stem_layers=[2,6,10,14] \
+    optim.lr=5e-5 \
+    optim.weight_decay=0.05 \
+    stem_lr=3e-4 \
+    stem_weight_decay=1e-4 \
+    optim.warmup=12000 \
+    stem_warmup=12000 \
+    steps=200000 \
+    train_stage=1 \
+    resume_stage=false 

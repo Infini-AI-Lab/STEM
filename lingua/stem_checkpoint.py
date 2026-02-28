@@ -562,6 +562,10 @@ def consolidate_stem_shards(ckpt_dir: str):
                         
 class StemCheckpointManager(CheckpointManager):
     
+    def __init__(self, args, train_stage: Optional[int] = None):
+        super().__init__(args)
+        self.train_stage: Optional[int] = train_stage
+    
     @torch.no_grad()
     def get_state_dict(
         self,
@@ -733,11 +737,19 @@ class StemCheckpointManager(CheckpointManager):
         if isinstance(optimizer, dict):
             stem_optimizer = optimizer.get("stem")
         
-        fsdp_state_dict, _, _ = self.get_state_dict(
-            model=model,
-            optimizer=optimizer,
-            stem_optimizer=stem_optimizer,
-        )
+        if self.train_stage is not None and self.train_stage > 0:
+            fsdp_state_dict, _, _ = self.get_state_dict(
+                model=model,
+                optimizer=None,
+                stem_optimizer=stem_optimizer,
+            )
+            logger.info("Skipping backbone optimizer load to initialize stage 1")
+        else:
+            fsdp_state_dict, _, _ = self.get_state_dict(
+                model=model,
+                optimizer=optimizer,
+                stem_optimizer=stem_optimizer,
+            )
 
         # 2) Load backbone via DCP
         dcp.load(fsdp_state_dict, checkpoint_id=path)

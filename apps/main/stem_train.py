@@ -8,7 +8,7 @@ import os
 import sys
 import time
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from timeit import default_timer as timer
 from typing import Any, Dict, List, Optional
@@ -109,6 +109,12 @@ class StemTrainArgs(TrainArgs):
     # When None, falls back to the values in ``optim``.
     stem_lr: Optional[float] = None
     stem_weight_decay: Optional[float] = None
+    # Separate warmup for stem_embeddings schedule.
+    # When None, falls back to ``optim.warmup``.
+    stem_warmup: Optional[int] = None
+    # Freeze backbone (lm_transformer) parameters during training.
+    train_stage: Optional[int] = None
+    resume_stage: bool = False
     
     
 preemption_flag = dict(flag=False)
@@ -188,6 +194,14 @@ def train(args: StemTrainArgs):
         )
         
         model = model.to_empty(device="cuda")
+
+        freeze_base = args.train_stage is not None and args.train_stage == 0
+        if freeze_base:
+            for param in model.lm_transformer.parameters():
+                param.requires_grad = False
+            logger.info("Base model parameters are frozen (freeze_base=True)")
+        else:
+            logger.info("Base model parameters are trainable (freeze_base=False)")
         
         # Ensure stem_embeddings parameters require gradients and verify they're on the correct device
         for i, embedding in enumerate(model.stem_embeddings):
@@ -276,11 +290,14 @@ def train(args: StemTrainArgs):
             fused=False,  # Disable fused for regular tensors
         )
         
-        # Create schedulers for both optimizers
-        lr_fn = build_lr_fn(args.optim, args.steps)
+        # Create schedulers for both optimizers.
+        lm_lr_fn = build_lr_fn(args.optim, args.steps)
+        stem_warmup = args.stem_warmup if args.stem_warmup is not None else args.optim.warmup
+        stem_optim_args = replace(args.optim, warmup=stem_warmup)
+        stem_lr_fn = build_lr_fn(stem_optim_args, args.steps)
         from torch.optim import lr_scheduler
-        lm_scheduler = lr_scheduler.LambdaLR(lm_optimizer, lr_fn)
-        stem_scheduler = lr_scheduler.LambdaLR(stem_optimizer, lr_fn)
+        lm_scheduler = lr_scheduler.LambdaLR(lm_optimizer, lm_lr_fn)
+        stem_scheduler = lr_scheduler.LambdaLR(stem_optimizer, stem_lr_fn)
         
         # Store both optimizers and schedulers
         optimizer = {"lm": lm_optimizer, "stem": stem_optimizer}
@@ -298,7 +315,8 @@ def train(args: StemTrainArgs):
         )
         
         # Use StemCheckpointManager which handles ParallelEmbedding checkpointing
-        checkpoint = StemCheckpointManager.instantiate_and_make_dir(args.checkpoint)
+        train_stage = args.train_stage if not args.resume_stage else None
+        checkpoint = StemCheckpointManager.instantiate_and_make_dir(args.checkpoint, train_stage=train_stage)
         
         # Load from init checkpoint if specified (before loading from latest checkpoint)
         if args.checkpoint.init_ckpt_path:
