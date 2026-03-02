@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-prefine-base"
+experiment_name="lm1b-prefine-base-100B"
 NNODES=2
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -28,15 +28,14 @@ echo "WANDB_MODE: $WANDB_MODE"
 
 
 python3 setup/aws_prepare_hf_dataset.py \
-    --local_dir /data-fsx/beidchen-sandbox/data/olmo/dclm \
-    --out_dir /dev/shm/dclm_baseline_shuffled \
+    --local_dir /dev/shm/global-shard_01_of_10 \
+    --out_dir /dev/shm/dclm-baseline_shuffled \
     --dataset dclm-baseline \
-    --pattern "**/global-shard_01_of_10/local-shard_0_of_10/*.jsonl.zstd" \
     --num_nodes ${NNODES} \
     --node_rank ${NODE_RANK} \
     --nchunks 8 
 
-empty_chunks=$(find /dev/shm/dclm_baseline_shuffled -type f -name "*.chunk.*.jsonl" -empty)
+empty_chunks=$(find /dev/shm/dclm-baseline_shuffled -type f -name "*.chunk.*.jsonl" -empty)
 if [ -n "${empty_chunks}" ]; then
     echo "ERROR: Found empty chunk files. Aborting before training."
     echo "${empty_chunks}"
@@ -44,9 +43,12 @@ if [ -n "${empty_chunks}" ]; then
 fi
 echo "Chunk validation passed: no empty chunk files found."
 
+rm -rf /dev/shm/global-shard_01_of_10
+
+echo "Starting training"
+
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
     config=apps/main/configs/llama3_1B_prefine.yaml \
-    data.root_dir=/dev/shm \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
     checkpoint.init_ckpt_path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/distcp/ \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \

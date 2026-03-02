@@ -44,7 +44,7 @@ echo "Chunk validation passed: no empty chunk files found."
 rm -rf /dev/shm/data
 
 python3 apps/main/prepare_init_checkpoint.py \
-    --ckpt-path /checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-midtrain-stem-100B/checkpoints/0000200000 \
+    --input-dir /checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-midtrain-stem-100B/checkpoints/0000200000 \
     --output-dir /dev/shm/Llama-1B-stem-init 
 
 # confirm the directory exists
