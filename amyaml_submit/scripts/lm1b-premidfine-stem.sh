@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-prefine-midtrain-stem-100B"
+experiment_name="lm1b-prewarm-midtrain-stem-100B"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -62,4 +62,6 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     checkpoint.init_ckpt_path=/dev/shm/Llama-1B-stem-init \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
     logging.wandb.name=${experiment_name} \
-    model.stem_layers=[2,6,10,14] 
+    model.stem_layers=[2,6,10,14] \
+    stem_lr=1e-4 \
+    stem_weight_decay=1e-4
