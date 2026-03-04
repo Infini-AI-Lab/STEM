@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-pre100B-midt100B-stem"
+experiment_name="lm1b-pre2stage-midt100B-stem"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -44,7 +44,7 @@ echo "Chunk validation passed: no empty chunk files found."
 rm -rf /dev/shm/data
 
 python3 apps/main/prepare_init_checkpoint.py \
-    --input-dir /checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-prefine-stem-100B/checkpoints/0000200000 \
+    --input-dir /checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-prefine-stem-100B-twostage/checkpoints/0000200000 \
     --output-dir /dev/shm/Llama-1B-stem-init 
 
 # confirm the directory exists
