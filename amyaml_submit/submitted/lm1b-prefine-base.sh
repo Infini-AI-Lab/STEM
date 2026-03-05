@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-prefine-base-100B"
+experiment_name="lm1b-dclm-base-100B"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -45,7 +45,9 @@ echo "Chunk validation passed: no empty chunk files found."
 
 rm -rf /dev/shm/global-shard_01_of_10
 
-echo "Starting training"
+echo "########################################################"
+echo "Training starting"
+echo "########################################################"
 
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
     config=apps/main/configs/llama3_1B_prefine.yaml \
