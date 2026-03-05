@@ -5,14 +5,15 @@ probe_freq: 100
 seed: 777
 
 optim:
-    lr: 1e-4
+    lr: 3e-5
     weight_decay: 0.1
-    warmup: 2000
-    lr_min_ratio: 0.01
+    warmup: 10000
+    lr_min_ratio: 0.1
     clip: 1.0
 
-stem_lr: 5e-4
-stem_weight_decay: 0.0
+stem_lr: 1e-3
+stem_weight_decay: 1e-4
+stem_warmup: 5000
 
 
 distributed:                                                                                                        
