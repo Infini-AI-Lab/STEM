@@ -112,6 +112,10 @@ class StemTrainArgs(TrainArgs):
     # Separate warmup for stem_embeddings schedule.
     # When None, falls back to ``optim.warmup``.
     stem_warmup: Optional[int] = None
+    # Optional STEM-specific scheduler controls.
+    # When None, falls back to the corresponding ``optim`` values.
+    stem_scheduler: Optional[str] = None
+    stem_lr_min_ratio: Optional[float] = None
     # Freeze backbone (lm_transformer) parameters during training.
     train_stage: Optional[int] = None
     resume_stage: bool = False
@@ -293,7 +297,24 @@ def train(args: StemTrainArgs):
         # Create schedulers for both optimizers.
         lm_lr_fn = build_lr_fn(args.optim, args.steps)
         stem_warmup = args.stem_warmup if args.stem_warmup is not None else args.optim.warmup
-        stem_optim_args = replace(args.optim, warmup=stem_warmup)
+        stem_scheduler_name = (
+            args.stem_scheduler if args.stem_scheduler is not None else args.optim.scheduler
+        )
+        stem_lr_min_ratio = (
+            args.stem_lr_min_ratio
+            if args.stem_lr_min_ratio is not None
+            else args.optim.lr_min_ratio
+        )
+        stem_optim_args = replace(
+            args.optim,
+            warmup=stem_warmup,
+            scheduler=stem_scheduler_name,
+            lr_min_ratio=stem_lr_min_ratio,
+        )
+        logger.info(
+            f"Stem scheduler: scheduler={stem_scheduler_name}, warmup={stem_warmup}, "
+            f"lr_min_ratio={stem_lr_min_ratio}"
+        )
         stem_lr_fn = build_lr_fn(stem_optim_args, args.steps)
         from torch.optim import lr_scheduler
         lm_scheduler = lr_scheduler.LambdaLR(lm_optimizer, lm_lr_fn)

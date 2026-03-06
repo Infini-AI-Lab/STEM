@@ -10,6 +10,7 @@ optim:
     warmup: 2000
     lr_min_ratio: 0.01
     clip: 1.0
+    scheduler: "linear"
 
 distributed:                                                                                                        
     fsdp_type: full_shard

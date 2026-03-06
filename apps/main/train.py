@@ -347,11 +347,7 @@ def train(args: TrainArgs):
         # and buffers, otherwise you will have random values in the unitialized tensors
         # which will silently fail (give nan gradients for example)
 
-        if args.checkpoint.init_ckpt_path:
-            logger.info(f"Loading initial model from {args.checkpoint.init_ckpt_path}")
-            load_from_checkpoint(args.checkpoint.init_ckpt_path, model, model_key="model") # Put model_key="" if its directly the model checkpoint
-            model.rope_embeddings.reset_parameters() # For RoPe initialization since it's a buffer it might not be loaded
-        else:
+        if not args.checkpoint.init_ckpt_path:
             with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
                 torch.manual_seed(args.model.seed)
                 model.init_weights()
@@ -382,6 +378,16 @@ def train(args: TrainArgs):
         )
 
         checkpoint = CheckpointManager.instantiate_and_make_dir(args.checkpoint)
+        
+        if args.checkpoint.init_ckpt_path:
+            if args.checkpoint.continue_training_from_init:
+                logger.info(f"Loading initial model & optimizer from {args.checkpoint.init_ckpt_path}")
+                load_from_checkpoint(args.checkpoint.init_ckpt_path, model, optimizer=optimizer, model_key="model")
+            else:
+                logger.info(f"Loading initial model from {args.checkpoint.init_ckpt_path}")
+                load_from_checkpoint(args.checkpoint.init_ckpt_path, model, model_key="model") # Put model_key="" if its directly the model checkpoint
+            model.rope_embeddings.reset_parameters() # For RoPe initialization since it's a buffer it might not be loaded
+        
         checkpoint.load(model, optimizer, train_state, world_mesh)
         # Either load from latest checkpoint or start from scratch
         if args.probe_freq is not None:
