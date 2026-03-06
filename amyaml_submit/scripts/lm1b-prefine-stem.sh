@@ -70,4 +70,5 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     stem_lr=8e-4 \
     stem_weight_decay=1e-4 \
     stem_warmup=5000 \
-    stem_lr_min_ratio=0.01
+    stem_lr_min_ratio=0.01 \
+    eval.validation.max_steps=8000
