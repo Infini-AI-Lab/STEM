@@ -47,8 +47,7 @@ python3 apps/main/prepare_stem_checkpoint.py \
     --ckpt-path /checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/distcp \
     --output-dir /dev/shm/Llama-1B-stem-init \
     --stem-layers 2 6 10 14 \
-    --stem-parallel-size 8 \
-    --overwrite
+    --stem-parallel-size 8 
 
 # confirm the directory exists
 if [ ! -d "/dev/shm/Llama-1B-stem-init" ]; then
