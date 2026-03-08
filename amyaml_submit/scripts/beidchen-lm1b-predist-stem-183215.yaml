@@ -36,7 +36,7 @@ spec:
                         values:
                           - p5en.48xlarge
           tolerations:
-            - key: shobhvas-nnc7
+            - key: mziyadi-lmsys
               operator: Equal
               value: "True"
               effect: NoSchedule

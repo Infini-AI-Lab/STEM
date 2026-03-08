@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-dclm-stem-half-100B"
+experiment_name="lm1b-dclm-stem-100B-3"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -46,7 +46,7 @@ rm -rf /dev/shm/global-shard_01_of_10
 python3 apps/main/prepare_stem_checkpoint.py \
     --ckpt-path /checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/distcp \
     --output-dir /dev/shm/Llama-1B-stem-init \
-    --stem-layers 2 4 6 8 10 12 14 \
+    --stem-layers 2 6 10 14 \
     --stem-parallel-size 8 
 
 # confirm the directory exists
@@ -63,6 +63,13 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     config=apps/main/configs/stem_llama3_1B_prefine.yaml \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
     checkpoint.init_ckpt_path=/dev/shm/Llama-1B-stem-init \
+    checkpoint.dump.every=100000 \
+    checkpoint.dump.keep=2 \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
-    model.stem_layers=[2,4,6,8,10,12,14] \
-    logging.wandb.name=${experiment_name} 
+    model.stem_layers=[2,6,10,14] \
+    logging.wandb.name=${experiment_name} \
+    stem_lr=8e-4 \
+    stem_weight_decay=0.01 \
+    stem_warmup=5000 \
+    stem_lr_min_ratio=0.01 \
+    eval.validation.max_steps=8000
