@@ -23,7 +23,7 @@ seed: 42
 steps: 200000
 
 # Gradient accumulation
-grad_acc_steps: 1
+grad_acc_steps: 2
 gc_collect_freq: 1000
 
 # ---- Layer freezing ----
@@ -114,17 +114,30 @@ profiling:
     run: false
 
 # ---- Evaluation (optional) ----
+# eval:
+#     generator:
+#         max_tokens: 4096
+#         dtype: bf16
+#         temperature: 1.0
+#         top_p: 0.95
+#     harness:
+#         tasks:
+#             - hellaswag
+#             - piqa
+#             - task: nq_open
+#               num_fewshot: 5
+#     validation:
+#         max_steps: 100
+
 eval:
     generator:
         max_tokens: 4096
         dtype: bf16
-        temperature: 1.0
-        top_p: 0.95
+        device: cuda
     harness:
-        tasks:
-            - hellaswag
-            - piqa
-            - task: nq_open
-              num_fewshot: 5
+        tasks: [piqa, hellaswag, arc_easy, arc_challenge, winogrande]
+        batch_size: 8
+        num_fewshot: 0
     validation:
         max_steps: 100
+        use_val_from_train_src: true

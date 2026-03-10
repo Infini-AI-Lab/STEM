@@ -99,8 +99,8 @@ distributed:
 data:
     root_dir: /dev/shm/
     sources:
-        dolmino-mix_shuffled: 1.0
-        # dolma3_dolmino_mix-10B_shuffled: 1.0
+        # dolmino-mix_shuffled: 1.0
+        dolma3_dolmino_mix-10B_shuffled: 1.0
     batch_size: 4
     prefetch_size: 1024
     seq_len: 4096
