@@ -24,6 +24,15 @@ from lingua.transformer import (
     lengths_to_local_ids,
     lengths_to_start_ids,
 )
+from apps.main.qwen3 import Qwen3Attention
+from apps.main.olmo3 import OLMo3Attention
+from lingua.stem_iir import IIRMemory, IIRCache
+
+
+def _is_attention_module(module):
+    """Check if a module is an attention layer (works for Llama, Qwen3, OLMo3, etc.)."""
+    return isinstance(module, (Attention, Qwen3Attention, OLMo3Attention))
+
 from torch.nn.attention.flex_attention import create_block_mask
 
 
@@ -188,9 +197,9 @@ class PackedCausalTransformerGenerator:
         self.padded_doc_start = None
         self.prefill_mask = None
 
-    def clear_cache(self, offset):
+    def clear_cache(self, offset, n_seqs: int = 0):
         for module in self.model.modules():
-            if isinstance(module, Attention):
+            if _is_attention_module(module):
                 if not hasattr(module, "kv_cache"):
                     module.kv_cache = KVCache(
                         1,
@@ -201,6 +210,10 @@ class PackedCausalTransformerGenerator:
                         self.device,
                     )
                 module.kv_cache.offset = offset
+            elif isinstance(module, IIRMemory) and n_seqs > 0:
+                module.iir_cache = IIRCache(
+                    n_seqs, module.d_ff, torch.float32, self.device,
+                )
 
     @torch.compiler.disable
     def setup_prefilling(self, lengths: torch.Tensor):
@@ -233,7 +246,13 @@ class PackedCausalTransformerGenerator:
         # correct positions in the cache during prefilling
 
         # We either init the cache or clear it by resetting the offset to prefill_offset
-        self.clear_cache(prefill_offset)
+        n_seqs = lengths.size(0)
+        self.clear_cache(prefill_offset, n_seqs=n_seqs)
+
+        # Set document lengths on IIR caches for the prefill phase
+        for module in self.model.modules():
+            if isinstance(module, IIRMemory) and hasattr(module, "iir_cache"):
+                module.iir_cache.doc_lengths = lengths
 
         # The prefilling mask looks like the following for
         # the two packed sequences ab and 123 : ab123
@@ -272,9 +291,14 @@ class PackedCausalTransformerGenerator:
     @torch.compiler.disable
     def setup_generation(self, lengths):
         # KV Cache offset is set to the start of the padded documents
+        n_seqs = lengths.size(0)
         for module in self.model.modules():
-            if isinstance(module, Attention):
+            if _is_attention_module(module):
                 module.kv_cache.offset = self.padded_doc_start
+            elif isinstance(module, IIRMemory) and hasattr(module, "iir_cache"):
+                module.iir_cache.doc_lengths = torch.ones(
+                    n_seqs, dtype=torch.long, device=lengths.device,
+                )
         # The token ids during generations correspond to the lengths of each doc
         # current_tok_id will be incremented during generation
         self.current_tok_id = lengths.clone()
@@ -416,7 +440,15 @@ def load_consolidated_model_and_tokenizer(
     tokenizer = build_tokenizer(config.data.tokenizer.name, config.data.tokenizer.path)
     model = model_cls(model_args)
     st_dict = torch.load(ckpt_path / CONSOLIDATE_NAME, weights_only=True)
-    model.load_state_dict(st_dict["model"])
+    if "model" in st_dict:
+        st_dict = st_dict["model"]    
+    
+    first_key = next(iter(st_dict.keys()))    
+    if first_key.startswith("model"):
+        st_dict = {k.replace("model.", ""): v for k, v in st_dict.items()}
+    if "output.tied_module.weight" not in st_dict and "tok_embeddings.weight" in st_dict:
+        st_dict["output.tied_module.weight"] = st_dict["tok_embeddings.weight"]
+    model.load_state_dict(st_dict)
     model = model.cuda().eval()
     for param in model.parameters():
         param.data = param.data.to(dtype=param_dtype)

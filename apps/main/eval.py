@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 import logging
 import os
+import wandb
 from pathlib import Path
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
@@ -20,6 +21,8 @@ from apps.main.generate import (
     load_consolidated_model_and_tokenizer,
 )
 from apps.main.transformer import LMTransformer, LMTransformerArgs
+from apps.main.qwen3 import Qwen3LMTransformer, Qwen3LMTransformerArgs
+from apps.main.olmo3 import OLMo3LMTransformer, OLMo3LMTransformerArgs
 from lingua.args import dump_config
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
 from lingua.data import init_choice_state, setup_sources
@@ -32,6 +35,13 @@ from lingua.distributed import (
 )
 
 EVAL_FOLDER_NAME = "{:010d}"
+
+# Registry mapping model_type strings to (model_cls, model_args_cls)
+MODEL_REGISTRY = {
+    "llama": (LMTransformer, LMTransformerArgs),
+    "qwen3": (Qwen3LMTransformer, Qwen3LMTransformerArgs),
+    "olmo3": (OLMo3LMTransformer, OLMo3LMTransformerArgs),
+}
 
 logger = logging.getLogger()
 
@@ -75,6 +85,7 @@ class EvalArgs:
     dump_dir: Optional[str] = None
     metric_log_dir: Optional[str] = None
     ckpt_dir: str = ""
+    model_type: str = "llama"  # "llama", "qwen3", or "olmo3"
     generator: PackedCausalTransformerGeneratorArgs = field(
         default_factory=PackedCausalTransformerGeneratorArgs
     )
@@ -117,24 +128,39 @@ class EvalHarnessLM(LM):
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
         prompts, gen_args = zip(*[req.args for req in requests])
-        assert all_dicts_same(gen_args), "Doesn't support different gen args for now"
-        gen_args = gen_args[0]
-        temperature = gen_args.get("temperature", 0.0)
-        top_p = gen_args.get("top_p", None)
-        top_k = gen_args.get("top_k", None)
-        until = gen_args.get("until", [])
 
-        self.generator.temperature = temperature
-        self.generator.top_p = top_p
-        self.generator.top_k = top_k
-        self.generator.until = until
-        generations, _, _ = self.generator.generate(prompts)
-        filtered_gen = []
-        for g in generations:
-            for e in until:
-                g = g.replace(e, "")
-            filtered_gen.append(g)
-        return filtered_gen
+        # Group requests by gen_args so we can handle different configs
+        from collections import OrderedDict
+        groups = OrderedDict()  # frozen gen_args -> list of (original_index, prompt)
+        for i, (prompt, ga) in enumerate(zip(prompts, gen_args)):
+            key = tuple(sorted(
+                ((k, tuple(v) if isinstance(v, list) else v) for k, v in ga.items()),
+                key=lambda x: x[0],
+            ))
+            if key not in groups:
+                groups[key] = (ga, [])
+            groups[key][1].append((i, prompt))
+
+        results = [None] * len(requests)
+        for key, (ga, indexed_prompts) in groups.items():
+            temperature = ga.get("temperature", 0.0)
+            top_p = ga.get("top_p", None)
+            top_k = ga.get("top_k", None)
+            until = ga.get("until", [])
+
+            self.generator.temperature = temperature
+            self.generator.top_p = top_p
+            self.generator.top_k = top_k
+            self.generator.until = until
+
+            group_prompts = [p for _, p in indexed_prompts]
+            generations, _, _ = self.generator.generate(group_prompts)
+            for (orig_idx, _), g in zip(indexed_prompts, generations):
+                for e in until:
+                    g = g.replace(e, "")
+                results[orig_idx] = g
+
+        return results
 
     def loglikelihood(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
         prompts, continuations = zip(*[req.args for req in requests])
@@ -237,11 +263,19 @@ def launch_eval(cfg: EvalArgs):
 
     consolidate_path = str(consolidate_path)
     torch.distributed.barrier()
-    logger.info("Loading model")
+
+    # Resolve model class from model_type
+    if cfg.model_type not in MODEL_REGISTRY:
+        raise ValueError(
+            f"Unknown model_type '{cfg.model_type}'. "
+            f"Available: {list(MODEL_REGISTRY.keys())}"
+        )
+    model_cls, model_args_cls = MODEL_REGISTRY[cfg.model_type]
+    logger.info(f"Loading model (type={cfg.model_type})")
     model, tokenizer, train_cfg = load_consolidated_model_and_tokenizer(
         consolidate_path,
-        model_cls=LMTransformer,
-        model_args_cls=LMTransformerArgs,
+        model_cls=model_cls,
+        model_args_cls=model_args_cls,
     )
     logger.info("Model loaded")
     model.eval()

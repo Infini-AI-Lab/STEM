@@ -1,35 +1,45 @@
 name: "debug_evals"
-ckpt_dir: logs/test/debug/checkpoints/0000000020
+ckpt_dir: checkpoints/Llama-3.2-1B/distcp/
 dump_dir: logs/evals
 generator:
   max_tokens: 4096
   dtype: bf16
-  temperature: 1.0
+  temperature: 0.0
   top_p: 0.95
+  show_progress: true
+
 harness:
   tasks:
-    - hellaswag
+    - task: hellaswag
+      dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
     # - task: boolq
-    #   dataset_kwargs:
-    #     trust_remote_code: true
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/super_glue
     # - task: nq_open
     #   num_fewshot: 5
-    # - piqa
+    - task: piqa
+      dataset_path: /raid/user_data/rsadhukh/test_data/piqa
     # - task: social_iqa
     #   dataset_kwargs:
     #     trust_remote_code: true
     # - triviaqa
-    # - winogrande
-    # - openbookqa
-    # - arc_easy
-    # - arc_challenge
-    # - race
+    # - task: winogrande
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/winogrande
+    # - task: openbookqa
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/openbookqa
+    # - task: arc_easy
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
+    # - task: arc_challenge
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
+    # - task: race
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/race
     # - commonsense_qa
-    # # - coqa
+    # - coqa
     # - copa
-    # - gsm8k
+    # - task: gsm8k
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/gsm8k
     # - bbh
-    # - mmlu
+    # - task: mmlu
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/mmlu
     # - mmlu_pro
+  batch_size: 16
 validation: null
-  # max_steps: 100

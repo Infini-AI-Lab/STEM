@@ -10,7 +10,6 @@ from pathlib import Path
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
 from typing import Any, List, Optional, Tuple, Union
-from lm_eval import simple_evaluate
 from omegaconf import OmegaConf
 import torch
 import wandb
@@ -19,7 +18,7 @@ from apps.main.stem_generate import (
     PackedCausalTransformerGeneratorArgs,
     load_consolidated_model_and_tokenizer,
 )
-from apps.main.stem import StemLMTransformer, StemLMTransformerArgs
+from apps.main.stem import StemLMTransformer, StemLMTransformerArgs, STEM_MODEL_REGISTRY
 from apps.main.eval import LMHarnessArgs, ValidationArgs, all_dicts_same
 from lingua.args import dump_config
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
@@ -39,6 +38,7 @@ from lingua.stem_dist_utils import (
     get_stem_data_parallel_world_size,
     get_stem_model_parallel_group,
 )
+from lingua.lm_eval_dp import simple_evaluate as dp_simple_evaluate
 
 EVAL_FOLDER_NAME = "{:010d}"
 
@@ -47,6 +47,7 @@ logger = logging.getLogger()
 @dataclass
 class StemEvalArgs:
     name: str = "stem_evals"
+    model_type: str = "llama"
     dump_dir: Optional[str] = None
     metric_log_dir: Optional[str] = None
     ckpt_dir: str = ""
@@ -63,10 +64,14 @@ class StemEvalArgs:
 
 
 class StemMockAccelerator:
+    """Mock accelerator for lm_eval.
+
+    With dp_simple_evaluate the LM wrapper has _world_size=1, so lm_eval
+    never calls gather/wait_for_everyone.  These remain as safe fallbacks.
+    """
+
     def gather(self, tensor):
         if is_stem_initialized():
-            # Only one MP group is running eval (world_size=1 for lm_eval).
-            # gather is not expected to be called, but handle safely.
             return tensor.unsqueeze(0)
         elif torch.distributed.is_initialized():
             out = [torch.zeros_like(tensor) for _ in range(get_world_size())]
@@ -77,28 +82,26 @@ class StemMockAccelerator:
 
     def wait_for_everyone(self):
         if is_stem_initialized():
-            # Barrier only within the active MP group to avoid hanging
-            # (dp_rank > 0 ranks are not participating in eval).
             torch.distributed.barrier(group=get_stem_model_parallel_group())
         elif torch.distributed.is_initialized():
             torch.distributed.barrier()
 
 
-# Light wrapper around generator for lm-eval harness
 class EvalHarnessLM(LM):
+    """Wrapper around the generator for lm_eval harness.
+
+    ``_rank`` and ``_world_size`` are always 0/1 so that lm_eval never
+    triggers cross-process distributed ops.  Data-parallel sharding across
+    STEM DP groups is handled externally via the ``data_parallel_rank`` /
+    ``data_parallel_world_size`` parameters of ``dp_simple_evaluate``.
+    """
+
     def __init__(self, generator):
         super().__init__()
         self.generator = generator
         self.accelerator = StemMockAccelerator()
-        if is_stem_initialized():
-            self._rank = 0
-            self._world_size = 1
-        elif torch.distributed.is_initialized():
-            self._rank = get_global_rank()
-            self._world_size = get_world_size()
-        else:
-            self._rank = 0
-            self._world_size = 1
+        self._rank = 0
+        self._world_size = 1
         self.device = generator.device
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
@@ -151,6 +154,17 @@ class EvalHarnessLM(LM):
         return results
     
 
+def _stem_dp_mean_dict(x):
+    """All-reduce average across STEM data-parallel ranks."""
+    dp_group = get_stem_data_parallel_group()
+    r = {}
+    for k in x:
+        val = torch.tensor(x[k], dtype=torch.float64, device="cuda")
+        torch.distributed.all_reduce(val, op=torch.distributed.ReduceOp.AVG, group=dp_group)
+        r[k] = val.item() if val.dim() == 0 else val.tolist()
+    return r
+
+
 def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
     srcs = {}
     for src in val_args.sources:
@@ -161,10 +175,13 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
             path = os.path.join(train_cfg.data.root_dir, src)
             srcs[path] = 1.0
 
-    # Determine effective DP rank/degree for validation data splitting.
+    # Shard validation data across STEM DP groups so each group processes a
+    # different slice.  Within each MP group, all ranks share the same
+    # dp_rank and therefore process the same data (required for
+    # ParallelEmbedding collectives).
     if is_stem_initialized():
-        dp_rank = 0
-        dp_degree = 1
+        dp_rank = get_stem_data_parallel_rank()
+        dp_degree = get_stem_data_parallel_world_size()
     elif torch.distributed.is_initialized():
         dp_rank = get_global_rank()
         dp_degree = get_world_size()
@@ -176,7 +193,6 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
     path_to_iter = setup_sources(multi_state)
 
     max_gen_len = generator.max_gen_len
-    # We temporarily lower max gen len
     generator.max_gen_len = 1
 
     all_val_metrics = {}
@@ -198,14 +214,16 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
             metrics['nll'].append(tmp)
             metrics['nll_per_token'].append(tmp / len(ll))
             metrics['nll_per_char'].append(tmp / len(texts[i]))
-
             metrics['avg_seqlen'].append(len(ll))
         
         for m in metrics:
             metrics[m] = sum(metrics[m]) / len(metrics[m])
 
         if dp_degree > 1 and torch.distributed.is_initialized():
-            metrics.update(dist_mean_dict(metrics))
+            if is_stem_initialized():
+                metrics.update(_stem_dp_mean_dict(metrics))
+            else:
+                metrics.update(dist_mean_dict(metrics))
         logger.info(f"Validation on {src} done. Metrics: {metrics}")
 
         name = os.path.basename(src)
@@ -219,15 +237,71 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
     return all_val_metrics
 
 
+def _merge_shard_results(all_results):
+    """Merge lm_eval results from multiple DP shards with weighted averaging.
+    """
+    valid = [r for r in all_results if r is not None]
+    if len(valid) <= 1:
+        return valid[0] if valid else None
+
+    merged = json.loads(json.dumps(
+        valid[0],
+        default=lambda o: None,
+    ))
+
+    if "results" in merged:
+        for task_name in merged["results"]:
+            weights = []
+            for r in valid:
+                n_samples = r.get("n-samples", {}).get(task_name, {})
+                w = n_samples.get("effective", None) if isinstance(n_samples, dict) else None
+                weights.append(w)
+
+            has_weights = all(isinstance(w, (int, float)) and w > 0 for w in weights)
+
+            for metric_name, value in merged["results"][task_name].items():
+                if not isinstance(value, (int, float)):
+                    continue
+                pairs = [
+                    (r["results"][task_name][metric_name], weights[i])
+                    for i, r in enumerate(valid)
+                    if task_name in r.get("results", {})
+                    and isinstance(r["results"][task_name].get(metric_name), (int, float))
+                ]
+                if not pairs:
+                    continue
+                if has_weights and len(pairs) == len(valid):
+                    total_w = sum(w for _, w in pairs)
+                    merged["results"][task_name][metric_name] = (
+                        sum(v * w for v, w in pairs) / total_w
+                    )
+                else:
+                    merged["results"][task_name][metric_name] = (
+                        sum(v for v, _ in pairs) / len(pairs)
+                    )
+
+    if "n-samples" in merged:
+        for task_name in merged["n-samples"]:
+            effectives = [
+                r["n-samples"][task_name]["effective"]
+                for r in valid
+                if task_name in r.get("n-samples", {})
+                and isinstance(r["n-samples"][task_name].get("effective"), (int, float))
+            ]
+            if effectives:
+                merged["n-samples"][task_name]["effective"] = sum(effectives)
+
+    return merged
+
+
 def launch_stem_eval(cfg: StemEvalArgs):
     # Setup distributed if needed (but don't require it)
     if torch.distributed.is_initialized():
-        pass  # Already initialized
+        pass
     elif torch.cuda.device_count() > 1:
         setup_torch_distributed(DistributedArgs())
     
     # Initialize STEM process groups for distributed ParallelEmbedding
-    # Skip if already initialized (e.g. when called from stem_train.py during training)
     if torch.distributed.is_initialized() and cfg.stem_parallel_size > 1 and not is_stem_initialized():
         initialize_stem_process_group(cfg.stem_parallel_size)
         logger.info(f"Initialized STEM process groups with parallel size: {cfg.stem_parallel_size}")
@@ -235,11 +309,16 @@ def launch_stem_eval(cfg: StemEvalArgs):
     _has_dp_peers = (
         is_stem_initialized() and get_stem_data_parallel_world_size() > 1
     )
-    _eval_participates = True
-    if _has_dp_peers and get_stem_data_parallel_rank() != 0:
-        _eval_participates = False
 
-    # Check if checkpoint is already consolidated
+    # Determine DP sharding parameters
+    if is_stem_initialized():
+        dp_rank = get_stem_data_parallel_rank()
+        dp_ws = get_stem_data_parallel_world_size()
+    else:
+        dp_rank = 0
+        dp_ws = 1
+
+    # -- Checkpoint consolidation (rank 0 only) --
     ckpt_path = Path(cfg.ckpt_dir)
     if (
         ckpt_path.exists()
@@ -259,38 +338,74 @@ def launch_stem_eval(cfg: StemEvalArgs):
 
     consolidate_path = str(consolidate_path)
     
-    # All ranks wait for checkpoint consolidation
     if torch.distributed.is_initialized():
         torch.distributed.barrier()
-    
-    # Non-participating ranks: wait for eval-participating ranks to finish
-    if not _eval_participates:
-        logger.info("dp_rank != 0 — skipping eval, waiting at barrier")
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
-        return
-    
-    logger.info("Loading STEM model")
+
+    # -- ALL ranks load the model and create the generator --
+    if cfg.model_type not in STEM_MODEL_REGISTRY:
+        raise ValueError(
+            f"Unknown model_type '{cfg.model_type}'. "
+            f"Available: {list(STEM_MODEL_REGISTRY.keys())}"
+        )
+    stem_model_cls, stem_args_cls = STEM_MODEL_REGISTRY[cfg.model_type][:2]
+    logger.info(f"Loading STEM model (type={cfg.model_type}, cls={stem_model_cls.__name__})")
     model, tokenizer, train_cfg = load_consolidated_model_and_tokenizer(
         consolidate_path,
-        model_cls=StemLMTransformer,
-        model_args_cls=StemLMTransformerArgs,
+        model_cls=stem_model_cls,
+        model_args_cls=stem_args_cls,
     )
     logger.info("STEM model loaded")
     model.eval()
     generator = PackedCausalTransformerGenerator(cfg.generator, model, tokenizer)
 
+    # -- lm_eval harness (data-parallel across DP groups) --
+    # EvalHarnessLM has _rank=0, _world_size=1 so lm_eval never does any
+    # torch.distributed calls.  Sharding is controlled by dp_rank/dp_ws
+    # which are passed to our patched evaluate().
+    #
+    # All MP ranks in a DP group share the same dp_rank, so they receive
+    # identical requests and call model.forward() in lock-step —
+    # ParallelEmbedding collectives complete without hanging.
     wrap = EvalHarnessLM(generator)
-    results = simple_evaluate(wrap, **asdict(cfg.harness))
-    
+
+    harness_kwargs = asdict(cfg.harness)
+    if dp_ws > 1:
+        logger.info(
+            f"Running lm_eval harness with data-parallel sharding: "
+            f"dp_rank={dp_rank}, dp_ws={dp_ws}"
+        )
+        results = dp_simple_evaluate(
+            wrap,
+            **harness_kwargs,
+            data_parallel_rank=dp_rank,
+            data_parallel_world_size=dp_ws,
+        )
+    else:
+        results = dp_simple_evaluate(wrap, **harness_kwargs)
+
+    # -- Gather and merge harness results across DP groups --
+    if _has_dp_peers and results is not None:
+        safe_gather_keys = ['results', 'versions', 'n-shot', 'higher_is_better',
+                            'n-samples', 'git_hash', 'date', 'pretty_env_info',
+                            'transformers_version', 'lm_eval_version']
+        results_to_gather = {k: v for k, v in results.items() if k in safe_gather_keys}
+        results_to_gather = json.loads(json.dumps(results_to_gather, default=lambda o: None))
+
+        dp_group = get_stem_data_parallel_group()
+        gathered = [None] * dp_ws
+        torch.distributed.all_gather_object(gathered, results_to_gather, group=dp_group)
+        results = _merge_shard_results(gathered)
+        logger.info(f"Merged harness results from {dp_ws} DP shards")
+
+    # -- Validation (data-parallel across DP groups) --
     val_results = None
     if cfg.validation:
         val_results = eval_on_val(generator, cfg.validation, train_cfg)
-    
+
+    # -- Write results (global rank 0 only) --
     rank = get_global_rank() if torch.distributed.is_initialized() else 0
-    if rank == 0:
+    if rank == 0 and results is not None:
         with open(Path(cfg.dump_dir) / "results.json", "w") as f:
-            # Filter out non-serializable keys (configs contains function objects)
             safe_keys = ['results', 'versions', 'n-shot', 'higher_is_better', 
                         'n-samples', 'git_hash', 'date', 'pretty_env_info',
                         'transformers_version', 'lm_eval_version']
@@ -302,9 +417,8 @@ def launch_stem_eval(cfg: StemEvalArgs):
                 f.write(json.dumps(val_results))
             logger.info(f"All validation results: {val_results}")
     
-    if cfg.metric_log_dir and rank == 0:
+    if cfg.metric_log_dir and rank == 0 and results is not None:
         metric_log_path = Path(cfg.metric_log_dir) / "metrics.eval.jsonl"
-
         logger.info(f"Writing metric logs to {metric_log_path}")
         timestamp = {
             "created_at": datetime.utcnow().isoformat(),
@@ -324,17 +438,14 @@ def launch_stem_eval(cfg: StemEvalArgs):
                 file=open(val_log_path, mode="a"),
                 flush=True,
             )
-            
-        # Log eval results to wandb (rank 0 only)
+
     if rank == 0:
         _wandb_initialized_here = False
-        # Async eval: cfg.wandb is set but no active run yet → init one
         if wandb.run is None and cfg.wandb is not None:
             wandb_kwargs = cfg.wandb if isinstance(cfg.wandb, dict) else asdict(cfg.wandb)
             wandb.init(**wandb_kwargs)
             _wandb_initialized_here = True
 
-        # Sync eval: wandb.run is already active from MetricLogger in the training loop
         if wandb.run is not None:
             wandb_metrics = {}
             if results is not None and "results" in results:
@@ -353,15 +464,12 @@ def launch_stem_eval(cfg: StemEvalArgs):
                 wandb.log(wandb_metrics, step=cfg.global_step)
                 logger.info(f"Logged {len(wandb_metrics)} eval metrics to wandb at step {cfg.global_step}")
 
-            # Only finish the run if we initialized it here (async eval).
-            # In sync eval, the training loop's MetricLogger owns the run.
             if _wandb_initialized_here:
                 wandb.finish()
     
     del generator
 
-    # Sync with non-participating ranks (they are waiting at a matching barrier)
-    if _has_dp_peers and torch.distributed.is_initialized():
+    if torch.distributed.is_initialized():
         torch.distributed.barrier()
 
 

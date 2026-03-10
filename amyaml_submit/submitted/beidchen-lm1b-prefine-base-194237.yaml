@@ -1,0 +1,233 @@
+apiVersion: "kubeflow.org/v1"
+kind: PyTorchJob
+metadata:
+  name: beidchen-lm1b-prefine-base-194237 # JOB_NAME like  <alias>-<pod/mpijob/torchjob>-<p4/g5/r5>-<project>-<task>[-<note>]
+  namespace: default
+spec:
+  elasticPolicy:
+    rdzvBackend: c10d
+    minReplicas: 4 #<PLACEHOLDER> e.g. 16 #specify the same number in the env var below
+    maxReplicas: 4
+    maxRestarts: 4
+    nProcPerNode: &gpus_per_node 8
+    rdzvId: beidchen-lm1b-prefine-base-194237
+  runPolicy:
+    ttlSecondsAfterFinished: 180 # give enough time to push any logs
+    schedulingPolicy:
+      queue: default
+      # priorityClass: {{ priority }} # low-priority # high-priority-preempt-lower high-priority-no-preempt default default-preempt-lower low-priority
+      minAvailable: 4 # don't schedule until required replicas are available
+      scheduleTimeoutSeconds: 172400 # 48 hours
+  pytorchReplicaSpecs:
+    Worker:
+      replicas: 4
+      restartPolicy: Never #OnFailure
+      template:
+        spec:
+          # priorityClassName: {{ priority }}
+          # schedulerName: scheduler-plugins-scheduler
+          affinity :
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: node.kubernetes.io/instance-type
+                        operator: In
+                        values:
+                          - p5en.48xlarge
+          tolerations:
+            - key: shobhvas-nnc7
+              operator: Equal
+              value: "True"
+              effect: NoSchedule
+          enableServiceLinks: false
+          containers:
+            - name: pytorch
+              env:
+                - name: PYTHONUNBUFFERED
+                  value: "1"
+                - name: FI_EFA_USE_DEVICE_RDMA
+                  value: '1'
+                - name: FI_PROVIDER
+                  value: efa
+                - name: NCCL_ASYNC_ERROR_HANDLING
+                  value: '1'
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                - name: NCCL_PROTO
+                  value: simple
+                - name: NCCL_PXN_DISABLE
+                  value: '0'
+                - name: FI_LOG_LEVEL
+                  value: warn
+                - name: NCCL_AVOID_RECORD_STREAMS
+                  value: '1'
+                - name: NCCL_P2P_LEVEL
+                  value: NVL
+                - name: NCCL_CROSS_NIC
+                  value: '1'
+                - name: NCCL_DEBUG
+                  value: TRACE
+                - name: TORCH_NCCL_AVOID_RECORD_STREAMS
+                  value: '1'
+                - name: NCCL_IGNORE_DISABLED_P2P
+                  value: '0'
+                - name: REGION
+                  value: "us-east-1"
+              command: ["bash","-c"]
+              # ipv6 needs to be disabled otherwise rdvz comm breaks
+              args:
+                -  >- 
+                  echo "Starting job" | tee "/code-fsx/beidchen-sandbox/jobstartingsigns.log" && 
+                  sysctl -w net.ipv6.conf.all.disable_ipv6=1 && 
+                  sysctl -w net.ipv6.conf.default.disable_ipv6=1 && 
+                  mount -o remount,size=500G /dev/shm && 
+                  export PATH=/opt/amazon/efa/bin:$PATH &&
+                  export LD_LIBRARY_PATH=/opt/amazon/efa/lib:$LD_LIBRARY_PATH &&
+                  export LD_LIBRARY_PATH=/opt/amazon/ofi-nccl/lib/x86_64-linux-gnu:/opt/amazon/ofi-nccl/lib:/opt/aws-ofi-nccl/lib:$LD_LIBRARY_PATH &&
+                  export NCCL_NET=OFI &&
+                  export FI_PROVIDER=efa &&
+                  export FI_EFA_ENABLE_SHM_TRANSFER=1 &&
+                  ulimit -l unlimited &&
+                  unset NCCL_SOCKET_IFNAME &&
+                  export OMP_NUM_THREADS=64 &&
+                  export OLMO_SHARED_FS=1 &&
+                  export WANDB_API_KEY="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" &&
+                  export WANDB_MODE=online &&
+                  export FI_EFA_FORK_SAFE=1 &&
+                  export NCCL_BLOCKING_WAIT=1 &&
+                  export NCCL_ASYNC_ERROR_HANDLING=1 &&
+                  export NCCL_DEBUG=INFO &&
+                  export NCCL_DEBUG_SUBSYS=INIT,NET,ENV &&
+                  wandb login --relogin $WANDB_API_KEY &&
+                  mkdir -p /workspace/wandb &&
+                  export WANDB_DIR=/workspace/wandb &&
+                  apt-get update &&
+                  apt-get install -y zip &&
+                  apt install -y zstd &&
+                  cd /dev/shm/ &&
+                  curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" &&
+                  unzip -q awscliv2.zip &&
+                  ./aws/install &&
+                  aws s3 sync s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dclm_baseline_1.0_1prct/dclm_baseline_1.0_1prct/ . --region us-east-2 &&
+                  cd /code-fsx/beidchen-sandbox/STEM &&
+                  bash amyaml_submit/scripts/lm1b-prefine-base.sh | tee "/code-fsx/beidchen-sandbox/beidchen-lm1b-prefine-base-194237.log"
+              image: 767397878797.dkr.ecr.us-east-1.amazonaws.com/agif-mm-pt-base:stem.v1
+              imagePullPolicy: Always
+              securityContext:
+                privileged: true
+              resources:
+                limits:
+                  hugepages-2Mi: 5120Mi
+                  vpc.amazonaws.com/efa: 16
+                  nvidia.com/gpu: *gpus_per_node
+                requests:
+                  nvidia.com/gpu: *gpus_per_node
+                  vpc.amazonaws.com/efa: 16
+                  memory: 15000Mi
+                  ephemeral-storage: 32Gi
+              volumeMounts:
+                - mountPath: /data-fsx
+                  name: fsx-claim-general--atl-2a2
+                - mountPath: /code-fsx
+                  name: fsx-claim-general--atl-2a1
+                - mountPath: /checkpoints-fsx
+                  name: fsx-claim-general--atl-2a3
+                - mountPath: /dev/shm
+                  name: dshm
+                - mountPath: /dev/infiniband/uverbs0
+                  name: infiniband-efa-0
+                - mountPath: /dev/infiniband/uverbs1
+                  name: infiniband-efa-1
+                - mountPath: /dev/infiniband/uverbs2
+                  name: infiniband-efa-2
+                - mountPath: /dev/infiniband/uverbs3
+                  name: infiniband-efa-3
+                - mountPath: /dev/infiniband/uverbs4
+                  name: infiniband-efa-4
+                - mountPath: /dev/infiniband/uverbs5
+                  name: infiniband-efa-5
+                - mountPath: /dev/infiniband/uverbs6
+                  name: infiniband-efa-6
+                - mountPath: /dev/infiniband/uverbs7
+                  name: infiniband-efa-7
+                - mountPath: /dev/infiniband/uverbs8
+                  name: infiniband-efa-8
+                - mountPath: /dev/infiniband/uverbs9
+                  name: infiniband-efa-9
+                - mountPath: /dev/infiniband/uverbs10
+                  name: infiniband-efa-10
+                - mountPath: /dev/infiniband/uverbs11
+                  name: infiniband-efa-11
+                - mountPath: /dev/infiniband/uverbs12
+                  name: infiniband-efa-12
+                - mountPath: /dev/infiniband/uverbs13
+                  name: infiniband-efa-13
+                - mountPath: /dev/infiniband/uverbs14
+                  name: infiniband-efa-14
+                - mountPath: /dev/infiniband/uverbs15
+                  name: infiniband-efa-15
+          volumes:
+            - name: fsx-claim-general--atl-2a1
+              persistentVolumeClaim:
+                claimName: fsx-claim-general--atl-2a1
+            - name: fsx-claim-general--atl-2a2
+              persistentVolumeClaim:
+                claimName: fsx-claim-general--atl-2a2
+            - name: fsx-claim-general--atl-2a3
+              persistentVolumeClaim:
+                claimName: fsx-claim-general--atl-2a3
+            - name: infiniband-efa-0
+              hostPath:
+                path: /dev/infiniband/uverbs0
+            - name: infiniband-efa-1
+              hostPath:
+                path: /dev/infiniband/uverbs1
+            - name: infiniband-efa-2
+              hostPath:
+                path: /dev/infiniband/uverbs2
+            - name: infiniband-efa-3
+              hostPath:
+                path: /dev/infiniband/uverbs3
+            - name: infiniband-efa-4
+              hostPath:
+                path: /dev/infiniband/uverbs4
+            - name: infiniband-efa-5
+              hostPath:
+                path: /dev/infiniband/uverbs5
+            - name: infiniband-efa-6
+              hostPath:
+                path: /dev/infiniband/uverbs6
+            - name: infiniband-efa-7
+              hostPath:
+                path: /dev/infiniband/uverbs7
+            - name: infiniband-efa-8
+              hostPath:
+                path: /dev/infiniband/uverbs8
+            - name: infiniband-efa-9
+              hostPath:
+                path: /dev/infiniband/uverbs9
+            - name: infiniband-efa-10
+              hostPath:
+                path: /dev/infiniband/uverbs10
+            - name: infiniband-efa-11
+              hostPath:
+                path: /dev/infiniband/uverbs11
+            - name: infiniband-efa-12
+              hostPath:
+                path: /dev/infiniband/uverbs12
+            - name: infiniband-efa-13
+              hostPath:
+                path: /dev/infiniband/uverbs13
+            - name: infiniband-efa-14
+              hostPath:
+                path: /dev/infiniband/uverbs14
+            - name: infiniband-efa-15
+              hostPath:
+                path: /dev/infiniband/uverbs15
+            - name: dshm
+              emptyDir: 
+                medium: Memory
+                sizeLimit: 500Gi

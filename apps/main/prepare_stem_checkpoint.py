@@ -1,23 +1,26 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 """
-Prepare STEM checkpoint by computing layerwise w3 × tok_embeddings.
+Prepare STEM checkpoint by computing layerwise w3 × RMSNorm(tok_embeddings).
 
 For each stem layer *i*, computes:
 
-    stem_embedding_table = tok_embeddings.weight @ w3_i.weight.T
+    stem_embedding_table = RMSNorm_i(tok_embeddings.weight) @ w3_i.weight.T
     shape: (vocab_size, hidden_dim)
+
+where ``RMSNorm_i`` uses the ``ffn_norm`` weights from layer *i*.
 
 i.e., for every token *t*:
 
-    stem_emb[t] = w3_i.weight @ tok_embeddings.weight[t]
+    stem_emb[t] = w3_i.weight @ RMSNorm_i(tok_embeddings.weight[t])
 
 This initialises STEM embeddings so that each token's embedding matches the
-original FFN up-projection output, providing a "functionally equivalent"
-starting point for STEM training.
+original FFN up-projection output (after normalization), providing a
+"functionally equivalent" starting point for STEM training.
 
-The output directory is created with:
-  - Symlinks to all DCP backbone files from the original pretrained checkpoint
+The output directory contains:
+  - A DCP backbone checkpoint with the w3 weights removed for stem layers
+  - An updated ``params.json`` with ``stem_layers`` and ``stem_parallel_size``
   - A ``stem_shards/`` subdirectory with the pre-computed embeddings, sharded
     along the embedding dimension to match ``stem_parallel_size``.
 
@@ -34,6 +37,7 @@ Usage
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -41,6 +45,8 @@ from pathlib import Path
 from typing import Dict, List
 
 import torch
+import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
 
 logger = logging.getLogger(__name__)
 
@@ -71,11 +77,21 @@ def load_consolidated_checkpoint(ckpt_path: str) -> Dict[str, torch.Tensor]:
 # Stem-embedding computation
 # ---------------------------------------------------------------------------
 
+def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Apply RMSNorm: x * rsqrt(mean(x^2) + eps) * weight."""
+    return x * torch.rsqrt((x * x).mean(-1, keepdim=True) + eps) * weight
+
+
 def compute_stem_embeddings(
     state_dict: Dict[str, torch.Tensor],
     stem_layers: List[int],
 ) -> Dict[int, torch.Tensor]:
-    """Compute ``tok_embeddings.weight @ w3.weight.T`` per stem layer.
+    """Compute ``RMSNorm(tok_embeddings.weight) @ w3.weight.T`` per stem layer.
+
+    For each stem layer, the token embeddings are first passed through the
+    layer's ``ffn_norm`` (RMSNorm) before being projected by w3.  This matches
+    the runtime computation more closely since the FFN input is always
+    RMSNorm'd.
 
     Returns a dict mapping *stem_index* → ``(vocab_size, hidden_dim)`` tensor
     (float32).
@@ -94,6 +110,8 @@ def compute_stem_embeddings(
     stem_weights: Dict[int, torch.Tensor] = {}
     for stem_idx, layer_idx in enumerate(stem_layers):
         w3_key = f"model.layers.{layer_idx}.feed_forward.w3.weight"
+        ffn_norm_key = f"model.layers.{layer_idx}.ffn_norm.weight"
+
         if w3_key not in state_dict:
             available_layers = sorted(
                 {
@@ -106,20 +124,28 @@ def compute_stem_embeddings(
                 f"Key '{w3_key}' not found in checkpoint. "
                 f"Layers with w3: {available_layers}"
             )
+        if ffn_norm_key not in state_dict:
+            raise KeyError(
+                f"Key '{ffn_norm_key}' not found in checkpoint. "
+                f"Available keys (first 10): {list(state_dict.keys())[:10]}"
+            )
 
         w3_weight = state_dict[w3_key].float()  # (hidden_dim, dim)
+        ffn_norm_weight = state_dict[ffn_norm_key].float()  # (dim,)
         hidden_dim = w3_weight.shape[0]
 
-        # stem_table[token] = w3.weight @ tok_emb[token]
-        # Vectorised: (vocab_size, dim) @ (dim, hidden_dim) = (vocab_size, hidden_dim)
-        stem_weight = tok_emb @ w3_weight.T
+        normed_tok_emb = rms_norm(tok_emb, ffn_norm_weight)
+        stem_weight = normed_tok_emb @ w3_weight.T
 
         stem_weights[stem_idx] = stem_weight
+        
+        del state_dict[w3_key]
 
         logger.info(
             f"  Layer {layer_idx:>2} (stem idx {stem_idx}): "
-            f"w3 {tuple(w3_weight.shape)} × tok_emb {tuple(tok_emb.shape)} "
-            f"→ stem {tuple(stem_weight.shape)}, "
+            f"ffn_norm {tuple(ffn_norm_weight.shape)}, "
+            f"w3_weight {tuple(w3_weight.shape)}, "
+            f" -> stem {tuple(stem_weight.shape)}, "
             f"norm={stem_weight.norm():.4f}, "
             f"mean={stem_weight.mean():.6f}, std={stem_weight.std():.6f}"
         )
@@ -171,25 +197,8 @@ def save_stem_shards(
             f"  Saved stem shard mp_rank={mp_rank}: {shard_path} "
             f"(shape per embedding: ({vocab_size}, {shard_size}))"
         )
-
-
-def symlink_backbone(src_dir: Path, dst_dir: Path):
-    """Create symlinks in *dst_dir* pointing to every item in *src_dir*.
-
-    Skips ``stem_shards`` (if it already exists in the source) and any
-    destination paths that already exist.
-    """
-    for item in src_dir.iterdir():
-        if item.name == "stem_shards":
-            continue
-        dst = dst_dir / item.name
-        if not dst.exists():
-            os.symlink(item.resolve(), dst)
-            logger.info(f"  Symlinked {item.name} → {item.resolve()}")
-        else:
-            logger.info(f"  Skipped {item.name} (already exists)")
-
-
+    
+    
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -198,7 +207,7 @@ def main():
     parser = argparse.ArgumentParser(
         description=(
             "Prepare STEM checkpoint by computing layerwise "
-            "w3 × tok_embeddings and saving as stem_shards."
+            "w3 × RMSNorm(tok_embeddings) and saving as stem_shards."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
@@ -246,25 +255,46 @@ def main():
     # ---- 1. Load consolidated checkpoint ----
     state_dict = load_consolidated_checkpoint(str(ckpt_path))
 
-    # ---- 2. Compute stem embeddings ----
+    # ---- 2. Compute stem embeddings (also removes w3 keys from state_dict) ----
     logger.info(f"Computing stem embeddings for layers: {args.stem_layers}")
     stem_weights = compute_stem_embeddings(state_dict, args.stem_layers)
+
+    # ---- 3. Save modified backbone via DCP ----
+    output_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MASTER_ADDR", "localhost")
+    os.environ.setdefault("MASTER_PORT", "29512")
+    dist.init_process_group(backend="gloo", world_size=1, rank=0)
+
+    logger.info(f"Saving modified backbone (w3 removed for stem layers) to {output_dir}")
+    dcp.save(state_dict, checkpoint_id=str(output_dir))
+    logger.info("Backbone DCP checkpoint saved")
+
+    dist.destroy_process_group()
 
     # Free memory – we no longer need the full checkpoint
     del state_dict
 
-    # ---- 3. Create output directory ----
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # ---- 4. Symlink backbone files from original checkpoint ----
-    logger.info(f"Creating symlinks to backbone files from {ckpt_path}")
-    symlink_backbone(ckpt_path, output_dir)
+    # ---- 4. Save updated params.json ----
+    with open(ckpt_path / "params.json", "r") as f:
+        params_dict = json.load(f)
+    if "model" not in params_dict:
+        params_dict = {"model": params_dict}
+    params_dict["model"]["stem_layers"] = args.stem_layers
+    params_dict["distributed"] = params_dict.get("distributed", {})
+    params_dict["distributed"]["stem_parallel_size"] = args.stem_parallel_size
+    with open(output_dir / "params.json", "w") as f:
+        json.dump(params_dict, f)
+    logger.info(f"Saved params.json with stem_layers={args.stem_layers}, "
+                f"stem_parallel_size={args.stem_parallel_size}")
 
     # ---- 5. Save stem shards ----
-    logger.info(
-        f"Saving stem shards with stem_parallel_size={args.stem_parallel_size}"
-    )
-    save_stem_shards(stem_weights, output_dir, args.stem_parallel_size)
+    if not (output_dir / "stem_shards").exists():
+        logger.info(
+            f"Saving stem shards with stem_parallel_size={args.stem_parallel_size}"
+        )
+        save_stem_shards(stem_weights, output_dir, args.stem_parallel_size)
+    else:
+        logger.info(f"Stem shards already exist at {output_dir / 'stem_shards'}")
 
     # ---- Done ----
     logger.info("")

@@ -122,7 +122,7 @@ def load_from_checkpoint(ckpt_dir: str, model: nn.Module, optimizer: Optional[to
     dcp.load(state_dict, checkpoint_id=ckpt_dir)
 
 class CheckpointManager:
-    def __init__(self, args: CheckpointArgs):
+    def __init__(self, args: CheckpointArgs, train_stage: Optional[int] = None):
         self.path = args.path
         self.dump_every = args.dump
         self.eval_every = args.eval
@@ -341,9 +341,9 @@ class CheckpointManager:
         logger.info("Model and optim reloaded")
     
     @classmethod
-    def instantiate_and_make_dir(cls, args: CheckpointArgs):
+    def instantiate_and_make_dir(cls, args: CheckpointArgs, train_stage: Optional[int] = None):
         if get_is_master():
             os.makedirs(args.path, exist_ok=True)
         dist.barrier()
 
-        return cls(args)
+        return cls(args, train_stage=train_stage)

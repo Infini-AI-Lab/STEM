@@ -14,11 +14,10 @@ from omegaconf import OmegaConf
 from torch.nn import functional as F
 import xformers
 
-from apps.main.transformer import LMTransformer, LMTransformerArgs
-from apps.main.stem import StemLMTransformer, StemLMTransformerArgs
+from apps.main.stem import StemLMTransformer, StemLMTransformerArgs, STEM_MODEL_REGISTRY
 from lingua.args import dataclass_from_dict
 from lingua.checkpoint import CONSOLIDATE_NAME, consolidate_checkpoints
-from lingua.stem_checkpoint import CONSOLIDATE_STEM_NAME, consolidate_stem_shards, load_stem_shards
+from lingua.stem_checkpoint import CONSOLIDATE_STEM_NAME, consolidate_stem_shards, load_stem_shards_resharded
 from lingua.stem_dist_utils import ParallelEmbedding, is_stem_initialized
 from lingua.tokenizer import Tokenizer, build_tokenizer
 from lingua.transformer import (
@@ -43,13 +42,25 @@ from apps.main.generate import (
 
 def load_consolidated_model_and_tokenizer(
     consolidated_path,
-    model_cls=StemLMTransformer,
-    model_args_cls=StemLMTransformerArgs,
+    model_cls=None,
+    model_args_cls=None,
 ):
     ckpt_path = Path(consolidated_path)
     config = ckpt_path / "params.json"
     config = OmegaConf.load(config)
-    
+
+    # Resolve model class from config's model_type when not explicitly provided
+    if model_cls is None or model_args_cls is None:
+        model_type = getattr(config, "model_type", "llama")
+        if model_type not in STEM_MODEL_REGISTRY:
+            raise ValueError(
+                f"Unknown model_type '{model_type}' in checkpoint config. "
+                f"Available: {list(STEM_MODEL_REGISTRY.keys())}"
+            )
+        reg_cls, reg_args_cls = STEM_MODEL_REGISTRY[model_type][:2]
+        model_cls = model_cls or reg_cls
+        model_args_cls = model_args_cls or reg_args_cls
+
     param_dtype = dict(fp32=torch.float32, fp16=torch.float16, bf16=torch.bfloat16)[
         config.distributed.model_dtype
     ]
@@ -57,15 +68,21 @@ def load_consolidated_model_and_tokenizer(
     tokenizer = build_tokenizer(config.data.tokenizer.name, config.data.tokenizer.path)
     model = model_cls(model_args)
     
-    
     backbone_dict = torch.load(ckpt_path / CONSOLIDATE_NAME, weights_only=True)
-    model.load_state_dict(backbone_dict["model"], strict=False)
+    if "model" in backbone_dict:
+        backbone_dict = backbone_dict["model"]
+    if next(iter(backbone_dict.keys())).startswith("model"):
+        backbone_dict = {k.replace("model.", "lm_transformer."): v for k, v in backbone_dict.items()}
+    # relax strict loading only for stem_embeddings
+    missing_keys, unexpected_keys = model.load_state_dict(backbone_dict, strict=False)
+    assert len(missing_keys) == len(model.lm_transformer.stem_layers) and all(key.startswith("stem_embeddings.") for key in missing_keys), f"Missing keys: {missing_keys}"
+    assert len(unexpected_keys) == 0, f"Unexpected keys: {unexpected_keys}"
     
     if is_stem_initialized():
         # Distributed: load sharded stem weights for this STEM MP rank
         # Use the parent dir (pre-consolidation checkpoint dir) which contains stem_shards/
         ckpt_parent = Path(os.path.dirname(ckpt_path))
-        load_stem_shards(model, ckpt_parent)
+        load_stem_shards_resharded(model, ckpt_parent)
     else:
         # Non-distributed: load consolidated (full) stem weights
         if not (ckpt_path / CONSOLIDATE_STEM_NAME).exists():
