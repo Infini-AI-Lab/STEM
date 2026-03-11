@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-dclm100B-mid100B-stem-2"
+experiment_name="lm1b-dclmdistill-mid100B-stem-4"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -26,7 +26,7 @@ echo "NODE_RANK: $NODE_RANK"
 echo "WANDB_MODE: $WANDB_MODE"
 
 python3 apps/main/prepare_init_checkpoint.py \
-    --input-dir /checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-dclm-stem-100B-2/checkpoints/0000200000 \
+    --input-dir /checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-dclm-distill-stem-100B-4/checkpoints/0000200000 \
     --output-dir /dev/shm/Llama-1B-stem-init \
     --no-drop-optim \
     --overwrite
