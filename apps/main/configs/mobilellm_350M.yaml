@@ -1,16 +1,16 @@
 dump_dir: /raid/user_data/rsadhukh/logs/mobilellm_350M
 name: mobilellm_350M_midtrain
 model_type: "llama"
-steps: 200_000
+steps: 400_000 # 200_000
 probe_freq: null
 seed: 777
 grad_acc_steps: 4 
 
 optim:
-  lr: 2e-4
+  lr: 2e-3 # 2e-4
   weight_decay: 0.1
   warmup: 2000
-  lr_min_ratio: 0.01
+  lr_min_ratio: 0.1 # 0.01
   clip: 1.0
 
 distributed:
@@ -37,15 +37,16 @@ model:
   rope_scaling: null
 
 data:
-  root_dir: /raid/user_data/rsadhukh/dolma3_dolmino_mix-10B_shuffled
+  root_dir: /raid/user_data/rsadhukh/
   sources:
-    CommonCrawlHQ: 22.5
-    Code_Main: 20.0
-    Math_Main: 18.06
-    InstQA_Main: 11.1
-    Reasoning_Traces: 7.49
-    STEM_Heavy: 10.0
-    Flashcards_RCQA: 8.9
+    dclm-baseline_shuffled: 1.0
+    # CommonCrawlHQ: 22.5
+    # Code_Main: 20.0
+    # Math_Main: 18.06
+    # InstQA_Main: 11.1
+    # Reasoning_Traces: 7.49
+    # STEM_Heavy: 10.0
+    # Flashcards_RCQA: 8.9
   batch_size: 32
   prefetch_size: 1024
   seq_len: 4096
@@ -61,7 +62,7 @@ profiling:
     run: true
 
 checkpoint:
-    init_ckpt_path: /raid/user_data/rsadhukh/checkpoints/MobileLLM-350M-lingua
+    # init_ckpt_path: /raid/user_data/rsadhukh/checkpoints/MobileLLM-350M-lingua
     dump:
         every: 5000
         keep: 1
@@ -72,6 +73,7 @@ checkpoint:
 logging:
     freq: 10
     wandb:
+        entity: "randomresearch"
         project: "stem"
         name: "mobilellm_350M"
 

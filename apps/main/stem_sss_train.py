@@ -144,6 +144,32 @@ def sync_stem_params_across_dp(model):
     )
 
 
+@torch.no_grad()
+def _cast_stem_to_model_dtype(model, distributed_args):
+    """Cast stem_embeddings and selective_iir_memories to the model dtype.
+
+    These modules live outside FSDP and default to float32, but they receive
+    bf16 hidden states from the transformer. SSSMemory projects hidden states
+    through w_mu/w_alpha, so a dtype mismatch (bf16 @ float32) would cause
+    RuntimeError. This ensures stem params match the model's param_dtype.
+    """
+    param_dtype = {
+        "fp32": torch.float32,
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
+    }[distributed_args.model_dtype]
+
+    for module in (model.stem_embeddings, model.selective_iir_memories):
+        for param in module.parameters(recurse=True):
+            param.data = param.data.to(param_dtype)
+        for buf in module.buffers(recurse=True):
+            buf.data = buf.data.to(param_dtype)
+
+    logger.info(
+        f"Casted stem_embeddings and selective_iir_memories to {param_dtype}"
+    )
+
+
 import wandb
 
 logger = logging.getLogger()
@@ -403,6 +429,12 @@ def train(args: SelectiveIIRStemTrainArgs):
             sync_stem_params_across_dp(model)
 
         checkpoint.load(model, optimizer, train_state, world_mesh)
+
+        # Cast stem params to model dtype (they are outside FSDP and default to
+        # float32; SSSMemory projects bf16 hidden states, so mismatch causes error)
+        _cast_stem_to_model_dtype(model, args.distributed)
+        sync_stem_params_across_dp(model)
+
         if args.probe_freq is not None:
             if get_is_master():
                 os.makedirs(

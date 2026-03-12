@@ -692,8 +692,8 @@ class TestSelectiveIIRGenerateTriton(unittest.TestCase):
         torch.testing.assert_close(out_gen, out_train, atol=1e-5, rtol=1e-5)
 
 
-# Import here to avoid circular import (lingua.stem_sss imports lingua.sss)
-from lingua.stem_sss import SSSMemory
+# # Import here to avoid circular import (lingua.stem_sss imports lingua.sss)
+# from lingua.stem_sss import SSSMemory
 
 
 class TestSSSMemoryModule(unittest.TestCase):
@@ -706,6 +706,7 @@ class TestSSSMemoryModule(unittest.TestCase):
     BATCH = 2
 
     def test_forward_backward(self):
+        from lingua.stem_sss import SSSMemory
         mem = SSSMemory(
             dim=self.DIM, d_ff=self.D_FF, mu_init=0.9, alpha_init=0.5,
         ).to(self.DEVICE)

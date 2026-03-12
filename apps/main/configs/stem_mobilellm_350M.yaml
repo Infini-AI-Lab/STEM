@@ -3,6 +3,7 @@ name: stem_mobilellm_350M
 steps: 400_000
 probe_freq: null
 seed: 777
+grad_acc_steps: 4 
 
 optim:
   lr: 2e-3
@@ -36,7 +37,8 @@ model:
   stem_layers: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26]
 
 data:
-  root_dir: /raid/user_data/rsadhukh/data/
+  # root_dir: /raid/user_data/rsadhukh/data/
+  root_dir: /raid/user_data/rsadhukh/
   sources:
     dclm-baseline_shuffled: 1.0
   batch_size: 32
@@ -48,7 +50,8 @@ data:
   add_eos: true
   tokenizer:
     name: sp
-    path: /sharedscratch/rsadhukh/checkpoints/MobileLLM-350M/tokenizer.model
+    # path: /sharedscratch/rsadhukh/checkpoints/MobileLLM-350M/tokenizer.model
+    path: /raid/user_data/rsadhukh/checkpoints/MobileLLM-350M/tokenizer.model
 
 profiling:
     run: true

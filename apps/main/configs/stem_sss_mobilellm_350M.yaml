@@ -1,4 +1,4 @@
-dump_dir: /raid/user_data/rsadhukh/logs/stem_sss_mobilellm_350M
+dump_dir: /raid/user_data/rsadhukh/logs/stem_sss_mobilellm_350M_pretrain
 name: stem_sss_mobilellm_350M
 model_type: "llama_sss"
 steps: 400_000
@@ -14,7 +14,7 @@ optim:
   clip: 1.0
 
 # Separate learning rate for stem_embeddings + selective_iir gate params.
-stem_lr: 5e-4
+stem_lr: 5e-4 # 2e-3 
 stem_weight_decay: 0.0
 
 distributed:
@@ -75,6 +75,7 @@ checkpoint:
 logging:
     freq: 10
     wandb:
+        entity: "randomresearch"
         project: "stem"
         name: "sss-stem-mobilellm-350M"
 

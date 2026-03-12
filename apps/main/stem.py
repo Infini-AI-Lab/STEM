@@ -54,7 +54,11 @@ from apps.main.olmo3 import (
 
 @dataclass
 class StemLMTransformerArgs(StemTransformerArgs, LMTransformerArgs):
-    pass
+    """Args for StemLMTransformer. init_type controls stem_embeddings init in reset_stem_embeddings()."""
+
+    # How to initialize stem_embeddings when no pre-computed checkpoint exists.
+    # One of: normal, zero, scaled_normal, uniform, pretrained_stats, from_lm_transformer
+    init_type: str = "normal"
 
 
 # =============================================================================

@@ -267,8 +267,8 @@ class SSSMemory(nn.Module):
         self._alpha_init = alpha_init
 
         # Gate projections: dim → 1 (scalar output per timestep).
-        self.w_mu = nn.Linear(dim, 1, bias=True)
-        self.w_alpha = nn.Linear(dim, 1, bias=True)
+        self.w_mu = nn.Linear(dim, 1, bias=False)
+        self.w_alpha = nn.Linear(dim, 1, bias=False)
 
         # m0: initial memory vector.
         if learnable_m0:
@@ -292,11 +292,14 @@ class SSSMemory(nn.Module):
         Must be called after ``to_empty()`` since the meta→device
         materialisation leaves parameter memory uninitialised.
         """
-        nn.init.zeros_(self.w_mu.weight)
-        self.w_mu.bias.fill_(_inverse_sigmoid(self._mu_init))
+        
+        if self.w_mu.bias is not None:
+            nn.init.zeros_(self.w_mu.weight)
+            self.w_mu.bias.fill_(_inverse_sigmoid(self._mu_init))
 
-        nn.init.zeros_(self.w_alpha.weight)
-        self.w_alpha.bias.fill_(self._alpha_init)
+        if self.w_alpha.bias is not None:
+            nn.init.zeros_(self.w_alpha.weight)
+            self.w_alpha.bias.fill_(self._alpha_init)
 
         self.m0.zero_()
 
