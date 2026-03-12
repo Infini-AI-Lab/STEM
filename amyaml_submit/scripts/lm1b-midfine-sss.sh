@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-fullfine"
+experiment_name="lm1b-midfine-sss-100B"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -21,23 +21,41 @@ else
     export WANDB_MODE=offline
 fi
 
+NODE_RANK=${HOSTNAME##*-}
+echo "NODE_RANK: $NODE_RANK"
+echo "WANDB_MODE: $WANDB_MODE"
+
 # Space-efficient data prep: each node streams only its 1/N share from S3
 # and writes decompressed chunks directly (no 2x storage needed).
 # NOTE: remove or comment out the "aws s3 sync" line in template.yaml when
 #       using --s3_uri mode, since this script streams directly from S3.
-python setup/aws_prepare_hf_dataset.py \
-    --s3_uri s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dolma3_dolmino_mix-100B-1125/ \
-    --region us-east-2 \
+python3 setup/aws_prepare_hf_dataset.py \
+    --local_dir /dev/shm/data \
     --out_dir /dev/shm/dolmino-mix_shuffled \
     --dataset dolmino-mix \
     --num_nodes ${NNODES} \
-    --nchunks 8 \
-    --seed 42
+    --node_rank ${NODE_RANK} \
+    --nchunks 8 
 
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.backbone_finetune \
-    config=apps/main/configs/backbone_finetune.yaml \
+rm -rf /dev/shm/data
+
+python3 apps/main/prepare_stem_checkpoint.py \
+    --ckpt-path /checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/distcp \
+    --output-dir /dev/shm/Llama-1B-stem-init \
+    --stem-layers 2 6 10 14 \
+    --stem-parallel-size 8 
+
+# confirm the directory exists
+if [ ! -d "/dev/shm/Llama-1B-stem-init" ]; then
+    echo "Error: /dev/shm/Llama-1B-stem-init directory does not exist"
+    exit 1
+fi
+
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_sss_train \
+    config=apps/main/configs/stem_sss_llama3_1B_midfine.yaml \
     data.root_dir=/dev/shm \
-    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-fullfine \
-    checkpoint.init_ckpt_path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/distcp \
+    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
+    checkpoint.init_ckpt_path=/dev/shm/Llama-1B-stem-init \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
-    logging.wandb.name=${experiment_name}
+    logging.wandb.name=${experiment_name} \
+    model.stem_layers=[2,6,10,14] 

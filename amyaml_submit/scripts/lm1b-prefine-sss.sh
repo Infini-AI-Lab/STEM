@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-dclm-distill-stem-100B-4"
+experiment_name="lm1b-dclm-sss-100B"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -55,25 +55,12 @@ if [ ! -d "/dev/shm/Llama-1B-stem-init" ]; then
     exit 1
 fi
 
-echo "########################################################"
-echo "Training starting"
-echo "########################################################"
+echo "Starting training"
 
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_distill_train \
-    config=apps/main/configs/stem_llama3_1B_prefine_distill.yaml \
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_sss_train \
+    config=apps/main/configs/stem_sss_llama3_1B_prefine.yaml \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
     checkpoint.init_ckpt_path=/dev/shm/Llama-1B-stem-init \
-    checkpoint.dump.every=100000 \
-    checkpoint.dump.keep=2 \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
-    model.stem_layers=[2,6,10,14] \
     logging.wandb.name=${experiment_name} \
-    stem_lr=8e-4 \
-    stem_weight_decay=0.0001 \
-    stem_warmup=5000 \
-    stem_lr_min_ratio=0.01 \
-    eval.validation.max_steps=8000 \
-    teacher_ckpt_path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/distcp \
-    ce_loss_weight=1.0 \
-    distill_loss_weight=0.4 \
-    distill_temperature=2.0 
+    model.stem_layers=[2,6,10,14] 
