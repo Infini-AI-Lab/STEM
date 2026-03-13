@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-dclmdistill-mid100B-stem-4"
+experiment_name="lm1b-dclmdistill-mid100B-stem-42"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -71,4 +71,4 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     optim.scheduler="linear" \
     optim.lr_min_ratio=0.0 \
     stem_lr=2e-4 \
-    stem_weight_decay=1e-4
+    stem_weight_decay=1e-2
