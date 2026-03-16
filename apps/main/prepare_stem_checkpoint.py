@@ -42,11 +42,13 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+
+from lingua.tokenizer import CompressedTokenizer, build_tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,7 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.
 def compute_stem_embeddings(
     state_dict: Dict[str, torch.Tensor],
     stem_layers: List[int],
+    compressed_lookup: Optional[torch.Tensor] = None,
 ) -> Dict[int, torch.Tensor]:
     """Compute ``RMSNorm(tok_embeddings.weight) @ w3.weight.T`` per stem layer.
 
@@ -93,8 +96,13 @@ def compute_stem_embeddings(
     the runtime computation more closely since the FFN input is always
     RMSNorm'd.
 
-    Returns a dict mapping *stem_index* → ``(vocab_size, hidden_dim)`` tensor
-    (float32).
+    If ``compressed_lookup`` is provided (shape: ``[vocab_size]``), each
+    layer's full-vocab table is reduced to compressed-vocab rows by averaging
+    all rows that map to the same compressed token id.
+
+    Returns a dict mapping *stem_index* → ``(stem_vocab_size, hidden_dim)``
+    tensor (float32), where ``stem_vocab_size`` is ``vocab_size`` in normal
+    mode and compressed vocab size in compressed mode.
     """
     tok_emb_key = "model.tok_embeddings.weight"
     if tok_emb_key not in state_dict:
@@ -106,6 +114,22 @@ def compute_stem_embeddings(
     tok_emb = state_dict[tok_emb_key].float()  # (vocab_size, dim)
     vocab_size, dim = tok_emb.shape
     logger.info(f"Token embeddings: shape={tuple(tok_emb.shape)}, dtype=float32 (cast)")
+
+    compressed_vocab_size = None
+    if compressed_lookup is not None:
+        if compressed_lookup.ndim != 1 or compressed_lookup.numel() != vocab_size:
+            raise ValueError(
+                "compressed_lookup must be 1-D with length equal to checkpoint vocab_size "
+                f"({vocab_size}), got shape={tuple(compressed_lookup.shape)}"
+            )
+        if compressed_lookup.dtype != torch.long:
+            compressed_lookup = compressed_lookup.to(torch.long)
+        compressed_lookup = compressed_lookup.contiguous()
+        compressed_vocab_size = int(compressed_lookup.max().item()) + 1
+        logger.info(
+            f"Using compressed STEM init: vocab_size={vocab_size} -> "
+            f"stem_vocab_size={compressed_vocab_size}"
+        )
 
     stem_weights: Dict[int, torch.Tensor] = {}
     for stem_idx, layer_idx in enumerate(stem_layers):
@@ -135,7 +159,21 @@ def compute_stem_embeddings(
         hidden_dim = w3_weight.shape[0]
 
         normed_tok_emb = rms_norm(tok_emb, ffn_norm_weight)
-        stem_weight = normed_tok_emb @ w3_weight.T
+        stem_weight = normed_tok_emb @ w3_weight.T  # (vocab_size, hidden_dim)
+
+        if compressed_lookup is not None:
+            assert compressed_vocab_size is not None
+            compressed_weight = torch.zeros(
+                compressed_vocab_size, hidden_dim, dtype=stem_weight.dtype
+            )
+            counts = torch.zeros(compressed_vocab_size, dtype=stem_weight.dtype)
+            compressed_weight.index_add_(0, compressed_lookup, stem_weight)
+            counts.index_add_(
+                0,
+                compressed_lookup,
+                torch.ones(vocab_size, dtype=stem_weight.dtype),
+            )
+            stem_weight = compressed_weight / counts.clamp_min(1.0).unsqueeze(1)
 
         stem_weights[stem_idx] = stem_weight
         
@@ -238,6 +276,32 @@ def main():
         default=8,
         help="Number of stem model-parallel shards (default: %(default)s)",
     )
+    parser.add_argument(
+        "--use-compressed-tokenizer",
+        action="store_true",
+        help=(
+            "If set, initialize stem embedding rows in compressed-token space "
+            "(one row per CompressedTokenizer id)."
+        ),
+    )
+    parser.add_argument(
+        "--tokenizer-name",
+        type=str,
+        default=None,
+        help=(
+            "Tokenizer type for build_tokenizer (required with "
+            "--use-compressed-tokenizer)."
+        ),
+    )
+    parser.add_argument(
+        "--tokenizer-path",
+        type=str,
+        default=None,
+        help=(
+            "Tokenizer path for build_tokenizer (required with "
+            "--use-compressed-tokenizer)."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -255,9 +319,35 @@ def main():
     # ---- 1. Load consolidated checkpoint ----
     state_dict = load_consolidated_checkpoint(str(ckpt_path))
 
+    compressed_lookup = None
+    compressed_vocab_size = None
+    if args.use_compressed_tokenizer:
+        if not args.tokenizer_name or not args.tokenizer_path:
+            logger.error(
+                "--tokenizer-name and --tokenizer-path are required when "
+                "--use-compressed-tokenizer is set."
+            )
+            sys.exit(1)
+        logger.info(
+            "Building CompressedTokenizer lookup table "
+            f"(name={args.tokenizer_name}, path={args.tokenizer_path})"
+        )
+        tokenizer = build_tokenizer(args.tokenizer_name, args.tokenizer_path)
+        compressed_tokenizer = CompressedTokenizer(tokenizer)
+        compressed_lookup = torch.from_numpy(compressed_tokenizer.lookup_table).to(torch.long)
+        compressed_vocab_size = len(compressed_tokenizer)
+        logger.info(
+            f"Compressed tokenizer built: original_vocab={compressed_lookup.numel()}, "
+            f"compressed_vocab={compressed_vocab_size}"
+        )
+
     # ---- 2. Compute stem embeddings (also removes w3 keys from state_dict) ----
     logger.info(f"Computing stem embeddings for layers: {args.stem_layers}")
-    stem_weights = compute_stem_embeddings(state_dict, args.stem_layers)
+    stem_weights = compute_stem_embeddings(
+        state_dict,
+        args.stem_layers,
+        compressed_lookup=compressed_lookup,
+    )
 
     # ---- 3. Save modified backbone via DCP ----
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -280,12 +370,19 @@ def main():
     if "model" not in params_dict:
         params_dict = {"model": params_dict}
     params_dict["model"]["stem_layers"] = args.stem_layers
+    if args.use_compressed_tokenizer:
+        if compressed_vocab_size is None:
+            raise RuntimeError("compressed_vocab_size is not set")
+        params_dict["model"]["stem_vocab_size"] = compressed_vocab_size
     params_dict["distributed"] = params_dict.get("distributed", {})
     params_dict["distributed"]["stem_parallel_size"] = args.stem_parallel_size
     with open(output_dir / "params.json", "w") as f:
         json.dump(params_dict, f)
-    logger.info(f"Saved params.json with stem_layers={args.stem_layers}, "
-                f"stem_parallel_size={args.stem_parallel_size}")
+    logger.info(
+        f"Saved params.json with stem_layers={args.stem_layers}, "
+        f"stem_parallel_size={args.stem_parallel_size}, "
+        f"stem_vocab_size={params_dict['model'].get('stem_vocab_size', 'full_vocab')}"
+    )
 
     # ---- 5. Save stem shards ----
     if not (output_dir / "stem_shards").exists():
@@ -305,7 +402,8 @@ def main():
     logger.info(
         f"Stem layers: {args.stem_layers}  |  "
         f"Parallel size: {args.stem_parallel_size}  |  "
-        f"Shards: {args.stem_parallel_size}"
+        f"Shards: {args.stem_parallel_size}  |  "
+        f"Compressed init: {args.use_compressed_tokenizer}"
     )
 
 
