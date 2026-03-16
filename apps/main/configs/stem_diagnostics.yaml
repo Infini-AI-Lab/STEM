@@ -1,0 +1,52 @@
+# =============================================================================
+# STEM Diagnostics Configuration
+# =============================================================================
+# Computes three macro-level metrics for diagnosing STEM behavior:
+#   1. Per-position loss decomposition (delta_ell)
+#   2. Residual stream contribution norm analysis
+#   3. CKA between attention and FFN outputs per layer
+#
+# Usage:
+#   python -m apps.main.stem_diagnostics config=apps/main/configs/stem_diagnostics.yaml
+#   python -m apps.main.stem_diagnostics config=apps/main/configs/stem_diagnostics.yaml stem_ckpt_dir=/new/path
+#
+# For Metric 1, two ablation modes are supported:
+#   (a) stem_zeroed (default): zeros out STEM embeddings in the STEM model
+#   (b) vanilla_checkpoint:    loads a separate non-STEM checkpoint for comparison
+#       Set vanilla_ckpt_dir to enable mode (b).
+# =============================================================================
+
+dump_dir: logs/diagnostics
+name: stem_diagnostics
+model_type: llama  # llama | qwen3 | olmo3
+
+# --- Checkpoint paths ---
+# Point to a consolidated checkpoint dir (must contain params.json + .pth files)
+# or a pre-consolidation dir (will auto-consolidate).
+stem_ckpt_dir: checkpoints/stem_llama3_1B/0000010000
+
+# Optional: vanilla (non-STEM) checkpoint for Metric 1 comparison.
+# If unset, STEM-zeroed ablation is used instead.
+# vanilla_ckpt_dir: checkpoints/llama3_1B_baseline/0000010000
+
+# --- Data ---
+data_root_dir: /dev/shm/dolmino-mix_shuffled
+data_sources:
+  - CommonCrawlHQ
+tokenizer_name: tiktoken
+tokenizer_path: tokenizer/original/tokenizer.model
+
+seq_len: 2048
+max_batches: 50
+batch_size: 4
+seed: 42
+
+# --- Which metrics to compute ---
+compute_loss_decomposition: true
+compute_residual_norms: true
+compute_cka: true
+
+# --- Optional wandb logging ---
+# wandb:
+#   project: stem-diagnostics
+#   name: diag-run-1
