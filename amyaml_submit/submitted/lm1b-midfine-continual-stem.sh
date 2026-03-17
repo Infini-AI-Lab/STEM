@@ -3,7 +3,10 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-dclmdistill-mid100B-stem-42"
+experiment_name="lm1b-midtrain-base-100B"
+stage1_name="lm1b-midtrain-stem-100B-math"
+stage2_name="lm1b-midtrain-stem-100B-code"
+stage3_name="lm1b-midtrain-stem-100B-stem"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -21,6 +24,7 @@ else
     export WANDB_MODE=offline
 fi
 
+
 NODE_RANK=${HOSTNAME##*-}
 echo "NODE_RANK: $NODE_RANK"
 echo "WANDB_MODE: $WANDB_MODE"
@@ -36,6 +40,11 @@ if [ ! -d "/dev/shm/Llama-1B-stem-init" ]; then
     echo "Error: /dev/shm/Llama-1B-stem-init directory does not exist"
     exit 1
 fi
+
+echo "########################################################"
+echo "Data preparation starting"
+echo "########################################################"
+
 
 python3 setup/prepare_hf_dataset_by_source.py \
     --local_dir /dev/shm/data \
@@ -55,20 +64,47 @@ echo "Chunk validation passed: no empty chunk files found."
 
 rm -rf /dev/shm/data
 
-echo "Starting training"
+echo "########################################################"
+echo "Math training starting"
+echo "########################################################"
 
+# math training stage
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
-    config=apps/main/configs/stem_llama3_1B_midfine.yaml \
+    config=apps/main/configs/stem_llama3_1B_midfine_math.yaml \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
     checkpoint.init_ckpt_path=/dev/shm/Llama-1B-stem-init \
     checkpoint.continue_training_from_init=true \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
-    logging.wandb.name=${experiment_name} \
+    stage_steps=40000 \
     model.stem_layers=[2,6,10,14] \
-    optim.lr=1e-4 \
-    optim.weight_decay=0.1 \
-    optim.warmup=0 \
-    optim.scheduler="linear" \
-    optim.lr_min_ratio=0.0 \
-    stem_lr=2e-4 \
-    stem_weight_decay=1e-2
+    logging.wandb.name=${stage1_name} 
+
+echo "########################################################"
+echo "Code training starting"
+echo "########################################################"
+
+# code training stage
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
+    config=apps/main/configs/stem_llama3_1B_midfine_code.yaml \
+    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
+    checkpoint.init_ckpt_path=/dev/shm/Llama-1B-stem-init \
+    checkpoint.continue_training_from_init=true \
+    data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
+    stage_steps=40000 \
+    model.stem_layers=[2,6,10,14] \
+    logging.wandb.name=${stage2_name} 
+
+echo "########################################################"
+echo "Stem training starting"
+echo "########################################################"
+
+# stem training stage
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
+    config=apps/main/configs/stem_llama3_1B_midfine_stem.yaml \
+    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
+    checkpoint.init_ckpt_path=/dev/shm/Llama-1B-stem-init \
+    checkpoint.continue_training_from_init=true \
+    data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
+    stage_steps=70000 \
+    model.stem_layers=[2,6,10,14] \
+    logging.wandb.name=${stage3_name} 

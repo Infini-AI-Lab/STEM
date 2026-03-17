@@ -780,6 +780,7 @@ def async_iterator(buffer_size: int, iterator_builder):
 class DataArgs:
     root_dir: Optional[str] = None
     sources: Dict[str, float] = field(default_factory=dict)
+    node_local: bool = False
     batch_size: int = 2
     seq_len: int = 2048
     n_views: int = 2

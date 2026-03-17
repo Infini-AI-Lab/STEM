@@ -27,7 +27,7 @@ class Tokenizer(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def decode(self, tokens):
+    def decode(self, tokens, skip_special_tokens=False):
         pass
 
     @abc.abstractmethod
@@ -35,6 +35,10 @@ class Tokenizer(abc.ABC):
         self, text: str, tokens: Optional[List[int]] = None
     ) -> Tuple[List[str], List[int]]:
         """Return the offsets of the tokens in the original text. Only used for evaluation."""
+        pass
+
+    @abc.abstractmethod
+    def convert_ids_to_tokens(self, ids: List[int]) -> List[str]:
         pass
 
 
@@ -55,7 +59,7 @@ class ByteTokenizer(Tokenizer):
         tokens = [self.bos_id] * add_bos + list(s.encode()) + [self.eos_id] * add_eos
         return tokens
 
-    def decode(self, tokens: List[int]):
+    def decode(self, tokens: List[int], skip_special_tokens=False):
         byte_tokens = bytes([t for t in tokens if t < 256])
         return byte_tokens.decode("utf-8", errors="backslashreplace")
 
@@ -102,8 +106,11 @@ class SentencePieceTokenizer(Tokenizer):
         )
         return tokens
 
-    def decode(self, tokens: List[int]):
+    def decode(self, tokens: List[int], skip_special_tokens=False):
         return self.sp_model.decode(tokens)
+    
+    def convert_ids_to_tokens(self, ids: List[int]) -> List[str]:
+        return self.sp_model.decode(ids)
 
     def get_token_offsets(
         self, text: str, tokens: Optional[List[int]] = None
@@ -166,8 +173,11 @@ class TikTokenTokenizer(Tokenizer):
             + [self.eos_id] * add_eos
         )
 
-    def decode(self, tokens: List[int]):
+    def decode(self, tokens: List[int], skip_special_tokens=False):
         return self.tkt_model.decode(tokens)
+    
+    def convert_ids_to_tokens(self, ids: List[int]) -> List[str]:
+        return self.tkt_model.decode(ids)
 
     def get_token_offsets(
         self, text: str, tokens: Optional[List[int]] = None
@@ -271,8 +281,11 @@ class HuggingFaceTokenizer(Tokenizer):
             tokens = tokens + [self.eos_id]
         return tokens
 
-    def decode(self, tokens: List[int]) -> str:
-        return self.hf_tok.decode(tokens, skip_special_tokens=False)
+    def decode(self, tokens: List[int], skip_special_tokens=False) -> str:
+        return self.hf_tok.decode(tokens, skip_special_tokens=skip_special_tokens)
+
+    def convert_ids_to_tokens(self, ids: List[int]) -> List[str]:
+        return self.hf_tok.convert_ids_to_tokens(ids)
 
     def get_token_offsets(
         self, text: str, tokens: Optional[List[int]] = None
@@ -297,3 +310,71 @@ def build_tokenizer(name: str, path: Optional[str] = None) -> Tokenizer:
         return HuggingFaceTokenizer(path)
     else:
         raise NotImplementedError(f"{name} tokenizer type is not implemented")
+
+
+# text normalization based tokenizer -  used for STEM
+from tokenizers import normalizers, Regex
+import numpy as np
+
+class CompressedTokenizer:
+    def __init__(self, tokenizer: Tokenizer):
+        self.tokenizer = tokenizer
+        
+        SENTINEL = "\uE000"
+        self.normalizer = normalizers.Sequence([
+            normalizers.NFKC(),
+            normalizers.NFD(),
+            normalizers.StripAccents(),
+            normalizers.Lowercase(),
+            normalizers.Replace(Regex(r"[ \t\r\n]+"), " "),
+            normalizers.Replace(Regex(r"^ $"), SENTINEL),
+            normalizers.Strip(),
+            normalizers.Replace(SENTINEL, " "),
+        ])
+        
+        self.lookup_table, self.num_new_token = self._build_lookup_table()
+        
+    def __len__(self):
+        return self.num_new_token
+    
+    def _build_lookup_table(self):
+        old2new = {}
+        key2new = {}
+        new_tokens = []
+        
+        vocab_size = self.tokenizer.n_words
+        for tid in range(vocab_size):
+            try:
+                text = self.tokenizer.decode([tid], skip_special_tokens=False)
+            except TypeError:
+                text = self.tokenizer.decode([tid])
+            
+            if "�" in text:
+                key = self.tokenizer.convert_ids_to_tokens(tid)
+            else:
+                norm = self.normalizer.normalize_str(text)
+                key = norm if norm else text
+            
+            nid = key2new.get(key, None)
+            if nid is None:
+                nid = len(new_tokens)
+                key2new[key] = nid
+                new_tokens.append(key)
+            old2new[tid] = nid
+            
+        lookup = np.empty(vocab_size, dtype=np.int64)
+        for tid in range(vocab_size):
+            lookup[tid] = old2new[tid]
+            
+        return lookup, len(new_tokens)
+    
+    def _compress(self, input_ids):
+        arr = np.asarray(input_ids, dtype=np.int64)
+        pos_mask = arr >= 0
+        out = arr.copy()
+        valid_ids = arr[pos_mask]
+        out[pos_mask] = self.lookup_table[valid_ids]
+        return out
+    
+    def __call__(self, input_ids):
+        return self._compress(input_ids)

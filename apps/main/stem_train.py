@@ -324,8 +324,32 @@ def train(args: StemTrainArgs):
         optimizer = {"lm": lm_optimizer, "stem": stem_optimizer}
         scheduler = {"lm": lm_scheduler, "stem": stem_scheduler}
         
+        data_rank = dp_rank
+        data_world_size = dp_degree
+        if args.data.node_local:
+            local_rank_env = os.environ.get("LOCAL_RANK")
+            local_world_env = os.environ.get("LOCAL_WORLD_SIZE")
+            assert (
+                local_rank_env is not None and local_world_env is not None
+            ), "data.node_local=true requires LOCAL_RANK and LOCAL_WORLD_SIZE to be set"
+            data_rank = int(local_rank_env)
+            data_world_size = int(local_world_env)
+            assert data_world_size > 0, "LOCAL_WORLD_SIZE must be > 0"
+            assert (
+                0 <= data_rank < data_world_size
+            ), f"LOCAL_RANK ({data_rank}) must be in [0, {data_world_size})"
+            logger.info(
+                "Using node-local dataloader sharding: "
+                f"rank {data_rank}/{data_world_size} "
+                f"(global dp rank {dp_rank}/{dp_degree})"
+            )
+        else:
+            logger.info(
+                f"Using global DP dataloader sharding: rank {data_rank}/{data_world_size}"
+            )
+
         data_loader_state = init_dataloader_state_from_args(
-            args.data, dp_rank, dp_degree
+            args.data, data_rank, data_world_size
         )
 
         train_state = TrainState(
@@ -379,6 +403,16 @@ def train(args: StemTrainArgs):
         
         # Load from latest checkpoint (or continue from init checkpoint)
         checkpoint.load(model, optimizer, train_state, world_mesh)
+        stage_start_step = train_state.step
+        if args.stage_steps is None:
+            target_step = args.steps
+        else:
+            target_step = min(args.steps, stage_start_step + args.stage_steps)
+            logger.info(
+                "Stage-limited training enabled: "
+                f"start_step={stage_start_step}, stage_steps={args.stage_steps}, "
+                f"target_step={target_step}, global_steps={args.steps}"
+            )
         if args.probe_freq is not None:
             if get_is_master():
                 os.makedirs(Path(args.dump_dir) / "probe", exist_ok=True)
@@ -412,7 +446,7 @@ def train(args: StemTrainArgs):
         nwords_since_last_log = 0
         time_last_log = timer()
         gc.collect()
-        while train_state.step < args.steps:
+        while train_state.step < target_step:
             # We constrain train_state.acc_step to be in range 0 to args.grad_acc_steps - 1
             train_state.acc_step += 1
             train_state.acc_step = train_state.acc_step % args.grad_acc_steps
@@ -687,7 +721,7 @@ def train(args: StemTrainArgs):
 
             if args.eval is not None and (every_n_steps(
                 train_state, args.checkpoint.eval.every, acc_step=0
-            ) or every_n_steps(train_state, args.steps, acc_step=0)):
+            ) or every_n_steps(train_state, target_step, acc_step=0)):
                 from apps.main.stem_eval import (
                     launch_stem_eval,
                     EVAL_FOLDER_NAME,

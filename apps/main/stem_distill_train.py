@@ -89,12 +89,16 @@ def build_distill_model_cls(
                 )
 
             temp = self._distill_temperature
+            student_log_probs = F.log_softmax(student_logits / temp, dim=-1)
+            teacher_log_probs = F.log_softmax(teacher_logits / temp, dim=-1)
+
             distill_loss = (
                 F.kl_div(
-                    F.log_softmax(student_logits / temp, dim=-1),
-                    F.softmax(teacher_logits / temp, dim=-1),
-                    reduction="none",
-                ).sum(dim=-1).mean()
+                    student_log_probs,
+                    teacher_log_probs,
+                    reduction="batchmean",
+                    log_target=True,
+                )
                 * (temp ** 2)
             )
             total_loss = self._ce_loss_weight * ce_loss + self._distill_loss_weight * distill_loss

@@ -45,6 +45,15 @@ MODEL_REGISTRY = {
 logger = logging.getLogger()
 
 
+def _truncate_at_stop(text: str, stops: List[str]) -> str:
+    """Truncate generation at first stop sequence occurrence."""
+    stop_positions = [text.find(stop) for stop in stops if stop]
+    stop_positions = [pos for pos in stop_positions if pos >= 0]
+    if not stop_positions:
+        return text
+    return text[: min(stop_positions)]
+
+
 @dataclass
 class LMHarnessArgs:
     tasks: Optional[List[Any]] = None
@@ -70,6 +79,7 @@ class LMHarnessArgs:
     torch_random_seed: int = 1234
     fewshot_random_seed: int = 1234
     batch_size: Union[int, str] = 8
+    confirm_run_unsafe_code: bool = False
 
 @dataclass
 class ValidationArgs:
@@ -146,6 +156,8 @@ class EvalHarnessLM(LM):
             top_p = ga.get("top_p", None)
             top_k = ga.get("top_k", None)
             until = ga.get("until", [])
+            if isinstance(until, str):
+                until = [until]
 
             self.generator.temperature = temperature
             self.generator.top_p = top_p
@@ -155,8 +167,7 @@ class EvalHarnessLM(LM):
             group_prompts = [p for _, p in indexed_prompts]
             generations, _, _ = self.generator.generate(group_prompts)
             for (orig_idx, _), g in zip(indexed_prompts, generations):
-                for e in until:
-                    g = g.replace(e, "")
+                g = _truncate_at_stop(g, until)
                 results[orig_idx] = g
 
         return results

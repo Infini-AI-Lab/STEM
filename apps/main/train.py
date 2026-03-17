@@ -130,6 +130,9 @@ class TrainArgs:
 
     # Nb optimizer steps to take
     steps: int = 1000
+    # Optional optimizer steps to run in this stage only.
+    # Useful when `steps` is the global training horizon across multiple stages.
+    stage_steps: Optional[int] = None
 
     data: DataArgs = field(default_factory=DataArgs)
     optim: OptimArgs = field(default_factory=OptimArgs)
@@ -185,6 +188,10 @@ class TrainState(Stateful):
 
 
 def validate_train_args(args: TrainArgs, output_size: int):
+    assert args.steps > 0, "`steps` must be > 0"
+    if args.stage_steps is not None:
+        assert args.stage_steps > 0, "`stage_steps` must be > 0 when set"
+
     if args.model.vocab_size < 0:
         logger.info(f"Setting model output size to {output_size}")
         args.model.vocab_size = output_size
@@ -366,8 +373,32 @@ def train(args: TrainArgs):
 
         # build optimizer after apply parallelisms to the model
         optimizer, scheduler = build_optimizer(model, args.optim, args.steps)
+        data_rank = dp_rank
+        data_world_size = dp_degree
+        if args.data.node_local:
+            local_rank_env = os.environ.get("LOCAL_RANK")
+            local_world_env = os.environ.get("LOCAL_WORLD_SIZE")
+            assert (
+                local_rank_env is not None and local_world_env is not None
+            ), "data.node_local=true requires LOCAL_RANK and LOCAL_WORLD_SIZE to be set"
+            data_rank = int(local_rank_env)
+            data_world_size = int(local_world_env)
+            assert data_world_size > 0, "LOCAL_WORLD_SIZE must be > 0"
+            assert (
+                0 <= data_rank < data_world_size
+            ), f"LOCAL_RANK ({data_rank}) must be in [0, {data_world_size})"
+            logger.info(
+                "Using node-local dataloader sharding: "
+                f"rank {data_rank}/{data_world_size} "
+                f"(global dp rank {dp_rank}/{dp_degree})"
+            )
+        else:
+            logger.info(
+                f"Using global DP dataloader sharding: rank {data_rank}/{data_world_size}"
+            )
+
         data_loader_state = init_dataloader_state_from_args(
-            args.data, dp_rank, dp_degree
+            args.data, data_rank, data_world_size
         )
 
         train_state = TrainState(
@@ -389,6 +420,16 @@ def train(args: TrainArgs):
             model.rope_embeddings.reset_parameters() # For RoPe initialization since it's a buffer it might not be loaded
         
         checkpoint.load(model, optimizer, train_state, world_mesh)
+        stage_start_step = train_state.step
+        if args.stage_steps is None:
+            target_step = args.steps
+        else:
+            target_step = min(args.steps, stage_start_step + args.stage_steps)
+            logger.info(
+                "Stage-limited training enabled: "
+                f"start_step={stage_start_step}, stage_steps={args.stage_steps}, "
+                f"target_step={target_step}, global_steps={args.steps}"
+            )
         # Either load from latest checkpoint or start from scratch
         if args.probe_freq is not None:
             if get_is_master():
@@ -425,7 +466,7 @@ def train(args: TrainArgs):
         nwords_since_last_log = 0
         time_last_log = timer()
         gc.collect()
-        while train_state.step < args.steps:
+        while train_state.step < target_step:
             # We constrain train_state.acc_step to be in range 0 to args.grad_acc_steps - 1
             train_state.acc_step += 1
             train_state.acc_step = train_state.acc_step % args.grad_acc_steps
@@ -623,7 +664,7 @@ def train(args: TrainArgs):
 
             if args.eval is not None and (every_n_steps(
                 train_state, args.checkpoint.eval.every, acc_step=0
-            ) or every_n_steps(train_state, args.steps, acc_step=0)):
+            ) or every_n_steps(train_state, target_step, acc_step=0)):
                 from apps.main.eval import (
                     launch_eval,
                     EVAL_FOLDER_NAME,
