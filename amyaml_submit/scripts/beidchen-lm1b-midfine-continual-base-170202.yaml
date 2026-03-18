@@ -113,6 +113,7 @@ spec:
                   ./aws/install &&
                   aws s3 sync s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dolma3_dolmino_mix-100B-1025/ . --region us-east-2 &&
                   cd /code-fsx/beidchen-sandbox/STEM &&
+                  pip uninstall -y lm-eval && cd lm-evaluation-harness && pip install -e . && cd .. &&
                   bash amyaml_submit/scripts/lm1b-midfine-continual-base.sh | tee "/code-fsx/beidchen-sandbox/beidchen-lm1b-midfine-continual-base-170202.log"
               image: 767397878797.dkr.ecr.us-east-1.amazonaws.com/agif-mm-pt-base:stem.v1
               imagePullPolicy: Always
