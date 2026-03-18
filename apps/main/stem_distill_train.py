@@ -98,7 +98,7 @@ def build_distill_model_cls(
                     teacher_log_probs,
                     reduction="batchmean",
                     log_target=True,
-                )
+                ) / student_log_probs.size(1)
                 * (temp ** 2)
             )
             total_loss = self._ce_loss_weight * ce_loss + self._distill_loss_weight * distill_loss
