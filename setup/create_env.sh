@@ -14,6 +14,10 @@
 # Exit immediately if a command exits with a non-zero status
 set -e
 
+# Resolve repository root from script location.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+
 # Start timer
 start_time=$(date +%s)
 
@@ -31,7 +35,13 @@ echo "Currently in env $(which python)"
 # Install packages
 pip install torch==2.7.0 xformers
 pip install ninja
-pip install --requirement requirements.txt
+pip install --requirement "$repo_root/requirements.txt"
+
+# Use a local lm-eval-harness checkout rather than the PyPI lm-eval wheel.
+if [ ! -d "$repo_root/lm-evaluation-harness" ]; then
+    git clone --depth 1 --branch v0.4.10 https://github.com/EleutherAI/lm-evaluation-harness.git "$repo_root/lm-evaluation-harness"
+fi
+pip install -e "$repo_root/lm-evaluation-harness"
 
 # End timer
 end_time=$(date +%s)

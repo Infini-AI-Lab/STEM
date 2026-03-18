@@ -80,9 +80,9 @@ logging:
 
 eval:
     generator:
-        max_tokens: 4096
+        max_tokens: 16384
         dtype: bf16
-        temperature: 1.0
+        temperature: 0.0
         top_p: 0.95
     harness: 
         tasks:
@@ -106,7 +106,10 @@ eval:
               dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/gsm8k
             - task: mmlu
               dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/mmlu
-        limit: 1000
+            - task: mbpp
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/mbpp
+    confirm_run_unsafe_code: true
+    batch_size: 64
     validation:
-        max_steps: 100
+        max_steps: 8000
 
