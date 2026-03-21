@@ -38,7 +38,9 @@ fi
 
 echo "Syncing node-local shard from ${LOCAL_S3_SHARD_URI}"
 rm -rf "${LOCAL_RAW_DIR}" "${LOCAL_PREPARED_DIR}"
-aws s3 sync "${LOCAL_S3_SHARD_URI}" "${LOCAL_RAW_DIR}" --region us-east-2 --only-show-errors
+cmd="aws s3 sync ${LOCAL_S3_SHARD_URI} ${LOCAL_RAW_DIR} --region us-east-2 --only-show-errors"
+echo "Running: ${cmd}"
+eval ${cmd}
 
 python3 setup/aws_prepare_hf_dataset.py \
     --local_dir "${LOCAL_RAW_DIR}" \

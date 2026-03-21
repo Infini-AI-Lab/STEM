@@ -1,4 +1,5 @@
 export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
+export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM/lm-evaluation-harness:$PYTHONPATH
 
 set -x
 
