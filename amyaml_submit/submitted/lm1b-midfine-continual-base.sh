@@ -24,6 +24,7 @@ else
     export WANDB_MODE=offline
 fi
 
+export HF_ALLOW_CODE_EVAL=1
 
 NODE_RANK=${HOSTNAME##*-}
 echo "NODE_RANK: $NODE_RANK"
