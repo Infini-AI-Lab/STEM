@@ -1,3 +1,0 @@
-dataset_name: v1-All
-include: slr_bench_common_yaml
-task: slr_bench_all
