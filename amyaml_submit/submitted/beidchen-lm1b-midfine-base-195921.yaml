@@ -111,7 +111,7 @@ spec:
                   curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" &&
                   unzip -q awscliv2.zip &&
                   ./aws/install &&
-                  aws s3 sync s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dolma3_dolmino_mix-10B-1025/ . --region us-east-2 &&
+                  aws s3 sync s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dolma3_dolmino_mix-100B-1025/ . --region us-east-2 &&
                   cd /code-fsx/beidchen-sandbox/STEM &&
                   bash amyaml_submit/scripts/lm1b-midfine-base.sh | tee "/code-fsx/beidchen-sandbox/beidchen-lm1b-midfine-base-195921.log"
               image: 767397878797.dkr.ecr.us-east-1.amazonaws.com/agif-mm-pt-base:stem.v1
