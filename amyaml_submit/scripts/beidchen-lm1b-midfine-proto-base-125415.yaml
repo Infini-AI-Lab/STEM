@@ -36,7 +36,7 @@ spec:
                         values:
                           - p5en.48xlarge
           tolerations:
-            - key: fuersth-infofm-p5en
+            - key: ikiss-swe-skills-2
               operator: Equal
               value: "True"
               effect: NoSchedule
