@@ -3,6 +3,7 @@
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from functools import wraps
 import json
 import logging
 import os
@@ -88,6 +89,14 @@ class ValidationArgs:
     root_dir: str = ""
     sources: List[str] = field(default_factory=list) # Other sources to eval on
 
+
+@dataclass
+class MonkeyPatchArgs:
+    enable_timeout_patch: bool = False
+    timeout: float = 10.0
+    num_workers: int = 1
+
+
 @dataclass
 class EvalArgs:
     name: str = "evals"
@@ -100,6 +109,7 @@ class EvalArgs:
     )
     harness: Optional[LMHarnessArgs] = field(default_factory=LMHarnessArgs)
     validation: Optional[ValidationArgs] = field(default_factory=ValidationArgs)
+    monkeypatch: MonkeyPatchArgs = field(default_factory=MonkeyPatchArgs)
 
     wandb: Optional[Any] = None
 
@@ -254,6 +264,46 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
 
     return all_val_metrics
 
+
+def apply_lm_eval_monkeypatches(cfg: MonkeyPatchArgs) -> None:
+    if not cfg.enable_timeout_patch:
+        return
+
+    try:
+        from lm_eval.tasks.mbpp import utils as mbpp_utils
+    except Exception as e:
+        logger.warning(
+            "Monkeypatch requested but import failed: %s", e
+        )
+        return
+
+    original_pass_at_1 = getattr(mbpp_utils, "pass_at_1")
+
+    # Avoid double-patching if this process re-enters launch_eval.
+    if not getattr(original_pass_at_1, "_stem_mbpp_timeout_patched", False):
+
+        @wraps(original_pass_at_1)
+        def patched_pass_at_1(references, predictions):
+            if isinstance(references, str):
+                references = [references]
+            if predictions and isinstance(predictions[0], str):
+                predictions = [[p] for p in predictions]
+            return pass_at_k.compute(
+                references=references,
+                predictions=predictions,
+                k=[1],
+                timeout=cfg.timeout,
+                num_workers=cfg.num_workers,
+            )[0]["pass@1"]
+
+        patched_pass_at_1._stem_mbpp_timeout_patched = True
+        mbpp_utils.pass_at_1 = patched_pass_at_1
+        logger.info(
+            "Applied MBPP pass@1 monkeypatch: timeout=%s num_workers=%s",
+            cfg.timeout,
+            cfg.num_workers,
+        )
+
 def launch_eval(cfg: EvalArgs):
     if not torch.distributed.is_initialized():
         setup_torch_distributed(DistributedArgs())
@@ -290,6 +340,8 @@ def launch_eval(cfg: EvalArgs):
     logger.info("Model loaded")
     model.eval()
     generator = PackedCausalTransformerGenerator(cfg.generator, model, tokenizer)
+
+    apply_lm_eval_monkeypatches(cfg.monkeypatch)
 
     wrap = EvalHarnessLM(generator)
     results = simple_evaluate(wrap, **asdict(cfg.harness))
