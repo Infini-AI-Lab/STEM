@@ -102,11 +102,7 @@ eval:
               dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/mmlu
             - task: mbpp
               dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/mbpp
-    confirm_run_unsafe_code: true
-    batch_size: 64
-    monkeypatch:
-        enable_timeout_patch: true
-        timeout: 10.0
-        num_workers: 1
+        confirm_run_unsafe_code: true
+        batch_size: 64
     validation:
         max_steps: 1000

@@ -18,22 +18,22 @@ harness:
     #   dataset_path: /raid/user_data/rsadhukh/test_data/super_glue
     # - task: nq_open
     #   num_fewshot: 5
-    - task: piqa
-      dataset_path: /raid/user_data/rsadhukh/test_data/piqa
+    # - task: piqa
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/piqa
     # - task: social_iqa
     #   dataset_kwargs:
     #     trust_remote_code: true
     # - triviaqa
     # - task: winogrande
     #   dataset_path: /raid/user_data/rsadhukh/test_data/winogrande
-    - task: openbookqa
-      dataset_path: /raid/user_data/rsadhukh/test_data/openbookqa
-    - task: arc_easy
-      dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
-    - task: arc_challenge
-      dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
-    - task: race
-      dataset_path: /raid/user_data/rsadhukh/test_data/race
+    # - task: openbookqa
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/openbookqa
+    # - task: arc_easy
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
+    # - task: arc_challenge
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
+    # - task: race
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/race
     # - commonsense_qa
     # - coqa
     # - copa
@@ -43,6 +43,9 @@ harness:
     # - task: mmlu
     #   dataset_path: /raid/user_data/rsadhukh/test_data/mmlu
     # - mmlu_pro
-  batch_size: 16
+    - task: mbpp
+      dataset_path: /raid/user_data/rsadhukh/test_data/mbpp
+  confirm_run_unsafe_code: true
+  batch_size: 64
 validation: null
 
