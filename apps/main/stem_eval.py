@@ -19,7 +19,7 @@ from apps.main.stem_generate import (
     load_consolidated_model_and_tokenizer,
 )
 from apps.main.stem import StemLMTransformer, StemLMTransformerArgs, STEM_MODEL_REGISTRY
-from apps.main.eval import LMHarnessArgs, ValidationArgs, all_dicts_same
+from apps.main.eval import LMHarnessArgs, ValidationArgs, all_dicts_same, _truncate_at_stop
 from apps.main.eval_utils import apply_mbpp_runtime_patches, harness_has_mbpp_task
 from lingua.args import dump_config
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
@@ -107,24 +107,40 @@ class EvalHarnessLM(LM):
 
     def generate_until(self, requests: List[Instance]) -> List[str]:
         prompts, gen_args = zip(*[req.args for req in requests])
-        assert all_dicts_same(gen_args), "Doesn't support different gen args for now"
-        gen_args = gen_args[0]
-        temperature = gen_args.get("temperature", 0.0)
-        top_p = gen_args.get("top_p", None)
-        top_k = gen_args.get("top_k", None)
-        until = gen_args.get("until", [])
 
-        self.generator.temperature = temperature
-        self.generator.top_p = top_p
-        self.generator.top_k = top_k
-        self.generator.until = until
-        generations, _, _ = self.generator.generate(prompts)
-        filtered_gen = []
-        for g in generations:
-            for e in until:
-                g = g.replace(e, "")
-            filtered_gen.append(g)
-        return filtered_gen
+        # Group requests by gen_args so we can handle different configs
+        from collections import OrderedDict
+        groups = OrderedDict()  # frozen gen_args -> list of (original_index, prompt)
+        for i, (prompt, ga) in enumerate(zip(prompts, gen_args)):
+            key = tuple(sorted(
+                ((k, tuple(v) if isinstance(v, list) else v) for k, v in ga.items()),
+                key=lambda x: x[0],
+            ))
+            if key not in groups:
+                groups[key] = (ga, [])
+            groups[key][1].append((i, prompt))
+
+        results = [None] * len(requests)
+        for key, (ga, indexed_prompts) in groups.items():
+            temperature = ga.get("temperature", 0.0)
+            top_p = ga.get("top_p", None)
+            top_k = ga.get("top_k", None)
+            until = ga.get("until", [])
+            if isinstance(until, str):
+                until = [until]
+
+            self.generator.temperature = temperature
+            self.generator.top_p = top_p
+            self.generator.top_k = top_k
+            self.generator.until = until
+
+            group_prompts = [p for _, p in indexed_prompts]
+            generations, _, _ = self.generator.generate(group_prompts)
+            for (orig_idx, _), g in zip(indexed_prompts, generations):
+                g = _truncate_at_stop(g, until)
+                results[orig_idx] = g
+
+        return results
 
     def loglikelihood(self, requests: List[Instance]) -> List[Tuple[float, bool]]:
         prompts, continuations = zip(*[req.args for req in requests])

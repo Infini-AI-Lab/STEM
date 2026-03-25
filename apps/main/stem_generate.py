@@ -71,8 +71,12 @@ def load_consolidated_model_and_tokenizer(
     backbone_dict = torch.load(ckpt_path / CONSOLIDATE_NAME, weights_only=True)
     if "model" in backbone_dict:
         backbone_dict = backbone_dict["model"]
-    if next(iter(backbone_dict.keys())).startswith("model"):
-        backbone_dict = {k.replace("model.", "lm_transformer."): v for k, v in backbone_dict.items()}
+    if not next(iter(backbone_dict.keys())).startswith("lm_transformer"):
+        backbone_dict = {
+            "lm_transformer." + (k[len("model."):] if k.startswith("model.") else k)
+            : v
+            for k, v in backbone_dict.items()
+        }
     # relax strict loading only for stem_embeddings
     missing_keys, unexpected_keys = model.load_state_dict(backbone_dict, strict=False)
     assert len(missing_keys) == len(model.lm_transformer.stem_layers) and all(key.startswith("stem_embeddings.") for key in missing_keys), f"Missing keys: {missing_keys}"

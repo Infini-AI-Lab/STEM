@@ -1,5 +1,4 @@
 export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
-export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM/lm-evaluation-harness:$PYTHONPATH
 
 set -x
 
@@ -30,25 +29,6 @@ export HF_ALLOW_CODE_EVAL=1
 NODE_RANK=${HOSTNAME##*-}
 echo "NODE_RANK: $NODE_RANK"
 echo "WANDB_MODE: $WANDB_MODE"
-
-python3 apps/main/prepare_init_checkpoint.py \
-    --input-dir /checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-dclm-base-100B/checkpoints/0000200000 \
-    --output-dir /dev/shm/Llama-1B-dclm-base \
-    --no-drop-optim \
-    --overwrite
-
-# confirm the directory exists
-if [ ! -d "/dev/shm/Llama-1B-dclm-base" ]; then
-    echo "Error: /dev/shm/Llama-1B-dclm-base directory does not exist"
-    exit 1
-fi
-
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.eval \
-    config=apps/main/configs/continual_eval.yaml \
-    ckpt_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-dclm-base-100B/checkpoints/0000200000 \
-    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}-init \
-    wandb.project=stem \
-    wandb.name=lm1b-midtrain-base-100B-continual-init
 
 
 echo "########################################################"
@@ -88,6 +68,10 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
     stage_steps=40000 \
     logging.wandb.name=${stage1_name} 
 
+echo "########################################################"
+echo "Post-math Evaluation starting"
+echo "########################################################"
+
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.eval \
     config=apps/main/configs/continual_eval.yaml \
     ckpt_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}/checkpoints/0000040000 \
@@ -109,6 +93,10 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
     stage_steps=40000 \
     logging.wandb.name=${stage2_name} 
 
+echo "########################################################"
+echo "Post-code Evaluation starting"
+echo "########################################################"
+
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.eval \
     config=apps/main/configs/continual_eval.yaml \
     ckpt_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}/checkpoints/0000080000 \
@@ -129,6 +117,10 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
     stage_steps=70000 \
     logging.wandb.name=${stage3_name} 
+
+echo "########################################################"
+echo "Post-stem Evaluation starting"
+echo "########################################################"
 
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.eval \
     config=apps/main/configs/continual_eval.yaml \

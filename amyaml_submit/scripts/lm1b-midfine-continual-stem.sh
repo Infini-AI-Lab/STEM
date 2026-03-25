@@ -30,17 +30,6 @@ NODE_RANK=${HOSTNAME##*-}
 echo "NODE_RANK: $NODE_RANK"
 echo "WANDB_MODE: $WANDB_MODE"
 
-python3 apps/main/prepare_init_checkpoint.py \
-    --input-dir /checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-dclm-distill-stem-100B-4/checkpoints/0000200000 \
-    --output-dir /dev/shm/Llama-1B-stem-init \
-    --no-drop-optim \
-    --overwrite
-
-# confirm the directory exists
-if [ ! -d "/dev/shm/Llama-1B-stem-init" ]; then
-    echo "Error: /dev/shm/Llama-1B-stem-init directory does not exist"
-    exit 1
-fi
 
 echo "########################################################"
 echo "Data preparation starting"

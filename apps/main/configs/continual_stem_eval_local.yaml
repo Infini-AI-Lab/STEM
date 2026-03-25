@@ -1,0 +1,42 @@
+name: "stem_eval"
+dump_dir: logs/stem_eval
+ckpt_dir: /raid/user_data/rsadhukh/logs/stem_llama3_1B_midfine_continual/
+stem_parallel_size: 4  # must match training stem_parallel_size
+
+generator:
+    max_tokens: 16384
+    dtype: bf16
+    temperature: 0.0
+    top_p: 0.95
+    show_progress: true
+
+harness: 
+    tasks:
+        - task: hellaswag
+          dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
+        - task: boolq
+          dataset_path: /raid/user_data/rsadhukh/test_data/super_glue
+        - task: piqa
+          dataset_path: /raid/user_data/rsadhukh/test_data/piqa
+        - task: winogrande
+          dataset_path: /raid/user_data/rsadhukh/test_data/winogrande
+        - task: openbookqa
+          dataset_path: /raid/user_data/rsadhukh/test_data/openbookqa
+        - task: arc_easy
+          dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
+        - task: arc_challenge
+          dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
+        - task: race
+          dataset_path: /raid/user_data/rsadhukh/test_data/race
+        - task: gsm8k
+          dataset_path: /raid/user_data/rsadhukh/test_data/gsm8k
+        - task: mmlu
+          dataset_path: /raid/user_data/rsadhukh/test_data/mmlu
+        - task: mbpp
+          dataset_path: /raid/user_data/rsadhukh/test_data/mbpp
+    confirm_run_unsafe_code: true
+    batch_size: 64
+    limit: 64
+validation:
+    max_steps: 8000
+
