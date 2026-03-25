@@ -36,7 +36,7 @@ spec:
                         values:
                           - p5en.48xlarge
           tolerations:
-            - key: fuersth-infofm-p5en
+            - key: yadunanr-knowledge-stem-5e-p5en
               operator: Equal
               value: "True"
               effect: NoSchedule
@@ -111,7 +111,6 @@ spec:
                   curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" &&
                   unzip -q awscliv2.zip &&
                   ./aws/install &&
-                  aws s3 sync s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dolma3_dolmino_mix-100B-1025/ . --region us-east-2 &&
                   cd /code-fsx/beidchen-sandbox/STEM &&
                   pip install tokenizers &&
                   bash amyaml_submit/scripts/lm1b-prefine-stem.sh | tee "/code-fsx/beidchen-sandbox/beidchen-lm1b-prefine-stem-003748.log"

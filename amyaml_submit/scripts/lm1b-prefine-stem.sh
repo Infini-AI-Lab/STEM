@@ -26,7 +26,7 @@ echo "NODE_RANK: $NODE_RANK"
 echo "WANDB_MODE: $WANDB_MODE"
 
 S3_GLOBAL_SHARD_URI="s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dclm_baseline_1.0_4prct_raw/global-shard_01_of_10"
-LOCAL_S3_SHARD_NAME="local_shard_${NODE_RANK}_of_10"
+LOCAL_S3_SHARD_NAME="local-shard_${NODE_RANK}_of_10"
 LOCAL_S3_SHARD_URI="${S3_GLOBAL_SHARD_URI}/${LOCAL_S3_SHARD_NAME}/"
 LOCAL_RAW_DIR="/dev/shm/${LOCAL_S3_SHARD_NAME}"
 LOCAL_PREPARED_DIR="/dev/shm/dclm-baseline_shuffled"
