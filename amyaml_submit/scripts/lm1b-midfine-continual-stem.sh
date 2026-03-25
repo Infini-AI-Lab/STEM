@@ -1,13 +1,12 @@
 export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
-export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM/lm-evaluation-harness:$PYTHONPATH
 
 set -x
 
 project_name="stem"
-experiment_name="lm1b-midtrain-base-100B-continual"
-stage1_name="lm1b-midtrain-base-100B-math"
-stage2_name="lm1b-midtrain-base-100B-code"
-stage3_name="lm1b-midtrain-base-100B-stem"
+experiment_name="lm1b-midtrain-stem-100B-continual"
+stage1_name="lm1b-midtrain-stem-100B-math"
+stage2_name="lm1b-midtrain-stem-100B-code"
+stage3_name="lm1b-midtrain-stem-100B-stem"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -32,24 +31,16 @@ echo "NODE_RANK: $NODE_RANK"
 echo "WANDB_MODE: $WANDB_MODE"
 
 python3 apps/main/prepare_init_checkpoint.py \
-    --input-dir /checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-dclm-base-100B/checkpoints/0000200000 \
-    --output-dir /dev/shm/Llama-1B-dclm-base \
+    --input-dir /checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-dclm-distill-stem-100B-4/checkpoints/0000200000 \
+    --output-dir /dev/shm/Llama-1B-stem-init \
     --no-drop-optim \
     --overwrite
 
 # confirm the directory exists
-if [ ! -d "/dev/shm/Llama-1B-dclm-base" ]; then
-    echo "Error: /dev/shm/Llama-1B-dclm-base directory does not exist"
+if [ ! -d "/dev/shm/Llama-1B-stem-init" ]; then
+    echo "Error: /dev/shm/Llama-1B-stem-init directory does not exist"
     exit 1
 fi
-
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.eval \
-    config=apps/main/configs/continual_eval.yaml \
-    ckpt_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/lm1b-dclm-base-100B/checkpoints/0000200000 \
-    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}-init \
-    wandb.project=stem \
-    wandb.name=lm1b-midtrain-base-100B-continual-init
-
 
 echo "########################################################"
 echo "Data preparation starting"
@@ -79,60 +70,63 @@ echo "Math training starting"
 echo "########################################################"
 
 # math training stage
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
-    config=apps/main/configs/llama3_1B_midfine_math.yaml \
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
+    config=apps/main/configs/stem_llama3_1B_midfine_math.yaml \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
-    checkpoint.init_ckpt_path=/dev/shm/Llama-1B-dclm-base \
+    checkpoint.init_ckpt_path=/dev/shm/Llama-1B-stem-init \
     checkpoint.continue_training_from_init=true \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
     stage_steps=40000 \
+    model.stem_layers=[2,6,10,14] \
     logging.wandb.name=${stage1_name} 
 
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.eval \
-    config=apps/main/configs/continual_eval.yaml \
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_eval \
+    config=apps/main/configs/continual_stem_eval.yaml \
     ckpt_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}/checkpoints/0000040000 \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}-math \
     wandb.project=stem \
-    wandb.name=lm1b-midtrain-base-100B-continual-math
+    wandb.name=lm1b-midtrain-stem-100B-continual-math
 
 echo "########################################################"
 echo "Code training starting"
 echo "########################################################"
 
 # code training stage
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
-    config=apps/main/configs/llama3_1B_midfine_code.yaml \
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
+    config=apps/main/configs/stem_llama3_1B_midfine_code.yaml \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
-    checkpoint.init_ckpt_path=/dev/shm/Llama-1B-dclm-base \
+    checkpoint.init_ckpt_path=/dev/shm/Llama-1B-stem-init \
     checkpoint.continue_training_from_init=true \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
     stage_steps=40000 \
+    model.stem_layers=[2,6,10,14] \
     logging.wandb.name=${stage2_name} 
 
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.eval \
-    config=apps/main/configs/continual_eval.yaml \
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_eval \
+    config=apps/main/configs/continual_stem_eval.yaml \
     ckpt_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}/checkpoints/0000080000 \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}-code \
     wandb.project=stem \
-    wandb.name=lm1b-midtrain-base-100B-continual-code
+    wandb.name=lm1b-midtrain-stem-100B-continual-code
 
 echo "########################################################"
 echo "Stem training starting"
 echo "########################################################"
 
 # stem training stage
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
-    config=apps/main/configs/llama3_1B_midfine_stem.yaml \
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
+    config=apps/main/configs/stem_llama3_1B_midfine_stem.yaml \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
-    checkpoint.init_ckpt_path=/dev/shm/Llama-1B-dclm-base \
+    checkpoint.init_ckpt_path=/dev/shm/Llama-1B-stem-init \
     checkpoint.continue_training_from_init=true \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
     stage_steps=70000 \
+    model.stem_layers=[2,6,10,14] \
     logging.wandb.name=${stage3_name} 
 
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.eval \
-    config=apps/main/configs/continual_eval.yaml \
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_eval \
+    config=apps/main/configs/continual_stem_eval.yaml \
     ckpt_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}/checkpoints/0000150000 \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}-stem \
     wandb.project=stem \
-    wandb.name=lm1b-midtrain-base-100B-continual-stem
+    wandb.name=lm1b-midtrain-stem-100B-continual-stem

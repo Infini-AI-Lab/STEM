@@ -1,0 +1,38 @@
+name: "debug_evals"
+ckpt_dir: checkpoints/Llama-3.2-1B/distcp/
+dump_dir: logs/evals
+generator:
+  max_tokens: 16384
+  dtype: bf16
+  temperature: 0.0
+  top_p: 0.95
+  show_progress: true
+
+harness: 
+    tasks:
+        - task: hellaswag
+          dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/hellaswag
+        - task: boolq
+          dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/super_glue
+        - task: piqa
+          dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/piqa
+        - task: winogrande
+          dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/winogrande
+        - task: openbookqa
+          dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/openbookqa
+        - task: arc_easy
+          dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/ai2_arc
+        - task: arc_challenge
+          dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/ai2_arc
+        - task: race
+          dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/race
+        - task: gsm8k
+          dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/gsm8k
+        - task: mmlu
+          dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/mmlu
+        - task: mbpp
+          dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/mbpp
+    confirm_run_unsafe_code: true
+    batch_size: 64
+validation:
+    max_steps: 1000
