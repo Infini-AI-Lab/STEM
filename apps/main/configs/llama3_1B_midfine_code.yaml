@@ -96,14 +96,13 @@ eval:
               dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/ai2_arc
             - task: race
               dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/race
-            # - task: gsm8k
-            #   dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/gsm8k
-            # - task: mmlu
-            #   dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/mmlu
-            # - task: mbpp
-            #   dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/mbpp
+            - task: gsm8k
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/gsm8k
+            - task: mmlu
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/mmlu
+            - task: mbpp
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/mbpp
         confirm_run_unsafe_code: true
         batch_size: 64
         limit: 1000
-    validation:
-        max_steps: 1000
+    validation: null
