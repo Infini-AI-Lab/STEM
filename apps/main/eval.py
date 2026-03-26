@@ -33,6 +33,7 @@ from lingua.distributed import (
     get_world_size,
     setup_torch_distributed,
 )
+from lingua.tokenizer import build_tokenizer
 
 EVAL_FOLDER_NAME = "{:010d}"
 
@@ -96,6 +97,8 @@ class EvalArgs:
     dump_dir: Optional[str] = None
     metric_log_dir: Optional[str] = None
     ckpt_dir: str = ""
+    tokenizer_path: Optional[str] = None
+    tokenizer_name: Optional[str] = None
     model_type: str = "llama"  # "llama", "qwen3", or "olmo3"
     generator: PackedCausalTransformerGeneratorArgs = field(
         default_factory=PackedCausalTransformerGeneratorArgs
@@ -292,6 +295,13 @@ def launch_eval(cfg: EvalArgs):
         model_cls=model_cls,
         model_args_cls=model_args_cls,
     )
+    if cfg.tokenizer_path is not None:
+        tokenizer_name = cfg.tokenizer_name or train_cfg.data.tokenizer.name
+        logger.info(
+            "Overriding tokenizer from CLI "
+            f"(name={tokenizer_name}, path={cfg.tokenizer_path})"
+        )
+        tokenizer = build_tokenizer(tokenizer_name, cfg.tokenizer_path)
     logger.info("Model loaded")
     model.eval()
     generator = PackedCausalTransformerGenerator(cfg.generator, model, tokenizer)
