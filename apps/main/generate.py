@@ -446,7 +446,7 @@ def load_consolidated_model_and_tokenizer(
     first_key = next(iter(st_dict.keys()))    
     if first_key.startswith("model"):
         st_dict = {k.replace("model.", ""): v for k, v in st_dict.items()}
-    if "output.tied_module.weight" not in st_dict and "tok_embeddings.weight" in st_dict:
+    if "output.tied_module.weight" in model.state_dict().keys() and "output.tied_module.weight" not in st_dict and "tok_embeddings.weight" in st_dict:
         st_dict["output.tied_module.weight"] = st_dict["tok_embeddings.weight"]
     model.load_state_dict(st_dict)
     model = model.cuda().eval()
