@@ -44,6 +44,8 @@ def load_consolidated_model_and_tokenizer(
     consolidated_path,
     model_cls=None,
     model_args_cls=None,
+    tokenizer_name: Optional[str] = None,
+    tokenizer_path: Optional[str] = None,
 ):
     ckpt_path = Path(consolidated_path)
     config = ckpt_path / "params.json"
@@ -65,7 +67,13 @@ def load_consolidated_model_and_tokenizer(
         config.distributed.model_dtype
     ]
     model_args = dataclass_from_dict(model_args_cls, config.model, strict=False)
-    tokenizer = build_tokenizer(config.data.tokenizer.name, config.data.tokenizer.path)
+    tok_name = config.data.tokenizer.name
+    tok_path = config.data.tokenizer.path
+    if tokenizer_path:
+        tok_path = tokenizer_path
+    if tokenizer_name:
+        tok_name = tokenizer_name
+    tokenizer = build_tokenizer(tok_name, tok_path)
     model = model_cls(model_args)
     
     backbone_dict = torch.load(ckpt_path / CONSOLIDATE_NAME, weights_only=True)

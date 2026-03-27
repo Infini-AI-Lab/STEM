@@ -1,50 +1,50 @@
 # =============================================================================
 # STEM Diagnostics Configuration
 # =============================================================================
-# Computes three macro-level metrics for diagnosing STEM behavior:
+# Metrics:
 #   1. Per-position loss decomposition (delta_ell)
 #   2. Residual stream contribution norm analysis
 #   3. CKA between attention and FFN outputs per layer
+#   A. Cross-model hidden state divergence (STEM vs vanilla)
+#   B. STEM embedding effective rank and spectral energy
 #
 # Usage:
 #   python -m apps.main.stem_diagnostics config=apps/main/configs/stem_diagnostics.yaml
-#   python -m apps.main.stem_diagnostics config=apps/main/configs/stem_diagnostics.yaml stem_ckpt_dir=/new/path
 #
-# For Metric 1, two ablation modes are supported:
-#   (a) stem_zeroed (default): zeros out STEM embeddings in the STEM model
-#   (b) vanilla_checkpoint:    loads a separate non-STEM checkpoint for comparison
-#       Set vanilla_ckpt_dir to enable mode (b).
+# Metrics A and B-w3-comparison require vanilla_ckpt_dir.
+# Metric B runs without vanilla but adds w3 comparison when available.
 # =============================================================================
 
-dump_dir: logs/diagnostics
-name: stem_diagnostics
+dump_dir: /raid/user_data/rsadhukh/ejhong/logs/diagnostics
+name: stem_diagnostics_llama3_1B
 model_type: llama  # llama | qwen3 | olmo3
 
 # --- Checkpoint paths ---
-# Point to a consolidated checkpoint dir (must contain params.json + .pth files)
-# or a pre-consolidation dir (will auto-consolidate).
-stem_ckpt_dir: checkpoints/stem_llama3_1B/0000010000
+stem_ckpt_dir: /raid/user_data/rsadhukh/checkpoints/lm1b-midtrain-stem-100B/0000200000
 
-# Optional: vanilla (non-STEM) checkpoint for Metric 1 comparison.
-# If unset, STEM-zeroed ablation is used instead.
-# vanilla_ckpt_dir: checkpoints/llama3_1B_baseline/0000010000
+# Vanilla (pre-STEM) checkpoint for Metrics 1, A, and B-w3-comparison.
+# Required for Metric A (hidden divergence). Strongly recommended for all.
+vanilla_ckpt_dir: /raid/user_data/rsadhukh/checkpoints/Llama-3.2-1B/distcp
+# vanilla_ckpt_dir: /raid/user_data/rsadhukh/checkpoints/Llama-3.2-1B/original
 
 # --- Data ---
-data_root_dir: /dev/shm/dolmino-mix_shuffled
+data_root_dir: /raid/user_data/rsadhukh
 data_sources:
-  - CommonCrawlHQ
+  - dclm-baseline_shuffled
 tokenizer_name: tiktoken
 tokenizer_path: tokenizer/original/tokenizer.model
 
-seq_len: 2048
+seq_len: 4096
 max_batches: 50
 batch_size: 4
 seed: 42
 
 # --- Which metrics to compute ---
-compute_loss_decomposition: true
-compute_residual_norms: true
-compute_cka: true
+compute_loss_decomposition: true   # Metric 1: where does STEM help/hurt?
+compute_residual_norms: true       # Metric 2: is STEM's contribution used?
+compute_cka: true                  # Metric 3: is STEM redundant with attention?
+compute_hidden_divergence: true    # Metric A: how does error propagate?
+compute_embedding_rank: true       # Metric B: has STEM collapsed dimensionally?
 
 # --- Optional wandb logging ---
 # wandb:
