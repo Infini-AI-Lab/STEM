@@ -516,7 +516,20 @@ def train(args: StemTrainArgs):
                     next(model.parameters()).grad is None
                 ), "Probe model shouldn't have grads at this point"
 
-            loss = model(input_ids, labels)
+            teacher_logits = None
+            compute_teacher_logits = getattr(model, "compute_teacher_logits", None)
+            if callable(compute_teacher_logits):
+                teacher_logits = compute_teacher_logits(
+                    token_values=input_ids,
+                    tok_idx=None,
+                    mask=None,
+                    attn_impl="sdpa",
+                )
+
+            if teacher_logits is None:
+                loss = model(input_ids, labels)
+            else:
+                loss = model(input_ids, labels, teacher_logits=teacher_logits)
 
             if args.grad_acc_steps > 1:
                 model.set_requires_gradient_sync(train_state.acc_step == 0)

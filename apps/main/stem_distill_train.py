@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Type
+from typing import Optional, Type
 
 from omegaconf import OmegaConf
 import torch
@@ -33,6 +33,7 @@ def build_distill_model_cls(
         _distill_temperature = distill_temperature
         _teacher_model_cls = teacher_model_cls
         _teacher_ckpt_path = teacher_ckpt_path
+        _compile_teacher = False
 
         def _get_teacher_model(self) -> torch.nn.Module:
             teacher_model = getattr(self, "_teacher_model", None)
@@ -54,10 +55,30 @@ def build_distill_model_cls(
             teacher_model.eval()
             for param in teacher_model.parameters():
                 param.requires_grad = False
+            if self._compile_teacher:
+                teacher_model.compile()
 
             # Store as a non-registered attribute so it is not optimized/saved.
             object.__setattr__(self, "_teacher_model", teacher_model)
             return teacher_model
+
+        @torch.compiler.disable
+        def compute_teacher_logits(
+            self,
+            token_values: torch.Tensor,
+            tok_idx: Optional[torch.Tensor] = None,
+            mask=None,
+            attn_impl: str = "sdpa",
+        ) -> torch.Tensor:
+            teacher_model = self._get_teacher_model()
+            with torch.no_grad():
+                return teacher_model(
+                    token_values=token_values,
+                    target=None,
+                    tok_idx=tok_idx,
+                    mask=mask,
+                    attn_impl=attn_impl,
+                )
 
         def forward(
             self,
@@ -66,6 +87,7 @@ def build_distill_model_cls(
             tok_idx: torch.Tensor = None,
             mask=None,
             attn_impl: str = "sdpa",
+            teacher_logits: torch.Tensor = None,
         ):
             student_logits = super().forward(
                 token_values=token_values,
@@ -79,10 +101,9 @@ def build_distill_model_cls(
                 return student_logits
 
             ce_loss = cross_entropy(student_logits, target)
-            with torch.no_grad():
-                teacher_logits = self._get_teacher_model()(
+            if teacher_logits is None:
+                teacher_logits = self.compute_teacher_logits(
                     token_values=token_values,
-                    target=None,
                     tok_idx=tok_idx,
                     mask=mask,
                     attn_impl=attn_impl,
@@ -121,15 +142,17 @@ def patch_registry_for_distillation(args: DistillStemTrainArgs):
         get_num_flop_per_token,
     ) in stem_train.STEM_MODEL_REGISTRY.items():
         teacher_model_cls = base_train.MODEL_REGISTRY[model_type][0]
+        distill_cls = build_distill_model_cls(
+            model_cls,
+            teacher_model_cls=teacher_model_cls,
+            ce_loss_weight=args.ce_loss_weight,
+            distill_loss_weight=args.distill_loss_weight,
+            distill_temperature=args.distill_temperature,
+            teacher_ckpt_path=teacher_ckpt_path,
+        )
+        distill_cls._compile_teacher = bool(args.distributed.compile)
         patched_registry[model_type] = (
-            build_distill_model_cls(
-                model_cls,
-                teacher_model_cls=teacher_model_cls,
-                ce_loss_weight=args.ce_loss_weight,
-                distill_loss_weight=args.distill_loss_weight,
-                distill_temperature=args.distill_temperature,
-                teacher_ckpt_path=teacher_ckpt_path,
-            ),
+            distill_cls,
             args_cls,
             build_fsdp_plan,
             get_no_recompute_ops,
