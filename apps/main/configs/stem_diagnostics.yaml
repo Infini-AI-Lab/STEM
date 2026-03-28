@@ -16,7 +16,7 @@
 # =============================================================================
 
 dump_dir: /raid/user_data/rsadhukh/ejhong/logs/diagnostics
-name: stem_diagnostics_llama3_1B
+name: stem_diagnostics
 model_type: llama  # llama | qwen3 | olmo3
 
 # --- Checkpoint paths ---
@@ -25,7 +25,6 @@ stem_ckpt_dir: /raid/user_data/rsadhukh/checkpoints/lm1b-midtrain-stem-100B/0000
 # Vanilla (pre-STEM) checkpoint for Metrics 1, A, and B-w3-comparison.
 # Required for Metric A (hidden divergence). Strongly recommended for all.
 vanilla_ckpt_dir: /raid/user_data/rsadhukh/checkpoints/Llama-3.2-1B/distcp
-# vanilla_ckpt_dir: /raid/user_data/rsadhukh/checkpoints/Llama-3.2-1B/original
 
 # --- Data ---
 data_root_dir: /raid/user_data/rsadhukh
@@ -45,6 +44,7 @@ compute_residual_norms: true       # Metric 2: is STEM's contribution used?
 compute_cka: true                  # Metric 3: is STEM redundant with attention?
 compute_hidden_divergence: true    # Metric A: how does error propagate?
 compute_embedding_rank: true       # Metric B: has STEM collapsed dimensionally?
+compute_ffn_internals: true        # Metrics I/II/III: context-dependency vs w1/w2 mismatch
 
 # --- Optional wandb logging ---
 # wandb:

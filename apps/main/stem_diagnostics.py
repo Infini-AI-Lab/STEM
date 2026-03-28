@@ -1,18 +1,22 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # Diagnostic toolkit for STEM-based language models.
-# Computes five metrics for diagnosing STEM behavior:
-#   1. Per-position / per-token-type loss decomposition (Delta-ell)
-#   2. Residual stream contribution norm analysis
-#   3. CKA between STEM FFN outputs and attention outputs (per-layer)
-#   A. Cross-model hidden state divergence (STEM vs vanilla, per-layer)
-#   B. STEM embedding effective rank and spectral energy
+# Computes eight metrics for diagnosing STEM behavior:
+#   1.   Per-position / per-token-type loss decomposition (Delta-ell)
+#   2.   Residual stream contribution norm analysis
+#   3.   CKA between STEM FFN outputs and attention outputs (per-layer)
+#   A.   Cross-model hidden state divergence (STEM vs vanilla, per-layer)
+#   B.   STEM embedding effective rank and spectral energy
+#   I.   W3 context-conditioned variance decomposition
+#   II.  Gate-feature alignment score
+#   III. Gated output three-component decomposition
+#
+# Metrics I/II/III require vanilla_ckpt_dir and run in two additional passes:
+#   Phase 4a: vanilla model only → accumulate per-token w3 means
+#   Phase 4b: both models → compute variance, alignment, and decomposition
 #
 # Usage (single GPU, consolidated checkpoint):
 #   python -m apps.main.stem_diagnostics config=apps/main/configs/stem_diagnostics.yaml
-#
-# The script loads a STEM checkpoint, runs forward passes with hooks on
-# evaluation data, and writes JSON results + optional wandb logging.
 
 import json
 import logging
@@ -59,11 +63,9 @@ class DiagnosticsArgs:
     dump_dir: str = "logs/diagnostics"
     model_type: str = "llama"
 
-    # Checkpoint paths
     stem_ckpt_dir: str = ""
     vanilla_ckpt_dir: Optional[str] = None
 
-    # Data for evaluation
     data_root_dir: str = ""
     data_sources: Optional[List[str]] = None
     tokenizer_name: str = "tiktoken"
@@ -72,14 +74,13 @@ class DiagnosticsArgs:
     max_batches: int = 50
     batch_size: int = 4
 
-    # Which metrics to compute
     compute_loss_decomposition: bool = True
     compute_residual_norms: bool = True
     compute_cka: bool = True
-    compute_hidden_divergence: bool = True   # Metric A: requires vanilla_ckpt_dir
-    compute_embedding_rank: bool = True      # Metric B: no forward pass needed
+    compute_hidden_divergence: bool = True
+    compute_embedding_rank: bool = True
+    compute_ffn_internals: bool = True   # Metrics I, II, III: requires vanilla_ckpt_dir
 
-    # Misc
     seed: int = 42
     wandb: Optional[Any] = None
 
@@ -88,11 +89,7 @@ class DiagnosticsArgs:
 # Metric 1: Per-Position Loss Decomposition
 # =============================================================================
 class PerPositionLossDecomposition:
-    """Per-position cross-entropy for STEM-enabled vs STEM-disabled forward passes.
-
-    delta_ell(t) = ell_base(t) - ell_stem(t). Positive = STEM helps.
-    Also stratifies by token frequency bin (rare / medium / frequent).
-    """
+    """delta_ell(t) = ell_base(t) - ell_stem(t). Positive = STEM helps."""
 
     def __init__(self, vocab_size: int, seq_len: int):
         self.seq_len = seq_len
@@ -180,8 +177,7 @@ class PerPositionLossDecomposition:
                 }
         valid = mask.sum().item()
         return {
-            "per_position": position_bins,
-            "per_freq_bin": freq_bins,
+            "per_position": position_bins, "per_freq_bin": freq_bins,
             "global_delta_ell": delta[mask].mean().item() if valid > 0 else 0.0,
             "global_stem_ppl": math.exp(stem_mean[mask].mean().item()) if valid > 0 else float("inf"),
             "global_base_ppl": math.exp(base_mean[mask].mean().item()) if valid > 0 else float("inf"),
@@ -193,7 +189,6 @@ class PerPositionLossDecomposition:
 # Helpers
 # =============================================================================
 def _is_postnorm_block(block: nn.Module) -> bool:
-    """Detect OLMo3-style post-norm blocks."""
     return hasattr(block, "post_attention_norm") and hasattr(block, "post_feedforward_norm")
 
 
@@ -201,9 +196,6 @@ def _is_postnorm_block(block: nn.Module) -> bool:
 # Metric 2: Residual Stream Contribution Norm Analysis
 # =============================================================================
 class ResidualStreamAnalyzer:
-    """Per-layer norms and cosine alignment of attention/FFN contributions
-    relative to the full residual stream. Handles pre-norm and post-norm blocks."""
-
     def __init__(self, model: StemLMTransformer):
         self.model = model
         self.stem_layer_set = set(model.stem_layers)
@@ -219,25 +211,18 @@ class ResidualStreamAnalyzer:
     def install_hooks(self):
         self._hooks = []
         for layer_idx, block in enumerate(self.model.layers):
-            attn_s = {"o": None}
-            ffn_s = {"o": None}
+            attn_s = {"o": None}; ffn_s = {"o": None}
             is_pn = _is_postnorm_block(block)
-
             def _sh(s):
-                def hook(m, a, o):
-                    s["o"] = o.detach()
+                def hook(m, a, o): s["o"] = o.detach()
                 return hook
-
             h1 = block.attention.register_forward_hook(_sh(attn_s))
             h2 = block.feed_forward.register_forward_hook(_sh(ffn_s))
-
             def _bh(li, a_s, f_s, blk, pn):
                 def hook(m, a, o):
-                    if a_s["o"] is None or f_s["o"] is None:
-                        return
+                    if a_s["o"] is None or f_s["o"] is None: return
                     with torch.no_grad():
-                        ao = a_s["o"]
-                        fo = f_s["o"]
+                        ao, fo = a_s["o"], f_s["o"]
                         if pn:
                             ao = blk.post_attention_norm(ao)
                             fo = blk.post_feedforward_norm(fo)
@@ -251,24 +236,20 @@ class ResidualStreamAnalyzer:
                         self.ffn_cos_sum[li] += F.cosine_similarity(ff, rf, dim=-1).sum().item()
                         self.attn_cos_sum[li] += F.cosine_similarity(af, rf, dim=-1).sum().item()
                         self.count[li] += N
-                    a_s["o"] = None
-                    f_s["o"] = None
+                    a_s["o"] = None; f_s["o"] = None
                 return hook
-
             h3 = block.register_forward_hook(_bh(layer_idx, attn_s, ffn_s, block, is_pn))
             self._hooks.extend([h1, h2, h3])
 
     def remove_hooks(self):
-        for h in self._hooks:
-            h.remove()
+        for h in self._hooks: h.remove()
         self._hooks = []
 
     def compute(self):
         results = {}
         for li in range(self.n_layers):
             cnt = self.count.get(li, 0)
-            if cnt == 0:
-                continue
+            if cnt == 0: continue
             rn = self.residual_norm_sum[li] / cnt
             results[f"layer_{li}"] = {
                 "is_stem_layer": li in self.stem_layer_set,
@@ -282,7 +263,7 @@ class ResidualStreamAnalyzer:
             }
         se = [v for v in results.values() if isinstance(v, dict) and v.get("is_stem_layer") is True]
         ne = [v for v in results.values() if isinstance(v, dict) and v.get("is_stem_layer") is False]
-        _m = lambda entries, k: sum(e[k] for e in entries) / len(entries) if entries else 0.0
+        _m = lambda es, k: sum(e[k] for e in es) / len(es) if es else 0.0
         results["summary"] = {
             "stem_layers_mean_ffn_ratio": _m(se, "ffn_contribution_ratio"),
             "nonstem_layers_mean_ffn_ratio": _m(ne, "ffn_contribution_ratio"),
@@ -298,9 +279,6 @@ class ResidualStreamAnalyzer:
 # Metric 3: Linear CKA (deferred global centering, Grams on CPU)
 # =============================================================================
 class CKAAnalyzer:
-    """Linear CKA between FFN and attention outputs per layer.
-    Accumulates uncentered Grams + column sums on CPU; applies centering at compute()."""
-
     def __init__(self, model: StemLMTransformer):
         self.model = model
         self.stem_layer_set = set(model.stem_layers)
@@ -311,25 +289,18 @@ class CKAAnalyzer:
     def install_hooks(self):
         self._hooks = []
         for layer_idx, block in enumerate(self.model.layers):
-            a_s = {"o": None}
-            f_s = {"o": None}
+            a_s = {"o": None}; f_s = {"o": None}
             is_pn = _is_postnorm_block(block)
-
             def _sh(s):
-                def hook(m, a, o):
-                    s["o"] = o.detach()
+                def hook(m, a, o): s["o"] = o.detach()
                 return hook
-
             h1 = block.attention.register_forward_hook(_sh(a_s))
             h2 = block.feed_forward.register_forward_hook(_sh(f_s))
-
             def _bh(li, a_st, f_st, blk, pn):
                 def hook(m, a, o):
-                    if a_st["o"] is None or f_st["o"] is None:
-                        return
+                    if a_st["o"] is None or f_st["o"] is None: return
                     with torch.no_grad():
-                        ao = a_st["o"]
-                        fo = f_st["o"]
+                        ao, fo = a_st["o"], f_st["o"]
                         if pn:
                             ao = blk.post_attention_norm(ao)
                             fo = blk.post_feedforward_norm(fo)
@@ -343,11 +314,9 @@ class CKAAnalyzer:
                                 "YtY": torch.zeros(D, D, dtype=torch.float64),
                                 "YtX": torch.zeros(D, D, dtype=torch.float64),
                                 "sum_X": torch.zeros(D, dtype=torch.float64),
-                                "sum_Y": torch.zeros(D, dtype=torch.float64),
-                                "N": 0,
+                                "sum_Y": torch.zeros(D, dtype=torch.float64), "N": 0,
                             }
-                        X64 = X.double()
-                        Y64 = Y.double()
+                        X64, Y64 = X.double(), Y.double()
                         acc = self._accum[li]
                         acc["XtX"].add_((X64.T @ X64).cpu())
                         acc["YtY"].add_((Y64.T @ Y64).cpu())
@@ -355,27 +324,21 @@ class CKAAnalyzer:
                         acc["sum_X"].add_(X64.sum(dim=0).cpu())
                         acc["sum_Y"].add_(Y64.sum(dim=0).cpu())
                         acc["N"] += Nb
-                    a_st["o"] = None
-                    f_st["o"] = None
+                    a_st["o"] = None; f_st["o"] = None
                 return hook
-
             h3 = block.register_forward_hook(_bh(layer_idx, a_s, f_s, block, is_pn))
             self._hooks.extend([h1, h2, h3])
 
     def remove_hooks(self):
-        for h in self._hooks:
-            h.remove()
+        for h in self._hooks: h.remove()
         self._hooks = []
 
     def compute(self):
         results = {}
         for li in range(self.n_layers):
-            if li not in self._accum:
-                continue
-            acc = self._accum[li]
-            N = acc["N"]
-            if N == 0:
-                continue
+            if li not in self._accum: continue
+            acc = self._accum[li]; N = acc["N"]
+            if N == 0: continue
             sX, sY = acc["sum_X"], acc["sum_Y"]
             XtX_c = acc["XtX"] - (1.0 / N) * sX.unsqueeze(1) * sX.unsqueeze(0)
             YtY_c = acc["YtY"] - (1.0 / N) * sY.unsqueeze(1) * sY.unsqueeze(0)
@@ -386,8 +349,7 @@ class CKAAnalyzer:
             den = dX * dY
             results[f"layer_{li}"] = {
                 "is_stem_layer": li in self.stem_layer_set,
-                "cka_attn_vs_ffn": num / den if den > 1e-12 else 0.0,
-                "n_tokens": N,
+                "cka_attn_vs_ffn": num / den if den > 1e-12 else 0.0, "n_tokens": N,
             }
         sc = [v["cka_attn_vs_ffn"] for v in results.values() if isinstance(v, dict) and v.get("is_stem_layer") is True]
         nc = [v["cka_attn_vs_ffn"] for v in results.values() if isinstance(v, dict) and v.get("is_stem_layer") is False]
@@ -402,135 +364,71 @@ class CKAAnalyzer:
 # Metric A: Cross-Model Hidden State Divergence
 # =============================================================================
 class HiddenStateDivergenceAnalyzer:
-    """Computes per-layer normalized L2 divergence between STEM and vanilla models.
-
-    For each layer l and each token position, computes:
-        d_l = || h_l^stem - h_l^vanilla ||_2  /  || h_l^vanilla ||_2
-
-    Averaged across all tokens and batches.
-
-    Interpretation:
-    - Divergence spikes at STEM layers that stay high / grow downstream
-      -> STEM injects representation error the backbone cannot correct.
-    - Divergence is modest at STEM layers but amplifies downstream
-      -> STEM pushes hidden states into an OOD region for pretrained weights.
-    """
-
     def __init__(self, stem_model: StemLMTransformer, vanilla_model: nn.Module):
         self.stem_model = stem_model
         self.vanilla_model = vanilla_model
         self.stem_layer_set = set(stem_model.stem_layers)
         self.n_layers = len(stem_model.layers)
-        assert len(vanilla_model.layers) == self.n_layers, (
-            f"Layer count mismatch: STEM has {self.n_layers}, "
-            f"vanilla has {len(vanilla_model.layers)}"
-        )
+        assert len(vanilla_model.layers) == self.n_layers
         self._hooks = []
         self._stem_states: Dict[int, torch.Tensor] = {}
         self._vanilla_states: Dict[int, torch.Tensor] = {}
-
-        # Running accumulators
         self.divergence_sum: Dict[int, float] = defaultdict(float)
         self.count: Dict[int, int] = defaultdict(int)
 
     def install_hooks(self):
-        """Install block-level hooks on both models to capture hidden states."""
         self._hooks = []
-
-        # STEM model hooks
         for li, block in enumerate(self.stem_model.layers):
-            def _make_hook(storage, layer_idx):
-                def hook(module, args, output):
-                    storage[layer_idx] = output.detach()
+            def _mh(storage, layer_idx):
+                def hook(module, args, output): storage[layer_idx] = output.detach()
                 return hook
-            h = block.register_forward_hook(_make_hook(self._stem_states, li))
-            self._hooks.append(h)
-
-        # Vanilla model hooks
+            self._hooks.append(block.register_forward_hook(_mh(self._stem_states, li)))
         for li, block in enumerate(self.vanilla_model.layers):
-            def _make_hook(storage, layer_idx):
-                def hook(module, args, output):
-                    storage[layer_idx] = output.detach()
+            def _mh(storage, layer_idx):
+                def hook(module, args, output): storage[layer_idx] = output.detach()
                 return hook
-            h = block.register_forward_hook(_make_hook(self._vanilla_states, li))
-            self._hooks.append(h)
+            self._hooks.append(block.register_forward_hook(_mh(self._vanilla_states, li)))
 
     def remove_hooks(self):
-        for h in self._hooks:
-            h.remove()
+        for h in self._hooks: h.remove()
         self._hooks = []
 
     @torch.no_grad()
-    def update(self, input_ids: torch.Tensor):
-        """Run same input through both models and compute per-layer divergence."""
-        self._stem_states.clear()
-        self._vanilla_states.clear()
-
-        # Forward through both models
+    def update(self, input_ids):
+        self._stem_states.clear(); self._vanilla_states.clear()
         _ = forward_stem_enabled(self.stem_model, input_ids)
         _ = forward_vanilla(self.vanilla_model, input_ids)
-
-        # Compare hidden states at each layer
         for li in range(self.n_layers):
-            h_stem = self._stem_states.get(li)
-            h_van = self._vanilla_states.get(li)
-            if h_stem is None or h_van is None:
-                continue
-
-            # Flatten to (N, D) for per-token computation
-            hs = h_stem.reshape(-1, h_stem.shape[-1])
-            hv = h_van.reshape(-1, h_van.shape[-1])
+            hs = self._stem_states.get(li); hv = self._vanilla_states.get(li)
+            if hs is None or hv is None: continue
+            hs = hs.reshape(-1, hs.shape[-1]); hv = hv.reshape(-1, hv.shape[-1])
             N = hs.shape[0]
-
-            # Normalized L2 divergence: ||h_stem - h_vanilla|| / ||h_vanilla||
-            diff_norms = (hs - hv).norm(dim=-1)      # (N,)
-            van_norms = hv.norm(dim=-1).clamp(min=1e-8)  # (N,)
-            normed_div = diff_norms / van_norms       # (N,)
-
+            normed_div = (hs - hv).norm(dim=-1) / hv.norm(dim=-1).clamp(min=1e-8)
             self.divergence_sum[li] += normed_div.sum().item()
             self.count[li] += N
+        self._stem_states.clear(); self._vanilla_states.clear()
 
-        # Free stored states
-        self._stem_states.clear()
-        self._vanilla_states.clear()
-
-    def compute(self) -> Dict[str, Any]:
+    def compute(self):
         results = {}
-        for li in range(self.n_layers):
-            cnt = self.count.get(li, 0)
-            if cnt == 0:
-                continue
-            results[f"layer_{li}"] = {
-                "is_stem_layer": li in self.stem_layer_set,
-                "mean_normalized_divergence": self.divergence_sum[li] / cnt,
-            }
-
-        stem_divs = [v["mean_normalized_divergence"] for v in results.values()
-                     if isinstance(v, dict) and v.get("is_stem_layer") is True]
-        nonstem_divs = [v["mean_normalized_divergence"] for v in results.values()
-                        if isinstance(v, dict) and v.get("is_stem_layer") is False]
-
-        # Detect amplification: does divergence grow layer-over-layer?
         all_divs = []
         for li in range(self.n_layers):
-            entry = results.get(f"layer_{li}")
-            if entry:
-                all_divs.append(entry["mean_normalized_divergence"])
-
-        # Simple amplification metric: ratio of last-quarter mean to first-quarter mean
+            cnt = self.count.get(li, 0)
+            if cnt == 0: continue
+            d = self.divergence_sum[li] / cnt
+            results[f"layer_{li}"] = {"is_stem_layer": li in self.stem_layer_set, "mean_normalized_divergence": d}
+            all_divs.append(d)
+        sd = [v["mean_normalized_divergence"] for v in results.values() if isinstance(v, dict) and v.get("is_stem_layer") is True]
+        nd = [v["mean_normalized_divergence"] for v in results.values() if isinstance(v, dict) and v.get("is_stem_layer") is False]
         if len(all_divs) >= 4:
             q = len(all_divs) // 4
-            first_q = sum(all_divs[:q]) / q
-            last_q = sum(all_divs[-q:]) / q
-            amplification_ratio = last_q / first_q if first_q > 1e-12 else 0.0
+            amp = (sum(all_divs[-q:]) / q) / (sum(all_divs[:q]) / q) if sum(all_divs[:q]) > 1e-12 else 0.0
         else:
-            amplification_ratio = 0.0
-
+            amp = 0.0
         results["summary"] = {
-            "stem_layers_mean_divergence": sum(stem_divs) / len(stem_divs) if stem_divs else 0.0,
-            "nonstem_layers_mean_divergence": sum(nonstem_divs) / len(nonstem_divs) if nonstem_divs else 0.0,
+            "stem_layers_mean_divergence": sum(sd) / len(sd) if sd else 0.0,
+            "nonstem_layers_mean_divergence": sum(nd) / len(nd) if nd else 0.0,
             "overall_mean_divergence": sum(all_divs) / len(all_divs) if all_divs else 0.0,
-            "amplification_ratio": amplification_ratio,
+            "amplification_ratio": amp,
         }
         return results
 
@@ -539,111 +437,386 @@ class HiddenStateDivergenceAnalyzer:
 # Metric B: STEM Embedding Effective Rank and Spectral Energy
 # =============================================================================
 class EmbeddingRankAnalyzer:
-    """Analyzes the spectral properties of STEM embedding tables.
-
-    Computes effective rank (exponential of normalized singular value entropy)
-    and spectral energy concentration (fraction of variance in top-k SVs).
-
-    If a vanilla model is provided, compares against the original w3 weight
-    matrix at corresponding layers.
-
-    Interpretation:
-    - STEM effective rank << w3 effective rank -> dimensional collapse,
-      STEM can't represent the feature diversity the original model had.
-    - High spectral energy in top-1 -> representations dominated by a single
-      direction (the "mean embedding" problem).
-    """
-
-    def __init__(
-        self,
-        stem_model: StemLMTransformer,
-        vanilla_model: Optional[nn.Module] = None,
-    ):
+    def __init__(self, stem_model: StemLMTransformer, vanilla_model: Optional[nn.Module] = None):
         self.stem_model = stem_model
         self.vanilla_model = vanilla_model
         self.stem_layer_indices = list(stem_model.stem_layers)
 
     @staticmethod
-    def _effective_rank(svd_vals: torch.Tensor) -> float:
-        """Compute effective rank from singular values.
-
-        erank = exp(-sum(p_i * log(p_i))) where p_i = sigma_i / sum(sigma_j)
-        """
+    def _effective_rank(svd_vals):
         s = svd_vals / svd_vals.sum()
-        s = s[s > 1e-30]  # filter near-zeros to avoid log(0)
-        entropy = -(s * s.log()).sum()
-        return entropy.exp().item()
+        s = s[s > 1e-30]
+        return (-(s * s.log()).sum()).exp().item()
 
     @staticmethod
-    def _spectral_energy(svd_vals: torch.Tensor, ks: List[int]) -> Dict[str, float]:
-        """Fraction of total spectral energy in top-k singular values."""
+    def _spectral_energy(svd_vals, ks):
         total = (svd_vals ** 2).sum()
-        result = {}
-        for k in ks:
-            k_eff = min(k, len(svd_vals))
-            result[f"top_{k}"] = ((svd_vals[:k_eff] ** 2).sum() / total).item()
-        return result
+        return {f"top_{k}": ((svd_vals[:min(k, len(svd_vals))] ** 2).sum() / total).item() for k in ks}
 
     @torch.no_grad()
+    def compute(self):
+        results = {}; ks = [1, 5, 10, 50]
+        for si, li in enumerate(self.stem_layer_indices):
+            w = self.stem_model.stem_embeddings[si].weight.data
+            V, d = w.shape
+            logger.info(f"  SVD stem_embeddings[{si}] (layer {li}), shape ({V}, {d})")
+            sv = torch.linalg.svdvals(w.float().cpu())
+            er = self._effective_rank(sv); mr = len(sv)
+            entry = {"effective_rank": er, "effective_rank_fraction": er / mr, "max_possible_rank": mr,
+                     "spectral_energy": self._spectral_energy(sv, ks), "shape": [V, d],
+                     "condition_number": (sv[0] / sv[-1]).item() if sv[-1] > 1e-30 else float("inf")}
+            if self.vanilla_model is not None:
+                w3 = self.vanilla_model.layers[li].feed_forward.w3.weight.data
+                logger.info(f"  SVD vanilla w3 layer {li}, shape {list(w3.shape)}")
+                sv3 = torch.linalg.svdvals(w3.float().cpu())
+                er3 = self._effective_rank(sv3); mr3 = len(sv3)
+                entry["w3_effective_rank"] = er3
+                entry["w3_effective_rank_fraction"] = er3 / mr3
+                entry["w3_spectral_energy"] = self._spectral_energy(sv3, ks)
+                entry["rank_ratio_stem_over_w3"] = (er / mr) / (er3 / mr3) if er3 > 0 else 0.0
+            results[f"stem_layer_{li}"] = entry
+        eranks = [v["effective_rank_fraction"] for v in results.values() if isinstance(v, dict) and "effective_rank_fraction" in v]
+        summary = {"mean_effective_rank_fraction": sum(eranks) / len(eranks) if eranks else 0.0}
+        if self.vanilla_model is not None:
+            w3e = [v["w3_effective_rank_fraction"] for v in results.values() if isinstance(v, dict) and "w3_effective_rank_fraction" in v]
+            rr = [v["rank_ratio_stem_over_w3"] for v in results.values() if isinstance(v, dict) and "rank_ratio_stem_over_w3" in v]
+            summary["mean_w3_effective_rank_fraction"] = sum(w3e) / len(w3e) if w3e else 0.0
+            summary["mean_rank_ratio_stem_over_w3"] = sum(rr) / len(rr) if rr else 0.0
+        results["summary"] = summary
+        return results
+
+
+# =============================================================================
+# Metrics I, II, III: FFN Internal Dynamics Analyzer
+# =============================================================================
+class FFNInternalAnalyzer:
+    """Analyzes internal FFN dynamics to distinguish Hypothesis A (context-
+    dependency loss) from Hypothesis B (w1/w2 inductive bias mismatch).
+
+    Recall the computation:
+      Vanilla:  output = w2( silu(w1(x)) * w3(x) )
+      STEM:     output = w2( silu(w1(x)) * stem_emb[token_id] )
+
+    Metric I  — W3 Context-Conditioned Variance Decomposition:
+      Decomposes w3 output variance into between-token (capturable by lookup)
+      and within-token (lost by any lookup). The ratio rho = within/total
+      measures how much context matters. High rho → Hypothesis A.
+
+    Metric II — Gate-Feature Alignment Score:
+      Correlates per-dimension gate activation magnitude with feature magnitude.
+      Low alignment for STEM vs high for vanilla → Hypothesis B (gate
+      expects energy in dimensions STEM doesn't provide).
+
+    Metric III — Gated Output Three-Component Decomposition:
+      Decomposes the gated FFN input into:
+        (a) g(x) * y_bar_t           — shared baseline (oracle lookup)
+        (b) g_van(x) * (w3(x)-y_bar) — context residual (Hypothesis A)
+        (c) g_stem(x) * (emb-y_bar)  — STEM deviation from oracle (Hypothesis B)
+      The ratio of (c) to (b) directly attributes the loss gap.
+
+    Two-phase execution:
+      Phase 4a: vanilla-only → accumulate per-token w3 sums/counts → compute means
+      Phase 4b: both models  → compute all three metrics using stored means
+    """
+
+    def __init__(self, stem_model: StemLMTransformer, vanilla_model: nn.Module):
+        self.stem_model = stem_model
+        self.vanilla_model = vanilla_model
+        self.stem_layer_indices = list(stem_model.stem_layers)
+        self._layer_to_stem_idx = {
+            li: si for si, li in enumerate(self.stem_layer_indices)
+        }
+
+        # Dimensions
+        first_block = stem_model.layers[self.stem_layer_indices[0]]
+        self.d_ffn = first_block.feed_forward.hidden_dim
+        self.vocab_size = stem_model.lm_transformer.tok_embeddings.weight.shape[0]
+
+        # --- Phase 4a accumulators (CPU, float64 for precision) ---
+        self.w3_sum = {}
+        self.w3_count = {}
+        for li in self.stem_layer_indices:
+            self.w3_sum[li] = torch.zeros(self.vocab_size, self.d_ffn, dtype=torch.float64)
+            self.w3_count[li] = torch.zeros(self.vocab_size, dtype=torch.int64)
+
+        # Computed after Phase 4a
+        self.w3_mean: Dict[int, torch.Tensor] = {}   # layer -> (V, d_ffn) float32 CPU
+        self.between_var: Dict[int, float] = {}       # layer -> scalar
+
+        # --- Phase 4b accumulators ---
+        self.within_var_sum = {li: 0.0 for li in self.stem_layer_indices}
+
+        # Metric II: per-dimension absolute value sums (CPU, float64)
+        self.van_gate_abs = {li: torch.zeros(self.d_ffn, dtype=torch.float64) for li in self.stem_layer_indices}
+        self.van_w3_abs = {li: torch.zeros(self.d_ffn, dtype=torch.float64) for li in self.stem_layer_indices}
+        self.stem_gate_abs = {li: torch.zeros(self.d_ffn, dtype=torch.float64) for li in self.stem_layer_indices}
+        self.stem_emb_abs = {li: torch.zeros(self.d_ffn, dtype=torch.float64) for li in self.stem_layer_indices}
+        self.van_gated_abs = {li: torch.zeros(self.d_ffn, dtype=torch.float64) for li in self.stem_layer_indices}
+        self.stem_gated_abs = {li: torch.zeros(self.d_ffn, dtype=torch.float64) for li in self.stem_layer_indices}
+
+        # Metric III: three-component norm sums
+        self.baseline_norm_sum = {li: 0.0 for li in self.stem_layer_indices}
+        self.context_res_norm_sum = {li: 0.0 for li in self.stem_layer_indices}
+        self.stem_dev_norm_sum = {li: 0.0 for li in self.stem_layer_indices}
+
+        self.phase_4b_count = {li: 0 for li in self.stem_layer_indices}
+
+        self._hooks = []
+        self._stores_4a: Dict[int, Dict] = {}
+        self._stores_4b: Dict[int, Dict] = {}
+        self._w3_mean_gpu: Dict[int, torch.Tensor] = {}  # GPU copies for Phase 4b
+
+    # -----------------------------------------------------------------
+    # Phase 4a: accumulate per-token w3 statistics from vanilla model
+    # -----------------------------------------------------------------
+    def install_phase_4a_hooks(self):
+        self._hooks = []
+        self._stores_4a = {}
+        for li in self.stem_layer_indices:
+            store = {"w3_out": None}
+
+            def _make_w3_hook(storage):
+                def hook(module, args, output):
+                    storage["w3_out"] = output.detach()
+                return hook
+
+            h = self.vanilla_model.layers[li].feed_forward.w3.register_forward_hook(
+                _make_w3_hook(store)
+            )
+            self._stores_4a[li] = store
+            self._hooks.append(h)
+
+    @torch.no_grad()
+    def update_phase_4a(self, input_ids: torch.Tensor):
+        """Run vanilla forward and accumulate per-token w3 sums."""
+        _ = forward_vanilla(self.vanilla_model, input_ids)
+
+        token_ids_cpu = input_ids.flatten().cpu()  # (B*S,)
+
+        for li in self.stem_layer_indices:
+            w3_out = self._stores_4a[li]["w3_out"]  # (B, S, d_ffn)
+            w3_flat = w3_out.reshape(-1, self.d_ffn).cpu().double()  # (N, d_ffn)
+            N = w3_flat.shape[0]
+
+            # scatter_add for per-token sum: w3_sum[token_id] += w3(x)
+            ids_exp = token_ids_cpu.unsqueeze(1).expand(N, self.d_ffn)
+            self.w3_sum[li].scatter_add_(0, ids_exp, w3_flat)
+            self.w3_count[li].scatter_add_(
+                0, token_ids_cpu, torch.ones(N, dtype=torch.int64)
+            )
+
+            self._stores_4a[li]["w3_out"] = None
+
+    def finalize_phase_4a(self):
+        """Compute per-token means and between-token variance from accumulated sums."""
+        for li in self.stem_layer_indices:
+            count = self.w3_count[li]  # (V,)
+            has_data = count > 0
+            N_total = count.sum().item()
+
+            # Safe division for mean
+            count_safe = count.clone()
+            count_safe[~has_data] = 1
+            self.w3_mean[li] = (
+                self.w3_sum[li] / count_safe.unsqueeze(1).double()
+            ).float()  # (V, d_ffn) float32
+            self.w3_mean[li][~has_data] = 0.0
+
+            # Between-token variance (chunked to control peak memory)
+            global_sum = self.w3_sum[li].sum(dim=0)  # (d_ffn,) float64
+            global_mean = (global_sum / N_total).float() if N_total > 0 else torch.zeros(self.d_ffn)
+
+            between_var = 0.0
+            active_idx = has_data.nonzero(as_tuple=True)[0]
+            chunk_sz = 8192
+            for start in range(0, len(active_idx), chunk_sz):
+                idx = active_idx[start:start + chunk_sz]
+                means_c = self.w3_mean[li][idx].double()         # (chunk, d_ffn)
+                counts_c = count[idx].double()                    # (chunk,)
+                dev = means_c - global_mean.double().unsqueeze(0)  # (chunk, d_ffn)
+                between_var += (counts_c.unsqueeze(1) * dev ** 2).sum().item()
+            self.between_var[li] = between_var / N_total if N_total > 0 else 0.0
+
+            logger.info(
+                f"  Layer {li}: {has_data.sum().item()} active tokens, "
+                f"between_var={self.between_var[li]:.4f}"
+            )
+
+        # Free sums to reclaim memory
+        self.w3_sum.clear()
+
+    def _ensure_w3_mean_gpu(self):
+        """Transfer w3 means to GPU once for Phase 4b lookups."""
+        if self._w3_mean_gpu:
+            return
+        device = next(self.stem_model.parameters()).device
+        for li in self.stem_layer_indices:
+            self._w3_mean_gpu[li] = self.w3_mean[li].to(device)
+
+    # -----------------------------------------------------------------
+    # Phase 4b: compute Metrics I, II, III from both models
+    # -----------------------------------------------------------------
+    def install_phase_4b_hooks(self):
+        self._hooks = []
+        self._stores_4b = {}
+        self._ensure_w3_mean_gpu()
+
+        for li in self.stem_layer_indices:
+            store = {"van_w1": None, "van_w3": None, "stem_w1": None}
+
+            def _make_hook(storage, key):
+                def hook(module, args, output):
+                    storage[key] = output.detach()
+                return hook
+
+            h1 = self.vanilla_model.layers[li].feed_forward.w1.register_forward_hook(
+                _make_hook(store, "van_w1"))
+            h2 = self.vanilla_model.layers[li].feed_forward.w3.register_forward_hook(
+                _make_hook(store, "van_w3"))
+            h3 = self.stem_model.layers[li].feed_forward.w1.register_forward_hook(
+                _make_hook(store, "stem_w1"))
+            self._stores_4b[li] = store
+            self._hooks.extend([h1, h2, h3])
+
+    @torch.no_grad()
+    def update_phase_4b(self, input_ids: torch.Tensor):
+        """Run both models and compute Metrics I/II/III contributions."""
+        _ = forward_vanilla(self.vanilla_model, input_ids)
+        _ = forward_stem_enabled(self.stem_model, input_ids)
+
+        token_ids_gpu = input_ids.flatten()  # (B*S,) on GPU
+        N = token_ids_gpu.shape[0]
+
+        for li in self.stem_layer_indices:
+            store = self._stores_4b[li]
+
+            # Gate and feature activations (GPU, float32)
+            van_gate = F.silu(store["van_w1"].reshape(-1, self.d_ffn).float())
+            van_w3 = store["van_w3"].reshape(-1, self.d_ffn).float()
+            stem_gate = F.silu(store["stem_w1"].reshape(-1, self.d_ffn).float())
+
+            # STEM embeddings for these tokens
+            stem_idx = self._layer_to_stem_idx[li]
+            stem_emb = self.stem_model.stem_embeddings[stem_idx](input_ids)
+            stem_emb = stem_emb.reshape(-1, self.d_ffn).float()
+
+            # Oracle means
+            oracle = self._w3_mean_gpu[li][token_ids_gpu]  # (N, d_ffn)
+
+            # --- Metric I: within-token variance ---
+            w3_residual = van_w3 - oracle
+            self.within_var_sum[li] += (w3_residual ** 2).sum().item()
+
+            # --- Metric II: per-dimension absolute value sums ---
+            self.van_gate_abs[li] += van_gate.abs().sum(dim=0).cpu().double()
+            self.van_w3_abs[li] += van_w3.abs().sum(dim=0).cpu().double()
+            self.stem_gate_abs[li] += stem_gate.abs().sum(dim=0).cpu().double()
+            self.stem_emb_abs[li] += stem_emb.abs().sum(dim=0).cpu().double()
+            self.van_gated_abs[li] += (van_gate * van_w3).abs().sum(dim=0).cpu().double()
+            self.stem_gated_abs[li] += (stem_gate * stem_emb).abs().sum(dim=0).cpu().double()
+
+            # --- Metric III: three-component norms ---
+            baseline = stem_gate * oracle
+            context_res = van_gate * w3_residual
+            stem_dev = stem_gate * (stem_emb - oracle)
+
+            self.baseline_norm_sum[li] += baseline.norm(dim=-1).sum().item()
+            self.context_res_norm_sum[li] += context_res.norm(dim=-1).sum().item()
+            self.stem_dev_norm_sum[li] += stem_dev.norm(dim=-1).sum().item()
+
+            self.phase_4b_count[li] += N
+
+            # Clear
+            store["van_w1"] = None
+            store["van_w3"] = None
+            store["stem_w1"] = None
+
+    def remove_hooks(self):
+        for h in self._hooks:
+            h.remove()
+        self._hooks = []
+
     def compute(self) -> Dict[str, Any]:
         results = {}
-        ks = [1, 5, 10, 50]
 
-        for stem_idx, layer_idx in enumerate(self.stem_layer_indices):
-            # Get STEM embedding weight: (V, d_ffn)
-            emb_weight = self.stem_model.stem_embeddings[stem_idx].weight.data
-            V, d_ffn = emb_weight.shape
+        for li in self.stem_layer_indices:
+            cnt = self.phase_4b_count[li]
+            if cnt == 0:
+                continue
 
-            # SVD on CPU in float32 for numerical stability
-            logger.info(f"  Computing SVD for stem_embeddings[{stem_idx}] (layer {layer_idx}), shape ({V}, {d_ffn})")
-            svd_vals = torch.linalg.svdvals(emb_weight.float().cpu())
-            # svd_vals has min(V, d_ffn) entries, sorted descending
+            # --- Metric I ---
+            within_var = self.within_var_sum[li] / cnt
+            between_var = self.between_var.get(li, 0.0)
+            total_var = within_var + between_var
+            rho = within_var / total_var if total_var > 1e-12 else 0.0
 
-            erank = self._effective_rank(svd_vals)
-            max_rank = len(svd_vals)
-            energies = self._spectral_energy(svd_vals, ks)
+            # --- Metric II ---
+            vg = self.van_gate_abs[li] / cnt     # E[|gate_d|] vanilla
+            vw = self.van_w3_abs[li] / cnt       # E[|w3_d|] vanilla
+            sg = self.stem_gate_abs[li] / cnt    # E[|gate_d|] STEM
+            se = self.stem_emb_abs[li] / cnt     # E[|stem_emb_d|]
 
-            entry = {
-                "effective_rank": erank,
-                "effective_rank_fraction": erank / max_rank,
-                "max_possible_rank": max_rank,
-                "spectral_energy": energies,
-                "top_singular_value": svd_vals[0].item(),
-                "smallest_singular_value": svd_vals[-1].item(),
-                "condition_number": (svd_vals[0] / svd_vals[-1]).item() if svd_vals[-1] > 1e-30 else float("inf"),
-                "shape": [V, d_ffn],
+            def _corr(a, b):
+                a = a - a.mean(); b = b - b.mean()
+                n = a.norm() * b.norm()
+                return ((a * b).sum() / n).item() if n > 1e-12 else 0.0
+
+            alignment_vanilla = _corr(vg, vw)
+            alignment_stem = _corr(sg, se)
+
+            van_gated_mean = self.van_gated_abs[li] / cnt
+            stem_gated_mean = self.stem_gated_abs[li] / cnt
+            ratio_d = stem_gated_mean / (van_gated_mean + 1e-12)
+            ratio_mean = ratio_d.mean().item()
+            ratio_std = ratio_d.std().item()
+            ratio_median = ratio_d.median().item()
+
+            # --- Metric III ---
+            base_norm = self.baseline_norm_sum[li] / cnt
+            ctx_res_norm = self.context_res_norm_sum[li] / cnt
+            stem_dev_norm = self.stem_dev_norm_sum[li] / cnt
+            total_gap = ctx_res_norm + stem_dev_norm
+            hyp_a_frac = ctx_res_norm / total_gap if total_gap > 1e-12 else 0.0
+            hyp_b_frac = stem_dev_norm / total_gap if total_gap > 1e-12 else 0.0
+
+            results[f"stem_layer_{li}"] = {
+                # Metric I
+                "context_dependency_ratio": rho,
+                "within_variance": within_var,
+                "between_variance": between_var,
+                "total_variance": total_var,
+                # Metric II
+                "gate_feature_alignment_vanilla": alignment_vanilla,
+                "gate_feature_alignment_stem": alignment_stem,
+                "gated_energy_ratio_mean": ratio_mean,
+                "gated_energy_ratio_std": ratio_std,
+                "gated_energy_ratio_median": ratio_median,
+                # Metric III
+                "baseline_norm": base_norm,
+                "context_residual_norm": ctx_res_norm,
+                "stem_deviation_norm": stem_dev_norm,
+                "hypothesis_a_fraction": hyp_a_frac,
+                "hypothesis_b_fraction": hyp_b_frac,
             }
 
-            # Compare against vanilla w3 if available
-            if self.vanilla_model is not None:
-                w3 = self.vanilla_model.layers[layer_idx].feed_forward.w3.weight.data
-                d_ffn_w3, d_model = w3.shape
-                logger.info(f"  Computing SVD for vanilla w3 at layer {layer_idx}, shape ({d_ffn_w3}, {d_model})")
-                w3_svd = torch.linalg.svdvals(w3.float().cpu())
-                w3_erank = self._effective_rank(w3_svd)
-                w3_max_rank = len(w3_svd)
-                entry["w3_effective_rank"] = w3_erank
-                entry["w3_effective_rank_fraction"] = w3_erank / w3_max_rank
-                entry["w3_max_possible_rank"] = w3_max_rank
-                entry["w3_spectral_energy"] = self._spectral_energy(w3_svd, ks)
-                entry["w3_shape"] = [d_ffn_w3, d_model]
-                entry["rank_ratio_stem_over_w3"] = (erank / max_rank) / (w3_erank / w3_max_rank) if w3_erank > 0 else 0.0
+        # Summary across STEM layers
+        entries = [v for v in results.values() if isinstance(v, dict)]
+        if entries:
+            _avg = lambda k: sum(e[k] for e in entries) / len(entries)
+            results["summary"] = {
+                "mean_context_dependency_ratio": _avg("context_dependency_ratio"),
+                "mean_gate_alignment_vanilla": _avg("gate_feature_alignment_vanilla"),
+                "mean_gate_alignment_stem": _avg("gate_feature_alignment_stem"),
+                "mean_gated_energy_ratio": _avg("gated_energy_ratio_mean"),
+                "mean_baseline_norm": _avg("baseline_norm"),
+                "mean_context_residual_norm": _avg("context_residual_norm"),
+                "mean_stem_deviation_norm": _avg("stem_deviation_norm"),
+                "mean_hypothesis_a_fraction": _avg("hypothesis_a_fraction"),
+                "mean_hypothesis_b_fraction": _avg("hypothesis_b_fraction"),
+            }
+        else:
+            results["summary"] = {}
 
-            results[f"stem_layer_{layer_idx}"] = entry
-
-        # Summary
-        eranks = [v["effective_rank_fraction"] for v in results.values() if isinstance(v, dict) and "effective_rank_fraction" in v]
-        summary = {
-            "mean_effective_rank_fraction": sum(eranks) / len(eranks) if eranks else 0.0,
-        }
-        if self.vanilla_model is not None:
-            w3_eranks = [v["w3_effective_rank_fraction"] for v in results.values()
-                         if isinstance(v, dict) and "w3_effective_rank_fraction" in v]
-            rank_ratios = [v["rank_ratio_stem_over_w3"] for v in results.values()
-                          if isinstance(v, dict) and "rank_ratio_stem_over_w3" in v]
-            summary["mean_w3_effective_rank_fraction"] = sum(w3_eranks) / len(w3_eranks) if w3_eranks else 0.0
-            summary["mean_rank_ratio_stem_over_w3"] = sum(rank_ratios) / len(rank_ratios) if rank_ratios else 0.0
-        results["summary"] = summary
         return results
 
 
@@ -652,7 +825,6 @@ class EmbeddingRankAnalyzer:
 # =============================================================================
 @torch.no_grad()
 def forward_stem_disabled(model: StemLMTransformer, token_values: torch.Tensor) -> torch.Tensor:
-    """Forward with STEM embeddings zeroed. StemFeedForward: w2(silu(w1(x)) * 0) = 0."""
     bsz, seqlen = token_values.shape
     lm = model.lm_transformer
     h = lm.tok_embeddings(token_values)
@@ -686,127 +858,64 @@ def build_eval_batches(cfg: DiagnosticsArgs, tokenizer):
     for src in (cfg.data_sources or []):
         srcs[os.path.join(cfg.data_root_dir, src)] = 1.0
     if not srcs:
-        logger.warning("No data sources specified; generating random input for smoke test.")
+        logger.warning("No data sources; random input for smoke test.")
         for _ in range(cfg.max_batches):
             ids = torch.randint(0, tokenizer.n_words, (cfg.batch_size, cfg.seq_len + 1))
             yield ids[:, :-1].cuda(), ids[:, 1:].cuda()
         return
     multi_state = init_choice_state("", srcs, 0, 0, 1, "*.val.jsonl")
     path_to_iter = setup_sources(multi_state)
-    batch_count = 0
-    token_buf = []
+    batch_count = 0; token_buf = []
     for src in path_to_iter:
         for step, (content, state) in enumerate(path_to_iter[src]):
-            if state["current_iter"] > 0 or batch_count >= cfg.max_batches:
-                break
-            text = content.get("text", content.get("content", ""))
-            token_buf.extend(tokenizer.encode(text, add_bos=True, add_eos=True))
+            if state["current_iter"] > 0 or batch_count >= cfg.max_batches: break
+            token_buf.extend(tokenizer.encode(
+                content.get("text", content.get("content", "")), add_bos=True, add_eos=True))
             while len(token_buf) >= (cfg.seq_len + 1) * cfg.batch_size:
-                chunk = token_buf[: (cfg.seq_len + 1) * cfg.batch_size]
-                token_buf = token_buf[(cfg.seq_len + 1) * cfg.batch_size :]
+                chunk = token_buf[:(cfg.seq_len + 1) * cfg.batch_size]
+                token_buf = token_buf[(cfg.seq_len + 1) * cfg.batch_size:]
                 t = torch.tensor(chunk, dtype=torch.long).reshape(cfg.batch_size, cfg.seq_len + 1)
                 yield t[:, :-1].cuda(), t[:, 1:].cuda()
                 batch_count += 1
-                if batch_count >= cfg.max_batches:
-                    return
+                if batch_count >= cfg.max_batches: return
 
 
 # =============================================================================
 # Checkpoint Resolution
 # =============================================================================
 def _resolve_checkpoint(ckpt_dir: str) -> Path:
-    """Resolve a checkpoint directory to its consolidated path.
-
-    Mirrors the logic in ``stem_eval.py`` / ``launch_stem_eval`` so that both
-    scripts behave identically:
-
-    1. If the directory itself already contains ``params.json`` and a ``.pth``
-       file it is treated as a ready-to-use consolidated checkpoint.
-    2. Otherwise look for the ``consolidated/consolidated.pth`` file (not just
-       the directory — an empty ``consolidated/`` folder is not sufficient).
-    3. If neither exists, run DCP-to-torch consolidation.
-    """
     ckpt_path = Path(ckpt_dir)
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found at {ckpt_dir}")
-
-    if (
-        (ckpt_path / "params.json").exists()
-        and next(ckpt_path.glob("*.pth"), None) is not None
-    ):
+    if (ckpt_path / "params.json").exists() and next(ckpt_path.glob("*.pth"), None) is not None:
         return ckpt_path
-
     consolidate_path = ckpt_path / CONSOLIDATE_FOLDER
     if not (consolidate_path / CONSOLIDATE_NAME).exists():
         consolidate_path = Path(consolidate_checkpoints(str(ckpt_path)))
-
     return consolidate_path
 
 
 def _validate_stem_embeddings(model: StemLMTransformer, ckpt_path: Path) -> None:
-    """Verify that every STEM embedding was loaded from the checkpoint.
-
-    After ``load_consolidated_model_and_tokenizer`` returns, this function
-    checks that:
-      1. ``consolidated_stem.pth`` (or the shard directory) actually existed
-         and was non-empty.
-      2. Every ``stem_embeddings.*.weight`` parameter in the model was
-         populated from the checkpoint (i.e. none remain at random init).
-
-    Raises ``RuntimeError`` if any STEM embedding appears to be missing from
-    the checkpoint so that diagnostics are never run on randomly-initialized
-    weights.
-    """
     stem_layer_indices = list(model.stem_layers)
-    if not stem_layer_indices:
-        return
-
-    consolidated_stem_path = ckpt_path / CONSOLIDATE_STEM_NAME
-    stem_shards_dir = ckpt_path.parent / "stem_shards"
-
-    has_consolidated_stem = (
-        consolidated_stem_path.exists()
-        and consolidated_stem_path.stat().st_size > 0
-    )
-    has_stem_shards = (
-        stem_shards_dir.exists()
-        and any(stem_shards_dir.glob("stem_model_mp*.pt"))
-    )
-
-    if not has_consolidated_stem and not has_stem_shards:
-        raise RuntimeError(
-            f"STEM embeddings checkpoint not found. "
-            f"Looked for '{consolidated_stem_path}' and shard files in "
-            f"'{stem_shards_dir}'. Without these, STEM embedding layers "
-            f"{stem_layer_indices} would remain randomly initialized."
-        )
-
-    loaded_keys = set()
-    if has_consolidated_stem:
-        stem_dict = torch.load(consolidated_stem_path, map_location="cpu", weights_only=True)
-        loaded_keys = set(stem_dict.keys())
-        del stem_dict
-
-    expected_keys = set()
-    for module_name, module in model.named_modules():
-        if isinstance(module, (nn.Embedding, ParallelEmbedding)):
-            weight_key = f"{module_name}.weight" if module_name else "weight"
-            if weight_key.startswith("stem_embeddings."):
-                expected_keys.add(weight_key)
-
-    if has_consolidated_stem and expected_keys:
-        missing = expected_keys - loaded_keys
+    if not stem_layer_indices: return
+    cstem = ckpt_path / CONSOLIDATE_STEM_NAME
+    shards = ckpt_path.parent / "stem_shards"
+    has_c = cstem.exists() and cstem.stat().st_size > 0
+    has_s = shards.exists() and any(shards.glob("stem_model_mp*.pt"))
+    if not has_c and not has_s:
+        raise RuntimeError(f"STEM embeddings not found at {cstem} or {shards}")
+    if has_c:
+        sd = torch.load(cstem, map_location="cpu", weights_only=True)
+        loaded = set(sd.keys()); del sd
+        expected = set()
+        for mn, mod in model.named_modules():
+            if isinstance(mod, (nn.Embedding, ParallelEmbedding)):
+                wk = f"{mn}.weight" if mn else "weight"
+                if wk.startswith("stem_embeddings."): expected.add(wk)
+        missing = expected - loaded
         if missing:
-            raise RuntimeError(
-                f"STEM embedding weights missing from checkpoint: {sorted(missing)}. "
-                f"These layers would remain randomly initialized. "
-                f"Checkpoint at: {consolidated_stem_path}"
-            )
-
-    logger.info(
-        f"STEM embedding validation passed: {len(expected_keys)} embedding(s) "
-        f"verified for layers {stem_layer_indices}"
-    )
+            raise RuntimeError(f"STEM weights missing: {sorted(missing)}")
+    logger.info(f"STEM embedding validation passed for layers {stem_layer_indices}")
 
 
 # =============================================================================
@@ -819,199 +928,191 @@ def run_diagnostics(cfg: DiagnosticsArgs):
     # --- Load STEM model ---
     stem_ckpt = _resolve_checkpoint(cfg.stem_ckpt_dir)
     if cfg.model_type not in STEM_MODEL_REGISTRY:
-        raise ValueError(f"Unknown model_type '{cfg.model_type}'. Available: {list(STEM_MODEL_REGISTRY.keys())}")
+        raise ValueError(f"Unknown model_type '{cfg.model_type}'")
     stem_model_cls, stem_args_cls = STEM_MODEL_REGISTRY[cfg.model_type][:2]
     logger.info(f"Loading STEM model from {stem_ckpt}")
     _tok_kw = {}
     if cfg.tokenizer_path:
         _tok_kw["tokenizer_path"] = cfg.tokenizer_path
-        if cfg.tokenizer_name:
-            _tok_kw["tokenizer_name"] = cfg.tokenizer_name
+        if cfg.tokenizer_name: _tok_kw["tokenizer_name"] = cfg.tokenizer_name
     stem_model, tokenizer, train_cfg = load_stem_model(
-        str(stem_ckpt), model_cls=stem_model_cls, model_args_cls=stem_args_cls, **_tok_kw
-    )
+        str(stem_ckpt), model_cls=stem_model_cls, model_args_cls=stem_args_cls, **_tok_kw)
     stem_model.eval()
     _validate_stem_embeddings(stem_model, stem_ckpt)
     logger.info(f"STEM model loaded: {len(stem_model.layers)} layers, stem_layers={list(stem_model.stem_layers)}")
 
-    # --- Metric B: Embedding rank (no forward pass, run before loading vanilla) ---
-    rank_analyzer = None
+    # --- Metric B ---
     rank_results = None
     if cfg.compute_embedding_rank:
-        logger.info("Metric B: Computing STEM embedding spectral analysis...")
-        rank_analyzer = EmbeddingRankAnalyzer(stem_model, vanilla_model=None)
-        rank_results = rank_analyzer.compute()
-        logger.info("Metric B: Spectral analysis complete (w3 comparison pending vanilla load)")
+        logger.info("Metric B: Spectral analysis...")
+        rank_results = EmbeddingRankAnalyzer(stem_model).compute()
 
-    # --- Load vanilla model (needed for Metrics 1-ablation, A, B-w3-comparison) ---
+    # --- Load vanilla model ---
     vanilla_model = None
     needs_vanilla = (
         (cfg.compute_loss_decomposition and cfg.vanilla_ckpt_dir)
         or cfg.compute_hidden_divergence
         or (cfg.compute_embedding_rank and cfg.vanilla_ckpt_dir)
+        or cfg.compute_ffn_internals
     )
     if needs_vanilla:
         if not cfg.vanilla_ckpt_dir:
             if cfg.compute_hidden_divergence:
-                logger.warning("compute_hidden_divergence=True but vanilla_ckpt_dir not set. Skipping Metric A.")
+                logger.warning("vanilla_ckpt_dir not set. Skipping Metric A.")
                 cfg.compute_hidden_divergence = False
+            if cfg.compute_ffn_internals:
+                logger.warning("vanilla_ckpt_dir not set. Skipping Metrics I/II/III.")
+                cfg.compute_ffn_internals = False
         else:
             van_ckpt = _resolve_checkpoint(cfg.vanilla_ckpt_dir)
             van_model_cls, van_args_cls = MODEL_REGISTRY.get(cfg.model_type, MODEL_REGISTRY["llama"])
             logger.info(f"Loading vanilla model from {van_ckpt}")
-            _tok_kw = {}
+            _tok_kw2 = {}
             if cfg.tokenizer_path:
-                _tok_kw["tokenizer_path"] = cfg.tokenizer_path
-                if cfg.tokenizer_name:
-                    _tok_kw["tokenizer_name"] = cfg.tokenizer_name
+                _tok_kw2["tokenizer_path"] = cfg.tokenizer_path
+                if cfg.tokenizer_name: _tok_kw2["tokenizer_name"] = cfg.tokenizer_name
             vanilla_model, _, _ = load_vanilla_model(
-                str(van_ckpt), model_cls=van_model_cls, model_args_cls=van_args_cls, **_tok_kw)
+                str(van_ckpt), model_cls=van_model_cls, model_args_cls=van_args_cls, **_tok_kw2)
             vanilla_model.eval()
             logger.info("Vanilla model loaded")
 
-    # --- Metric B update: recompute with w3 comparison if vanilla available ---
+    # --- Metric B update with w3 comparison ---
     if cfg.compute_embedding_rank and vanilla_model is not None:
-        logger.info("Metric B: Recomputing with vanilla w3 comparison...")
-        rank_analyzer = EmbeddingRankAnalyzer(stem_model, vanilla_model=vanilla_model)
-        rank_results = rank_analyzer.compute()
+        logger.info("Metric B: Recomputing with w3 comparison...")
+        rank_results = EmbeddingRankAnalyzer(stem_model, vanilla_model).compute()
         s = rank_results["summary"]
-        logger.info(
-            f"Metric B — STEM erank fraction: {s['mean_effective_rank_fraction']:.4f}, "
-            f"w3 erank fraction: {s.get('mean_w3_effective_rank_fraction', 'N/A')}, "
-            f"ratio: {s.get('mean_rank_ratio_stem_over_w3', 'N/A')}"
-        )
+        logger.info(f"Metric B — erank: {s['mean_effective_rank_fraction']:.4f}, "
+                    f"ratio: {s.get('mean_rank_ratio_stem_over_w3', 'N/A')}")
 
-    # --- Resolve tokenizer from train config if needed ---
+    # --- Tokenizer fallback ---
     if not cfg.tokenizer_path and hasattr(train_cfg, "data"):
         cfg.tokenizer_path = train_cfg.data.tokenizer.path
         cfg.tokenizer_name = train_cfg.data.tokenizer.name
         tokenizer = build_tokenizer(cfg.tokenizer_name, cfg.tokenizer_path)
 
-    # --- Initialize forward-pass-based metrics ---
-    loss_decomp = None
-    residual_analyzer = None
-    cka_analyzer = None
-    divergence_analyzer = None
+    # --- Initialize metrics ---
+    loss_decomp = None; residual_analyzer = None; cka_analyzer = None
+    divergence_analyzer = None; ffn_analyzer = None
 
     if cfg.compute_loss_decomposition:
-        vocab_size = stem_model.lm_transformer.tok_embeddings.weight.shape[0]
-        loss_decomp = PerPositionLossDecomposition(vocab_size=vocab_size, seq_len=cfg.seq_len)
-
+        vs = stem_model.lm_transformer.tok_embeddings.weight.shape[0]
+        loss_decomp = PerPositionLossDecomposition(vocab_size=vs, seq_len=cfg.seq_len)
     if cfg.compute_residual_norms:
         residual_analyzer = ResidualStreamAnalyzer(stem_model)
-
     if cfg.compute_cka:
         cka_analyzer = CKAAnalyzer(stem_model)
-
     if cfg.compute_hidden_divergence and vanilla_model is not None:
         divergence_analyzer = HiddenStateDivergenceAnalyzer(stem_model, vanilla_model)
+    if cfg.compute_ffn_internals and vanilla_model is not None:
+        ffn_analyzer = FFNInternalAnalyzer(stem_model, vanilla_model)
 
-    # =================================================================
-    # Phase 1: STEM-only hooks (Metrics 2 & 3)
-    # =================================================================
+    # === Phase 1: STEM-only hooks (Metrics 2 & 3) ===
     if residual_analyzer or cka_analyzer:
-        if residual_analyzer:
-            residual_analyzer.install_hooks()
-        if cka_analyzer:
-            cka_analyzer.install_hooks()
-        logger.info("Phase 1: STEM-enabled forward with hooks (Metrics 2 & 3)")
-        for bi, (input_ids, targets) in enumerate(build_eval_batches(cfg, tokenizer)):
-            _ = forward_stem_enabled(stem_model, input_ids)
-            if (bi + 1) % 10 == 0:
-                logger.info(f"  Batch {bi + 1}/{cfg.max_batches}")
-        if residual_analyzer:
-            residual_analyzer.remove_hooks()
-        if cka_analyzer:
-            cka_analyzer.remove_hooks()
+        if residual_analyzer: residual_analyzer.install_hooks()
+        if cka_analyzer: cka_analyzer.install_hooks()
+        logger.info("Phase 1: STEM forward with hooks (Metrics 2 & 3)")
+        for bi, (iids, _) in enumerate(build_eval_batches(cfg, tokenizer)):
+            _ = forward_stem_enabled(stem_model, iids)
+            if (bi + 1) % 10 == 0: logger.info(f"  Batch {bi+1}/{cfg.max_batches}")
+        if residual_analyzer: residual_analyzer.remove_hooks()
+        if cka_analyzer: cka_analyzer.remove_hooks()
         torch.cuda.empty_cache()
 
-    # =================================================================
-    # Phase 2: Loss decomposition (Metric 1)
-    # =================================================================
+    # === Phase 2: Loss decomposition (Metric 1) ===
     if loss_decomp:
         logger.info("Phase 2: Loss decomposition (Metric 1)")
-        for bi, (input_ids, targets) in enumerate(build_eval_batches(cfg, tokenizer)):
-            stem_logits = forward_stem_enabled(stem_model, input_ids)
-            base_logits = forward_vanilla(vanilla_model, input_ids) if vanilla_model is not None else forward_stem_disabled(stem_model, input_ids)
-            loss_decomp.update(stem_logits, base_logits, targets, input_ids)
-            if (bi + 1) % 10 == 0:
-                logger.info(f"  Batch {bi + 1}/{cfg.max_batches}")
+        for bi, (iids, tgts) in enumerate(build_eval_batches(cfg, tokenizer)):
+            sl = forward_stem_enabled(stem_model, iids)
+            bl = forward_vanilla(vanilla_model, iids) if vanilla_model else forward_stem_disabled(stem_model, iids)
+            loss_decomp.update(sl, bl, tgts, iids)
+            if (bi + 1) % 10 == 0: logger.info(f"  Batch {bi+1}/{cfg.max_batches}")
         torch.cuda.empty_cache()
 
-    # =================================================================
-    # Phase 3: Hidden state divergence (Metric A)
-    # =================================================================
+    # === Phase 3: Hidden state divergence (Metric A) ===
     if divergence_analyzer:
         divergence_analyzer.install_hooks()
         logger.info("Phase 3: Hidden state divergence (Metric A)")
-        for bi, (input_ids, targets) in enumerate(build_eval_batches(cfg, tokenizer)):
-            divergence_analyzer.update(input_ids)
-            if (bi + 1) % 10 == 0:
-                logger.info(f"  Batch {bi + 1}/{cfg.max_batches}")
+        for bi, (iids, _) in enumerate(build_eval_batches(cfg, tokenizer)):
+            divergence_analyzer.update(iids)
+            if (bi + 1) % 10 == 0: logger.info(f"  Batch {bi+1}/{cfg.max_batches}")
         divergence_analyzer.remove_hooks()
         torch.cuda.empty_cache()
 
-    # =================================================================
-    # Compute and save
-    # =================================================================
-    results = {
-        "config": {
-            "stem_ckpt_dir": cfg.stem_ckpt_dir,
-            "vanilla_ckpt_dir": cfg.vanilla_ckpt_dir,
-            "model_type": cfg.model_type,
-            "seq_len": cfg.seq_len,
-            "max_batches": cfg.max_batches,
-            "batch_size": cfg.batch_size,
-            "ablation_mode": "vanilla_checkpoint" if vanilla_model is not None else "stem_zeroed",
-        }
-    }
+    # === Phase 4a: Vanilla w3 accumulation (Metrics I/II/III setup) ===
+    if ffn_analyzer:
+        ffn_analyzer.install_phase_4a_hooks()
+        logger.info("Phase 4a: Vanilla w3 per-token accumulation")
+        for bi, (iids, _) in enumerate(build_eval_batches(cfg, tokenizer)):
+            ffn_analyzer.update_phase_4a(iids)
+            if (bi + 1) % 10 == 0: logger.info(f"  Batch {bi+1}/{cfg.max_batches}")
+        ffn_analyzer.remove_hooks()
+        ffn_analyzer.finalize_phase_4a()
+        torch.cuda.empty_cache()
+
+    # === Phase 4b: Joint FFN analysis (Metrics I/II/III) ===
+    if ffn_analyzer:
+        ffn_analyzer.install_phase_4b_hooks()
+        logger.info("Phase 4b: FFN internal analysis (Metrics I/II/III)")
+        for bi, (iids, _) in enumerate(build_eval_batches(cfg, tokenizer)):
+            ffn_analyzer.update_phase_4b(iids)
+            if (bi + 1) % 10 == 0: logger.info(f"  Batch {bi+1}/{cfg.max_batches}")
+        ffn_analyzer.remove_hooks()
+        torch.cuda.empty_cache()
+
+    # === Compute and save ===
+    results = {"config": {
+        "stem_ckpt_dir": cfg.stem_ckpt_dir, "vanilla_ckpt_dir": cfg.vanilla_ckpt_dir,
+        "model_type": cfg.model_type, "seq_len": cfg.seq_len,
+        "max_batches": cfg.max_batches, "batch_size": cfg.batch_size,
+        "ablation_mode": "vanilla_checkpoint" if vanilla_model else "stem_zeroed",
+    }}
 
     if loss_decomp:
         results["loss_decomposition"] = loss_decomp.compute()
         ld = results["loss_decomposition"]
         logger.info(f"Metric 1 — delta_ell: {ld['global_delta_ell']:.4f}, STEM PPL: {ld['global_stem_ppl']:.2f}, Base PPL: {ld['global_base_ppl']:.2f}")
-
     if residual_analyzer:
         results["residual_norms"] = residual_analyzer.compute()
         s = results["residual_norms"]["summary"]
         logger.info(f"Metric 2 — STEM FFN ratio: {s['stem_layers_mean_ffn_ratio']:.4f}, cos: {s['stem_layers_mean_ffn_cos']:.4f}")
-
     if cka_analyzer:
         results["cka"] = cka_analyzer.compute()
         s = results["cka"]["summary"]
         logger.info(f"Metric 3 — STEM CKA: {s['stem_layers_mean_cka']:.4f}, non-STEM: {s['nonstem_layers_mean_cka']:.4f}")
-
     if divergence_analyzer:
         results["hidden_divergence"] = divergence_analyzer.compute()
         s = results["hidden_divergence"]["summary"]
-        logger.info(f"Metric A — STEM div: {s['stem_layers_mean_divergence']:.4f}, non-STEM: {s['nonstem_layers_mean_divergence']:.4f}, amplification: {s['amplification_ratio']:.2f}x")
-
+        logger.info(f"Metric A — STEM div: {s['stem_layers_mean_divergence']:.4f}, amplification: {s['amplification_ratio']:.2f}x")
     if rank_results:
         results["embedding_rank"] = rank_results
-        s = rank_results["summary"]
-        logger.info(f"Metric B — STEM erank fraction: {s['mean_effective_rank_fraction']:.4f}")
+        logger.info(f"Metric B — erank: {rank_results['summary']['mean_effective_rank_fraction']:.4f}")
+    if ffn_analyzer:
+        results["ffn_internals"] = ffn_analyzer.compute()
+        s = results["ffn_internals"].get("summary", {})
+        logger.info(
+            f"Metric I — context_dependency_ratio: {s.get('mean_context_dependency_ratio', 0):.4f}")
+        logger.info(
+            f"Metric II — gate_align vanilla: {s.get('mean_gate_alignment_vanilla', 0):.4f}, "
+            f"stem: {s.get('mean_gate_alignment_stem', 0):.4f}, "
+            f"energy_ratio: {s.get('mean_gated_energy_ratio', 0):.4f}")
+        logger.info(
+            f"Metric III — hyp_A: {s.get('mean_hypothesis_a_fraction', 0):.4f}, "
+            f"hyp_B: {s.get('mean_hypothesis_b_fraction', 0):.4f}")
 
-    # --- Save JSON ---
-    out_dir = Path(cfg.dump_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # --- Save ---
+    out_dir = Path(cfg.dump_dir); out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "diagnostics.json"
-
     def _ser(obj):
-        if isinstance(obj, torch.Tensor):
-            return obj.tolist()
-        if isinstance(obj, dict):
-            return {k: _ser(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [_ser(v) for v in obj]
-        if isinstance(obj, float) and (math.isinf(obj) or math.isnan(obj)):
-            return str(obj)
+        if isinstance(obj, torch.Tensor): return obj.tolist()
+        if isinstance(obj, dict): return {k: _ser(v) for k, v in obj.items()}
+        if isinstance(obj, list): return [_ser(v) for v in obj]
+        if isinstance(obj, float) and (math.isinf(obj) or math.isnan(obj)): return str(obj)
         return obj
-
     with open(out_path, "w") as f:
         json.dump(_ser(results), f, indent=2)
     logger.info(f"Results saved to {out_path}")
 
-    # --- Optional wandb ---
+    # --- wandb ---
     if cfg.wandb is not None:
         try:
             import wandb as wb
@@ -1020,24 +1121,19 @@ def run_diagnostics(cfg: DiagnosticsArgs):
             if loss_decomp:
                 flat["diag/global_delta_ell"] = ld["global_delta_ell"]
                 flat["diag/stem_ppl"] = ld["global_stem_ppl"]
-                flat["diag/base_ppl"] = ld["global_base_ppl"]
             if residual_analyzer:
-                for k, v in results["residual_norms"]["summary"].items():
-                    flat[f"diag/residual/{k}"] = v
+                for k, v in results["residual_norms"]["summary"].items(): flat[f"diag/residual/{k}"] = v
             if cka_analyzer:
-                for k, v in results["cka"]["summary"].items():
-                    flat[f"diag/cka/{k}"] = v
+                for k, v in results["cka"]["summary"].items(): flat[f"diag/cka/{k}"] = v
             if divergence_analyzer:
-                for k, v in results["hidden_divergence"]["summary"].items():
-                    flat[f"diag/divergence/{k}"] = v
+                for k, v in results["hidden_divergence"]["summary"].items(): flat[f"diag/divergence/{k}"] = v
             if rank_results:
-                for k, v in rank_results["summary"].items():
-                    flat[f"diag/rank/{k}"] = v
-            wb.log(flat)
-            wb.finish()
+                for k, v in rank_results["summary"].items(): flat[f"diag/rank/{k}"] = v
+            if ffn_analyzer and "summary" in results.get("ffn_internals", {}):
+                for k, v in results["ffn_internals"]["summary"].items(): flat[f"diag/ffn/{k}"] = v
+            wb.log(flat); wb.finish()
         except Exception as e:
-            logger.warning(f"wandb logging failed: {e}")
-
+            logger.warning(f"wandb failed: {e}")
     return results
 
 
