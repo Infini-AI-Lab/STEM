@@ -1,0 +1,111 @@
+dump_dir: logs/debug
+name: "stem_olmo3_1B_prefine_distill"
+model_type: olmo3
+steps: 200_000
+probe_freq: 100
+seed: 777
+
+optim:
+    lr: 3e-5
+    weight_decay: 0.1
+    warmup: 10000
+    lr_min_ratio: 0.1
+    clip: 1.0
+
+stem_lr: 1e-3
+stem_weight_decay: 1e-4
+stem_warmup: 5000
+
+# Distillation loss config (used by apps/main/stem_distill_train.py)
+ce_loss_weight: 1.0
+distill_loss_weight: 1.0
+distill_temperature: 1.0
+teacher_ckpt_path: checkpoints/olmo2-1b-stage1-token1T
+
+distributed:
+    fsdp_type: full_shard
+    compile: true
+    model_dtype: bf16
+    matmul_allow_tf32: false
+    selective_activation_checkpointing: false
+    tp_size: 1
+    stem_parallel_size: 2
+
+model:
+    dim: 2048
+    ffn_dim_multiplier: 1.5000915583
+    multiple_of: 256
+    n_layers: 16
+    n_heads: 16
+    n_kv_heads: 16
+    head_dim: 128
+    weight_tying: false
+    init_base_std: 0.02
+    init_std_factor: disabled
+    norm_eps: 1.0e-6
+    max_seqlen: 4096
+    vocab_size: 100352
+    rope_theta: 500000.0
+    rope_scaling: null
+    stem_layers: [1, 2, 3, 4]
+
+data:
+    root_dir: /dev/shm
+    sources:
+        dclm-baseline_shuffled: 1.0
+    batch_size: 4
+    prefetch_size: 1024
+    seq_len: 4096
+    n_views: 2
+    load_async: true
+    add_bos: true
+    add_eos: true
+    tokenizer:
+        name: huggingface
+        path: checkpoints/olmo2-1b-stage1-token1T
+
+profiling:
+    run: true
+
+checkpoint:
+    # Student initialization checkpoint (typically prepared by prepare_stem_checkpoint.py)
+    init_ckpt_path: checkpoints/olmo2-1b-stem-1T-init
+    dump:
+        every: 10000
+        keep: 1
+    eval:
+        every: 10000
+        keep: 1
+
+logging:
+    freq: 10
+    wandb:
+        project: "stem"
+        name: "stem-olmo3-distill-test"
+
+eval:
+    generator:
+        max_tokens: 8192
+        dtype: bf16
+        temperature: 1.0
+        top_p: 0.95
+    harness:
+        tasks:
+            - task: hellaswag
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/hellaswag
+            - task: boolq
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/super_glue
+            - task: piqa
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/piqa
+            - task: winogrande
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/winogrande
+            - task: openbookqa
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/openbookqa
+            - task: arc_easy
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/ai2_arc
+            - task: arc_challenge
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/ai2_arc
+            - task: race
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/race
+    validation:
+        max_steps: 1000

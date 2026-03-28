@@ -1,18 +1,20 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
 """
-Prepare STEM checkpoint by computing layerwise w3 × RMSNorm(tok_embeddings).
+Prepare STEM checkpoint by computing layerwise stem init from token embeddings.
 
 For each stem layer *i*, computes:
 
-    stem_embedding_table = RMSNorm_i(tok_embeddings.weight) @ w3_i.weight.T
+    stem_embedding_table = stem_input_i(tok_embeddings.weight) @ w3_i.weight.T
     shape: (vocab_size, hidden_dim)
 
-where ``RMSNorm_i`` uses the ``ffn_norm`` weights from layer *i*.
+where ``stem_input_i`` depends on model style:
+- LLaMA/Qwen style: ``RMSNorm_i`` using ``ffn_norm`` weights
+- OLMo style: identity (no pre-FFN norm)
 
 i.e., for every token *t*:
 
-    stem_emb[t] = w3_i.weight @ RMSNorm_i(tok_embeddings.weight[t])
+    stem_emb[t] = w3_i.weight @ stem_input_i(tok_embeddings.weight[t])
 
 This initialises STEM embeddings so that each token's embedding matches the
 original FFN up-projection output (after normalization), providing a
@@ -89,12 +91,14 @@ def compute_stem_embeddings(
     stem_layers: List[int],
     compressed_lookup: Optional[torch.Tensor] = None,
 ) -> Dict[int, torch.Tensor]:
-    """Compute ``RMSNorm(tok_embeddings.weight) @ w3.weight.T`` per stem layer.
+    """Compute stem embedding init ``stem_input(tok_emb) @ w3.weight.T``.
 
-    For each stem layer, the token embeddings are first passed through the
-    layer's ``ffn_norm`` (RMSNorm) before being projected by w3.  This matches
-    the runtime computation more closely since the FFN input is always
-    RMSNorm'd.
+    For each stem layer:
+    - if ``model.layers.<i>.ffn_norm.weight`` exists, apply RMSNorm first
+      (LLaMA/Qwen-style pre-FFN norm),
+    - else if ``model.layers.<i>.post_feedforward_norm.weight`` exists, use
+      identity input (OLMo-style post-FFN norm),
+    - else raise.
 
     If ``compressed_lookup`` is provided (shape: ``[vocab_size]``), each
     layer's full-vocab table is reduced to compressed-vocab rows by averaging
@@ -135,6 +139,7 @@ def compute_stem_embeddings(
     for stem_idx, layer_idx in enumerate(stem_layers):
         w3_key = f"model.layers.{layer_idx}.feed_forward.w3.weight"
         ffn_norm_key = f"model.layers.{layer_idx}.ffn_norm.weight"
+        post_ffn_norm_key = f"model.layers.{layer_idx}.post_feedforward_norm.weight"
 
         if w3_key not in state_dict:
             available_layers = sorted(
@@ -148,17 +153,22 @@ def compute_stem_embeddings(
                 f"Key '{w3_key}' not found in checkpoint. "
                 f"Layers with w3: {available_layers}"
             )
-        if ffn_norm_key not in state_dict:
+        w3_weight = state_dict[w3_key].float()  # (hidden_dim, dim)
+        hidden_dim = w3_weight.shape[0]
+        norm_source = "identity"
+        if ffn_norm_key in state_dict:
+            ffn_norm_weight = state_dict[ffn_norm_key].float()  # (dim,)
+            normed_tok_emb = rms_norm(tok_emb, ffn_norm_weight)
+            norm_source = "ffn_norm"
+        elif post_ffn_norm_key in state_dict:
+            # OLMo blocks use post-FFN RMSNorm; w3 input is not pre-normalized.
+            normed_tok_emb = tok_emb
+            norm_source = "post_feedforward_norm->identity_input"
+        else:
             raise KeyError(
-                f"Key '{ffn_norm_key}' not found in checkpoint. "
+                f"Neither '{ffn_norm_key}' nor '{post_ffn_norm_key}' found in checkpoint. "
                 f"Available keys (first 10): {list(state_dict.keys())[:10]}"
             )
-
-        w3_weight = state_dict[w3_key].float()  # (hidden_dim, dim)
-        ffn_norm_weight = state_dict[ffn_norm_key].float()  # (dim,)
-        hidden_dim = w3_weight.shape[0]
-
-        normed_tok_emb = rms_norm(tok_emb, ffn_norm_weight)
         stem_weight = normed_tok_emb @ w3_weight.T  # (vocab_size, hidden_dim)
 
         if compressed_lookup is not None:
@@ -181,7 +191,7 @@ def compute_stem_embeddings(
 
         logger.info(
             f"  Layer {layer_idx:>2} (stem idx {stem_idx}): "
-            f"ffn_norm {tuple(ffn_norm_weight.shape)}, "
+            f"norm_source={norm_source}, "
             f"w3_weight {tuple(w3_weight.shape)}, "
             f" -> stem {tuple(stem_weight.shape)}, "
             f"norm={stem_weight.norm():.4f}, "

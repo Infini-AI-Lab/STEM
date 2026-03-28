@@ -525,7 +525,6 @@ def load_from_checkpoint(
         backbone_state_dict[model_key] = dcp_get_model_state_dict(model.lm_transformer)
         if model_key == "": 
             backbone_state_dict = backbone_state_dict.pop(model_key)
-            
     dcp.load(backbone_state_dict, checkpoint_id=str(ckpt_path))
 
     # 3) Load STEM shards (model params and optimizer states) for current STEM MP rank
