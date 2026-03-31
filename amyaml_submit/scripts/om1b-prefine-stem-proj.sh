@@ -55,7 +55,7 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_projection_warm
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T/ \
     logging.wandb.name=stem_projection_warmup_olmo2_1B \
     stem_layers=[1,2,3,4] \
-    steps=10000
+    steps=2500
 
 
 # confirm the directory exists
@@ -66,9 +66,9 @@ fi
 
 python3 -m apps.main.prepare_reparam_init_checkpoint  \
     --base-init-ckpt-path /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T   \
-    --warmup-ckpt-path /dev/shm/logs/stem_projection_warmup_olmo2_1B/checkpoints/0000010000  \
+    --warmup-ckpt-path /dev/shm/logs/stem_projection_warmup_olmo2_1B/checkpoints/0000002500  \
     --output-dir /dev/shm/olmo2-1b-reparam-init \
-    --stem-parallel-size 8 
+    --stem-parallel-size 2 
 
 echo "########################################################"
 echo "Training starting"
