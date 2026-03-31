@@ -27,6 +27,7 @@ from lingua.transformer import (
 from apps.main.qwen3 import Qwen3Attention
 from apps.main.olmo3 import OLMo3Attention
 from lingua.stem_iir import IIRMemory, IIRCache
+from lingua.stem_window import SlidingWindowMemory, SlidingWindowCache
 
 
 def _is_attention_module(module):
@@ -214,6 +215,14 @@ class PackedCausalTransformerGenerator:
                 module.iir_cache = IIRCache(
                     n_seqs, module.d_ff, torch.float32, self.device,
                 )
+            elif isinstance(module, SlidingWindowMemory) and n_seqs > 0:
+                module.window_cache = SlidingWindowCache(
+                    n_seqs,
+                    module.d_ff,
+                    module.window_size,
+                    torch.float32,
+                    self.device,
+                )
 
     @torch.compiler.disable
     def setup_prefilling(self, lengths: torch.Tensor):
@@ -253,6 +262,8 @@ class PackedCausalTransformerGenerator:
         for module in self.model.modules():
             if isinstance(module, IIRMemory) and hasattr(module, "iir_cache"):
                 module.iir_cache.doc_lengths = lengths
+            elif isinstance(module, SlidingWindowMemory) and hasattr(module, "window_cache"):
+                module.window_cache.doc_lengths = lengths
 
         # The prefilling mask looks like the following for
         # the two packed sequences ab and 123 : ab123
@@ -297,6 +308,10 @@ class PackedCausalTransformerGenerator:
                 module.kv_cache.offset = self.padded_doc_start
             elif isinstance(module, IIRMemory) and hasattr(module, "iir_cache"):
                 module.iir_cache.doc_lengths = torch.ones(
+                    n_seqs, dtype=torch.long, device=lengths.device,
+                )
+            elif isinstance(module, SlidingWindowMemory) and hasattr(module, "window_cache"):
+                module.window_cache.doc_lengths = torch.ones(
                     n_seqs, dtype=torch.long, device=lengths.device,
                 )
         # The token ids during generations correspond to the lengths of each doc

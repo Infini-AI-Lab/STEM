@@ -35,14 +35,14 @@ harness:
     # - commonsense_qa
     # - coqa
     # - copa
-    # - task: gsm8k
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/gsm8k
+    - task: gsm8k
+      dataset_path: /raid/user_data/rsadhukh/test_data/gsm8k
     # - bbh
     # - task: mmlu
     #   dataset_path: /raid/user_data/rsadhukh/test_data/mmlu
     # - mmlu_pro
-    - task: mbpp
-      dataset_path: /raid/user_data/rsadhukh/test_data/mbpp
+    # - task: mbpp
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/mbpp
   batch_size: 16
   limit: 128
   confirm_run_unsafe_code: true

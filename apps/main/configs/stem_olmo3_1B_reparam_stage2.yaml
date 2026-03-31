@@ -20,7 +20,6 @@ stem_lr: 1e-3
 stem_weight_decay: 1e-4
 stem_warmup: 5000
 stem_lr_min_ratio: 0.01
-stem_clip: 1.0
 
 optim:
     lr: 3e-5

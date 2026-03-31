@@ -109,7 +109,6 @@ class LMTransformer(BaseTransformer):
             if mask is not None
             else create_causal_mask(seqlen, attn_impl, self.sliding_window)
         )
-
         h = super().forward(h, tok_idx=tok_idx, mask=mask, attn_impl=attn_impl)
 
         logits = self.output(self.norm(h))

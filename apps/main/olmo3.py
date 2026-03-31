@@ -263,6 +263,7 @@ class OLMo3TransformerBlock(nn.Module):
                 attn_impl=attn_impl,
             )
         )
+        import pdb; pdb.set_trace()
         # OLMo3 post-norm: ffn(h) -> norm -> residual add
         out = h + self.post_feedforward_norm(self.feed_forward(h))
         return out
