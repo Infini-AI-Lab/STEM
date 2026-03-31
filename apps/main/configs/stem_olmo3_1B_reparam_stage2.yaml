@@ -10,17 +10,22 @@ steps: 200_000
 #   - stem_shards/stem_model_mp*.pt (residual tables)
 
 # Projection branch (A) optimizer
-proj_lr: 5e-4
-proj_weight_decay: 0.01
+proj_lr: 1e-3
+proj_weight_decay: 0.05
 proj_warmup: 5000
-proj_lr_min_ratio: 0.1
+proj_lr_min_ratio: 0.01
 proj_clip: 1.0
 
-# Residual branch (R) optimizer
+stem_lr: 1e-3
+stem_weight_decay: 1e-4
+stem_warmup: 5000
+stem_lr_min_ratio: 0.01
+stem_clip: 1.0
+
 optim:
-    lr: 1e-3
-    weight_decay: 1e-4
-    warmup: 5000
+    lr: 3e-5
+    weight_decay: 0.1
+    warmup: 10000
     lr_min_ratio: 0.1
     clip: 1.0
 
@@ -31,7 +36,7 @@ distributed:
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
     tp_size: 1
-    stem_parallel_size: 2
+    stem_parallel_size: 8
 
 model:
     dim: 2048
@@ -49,7 +54,7 @@ model:
     vocab_size: 100352
     rope_theta: 500000.0
     rope_scaling: null
-    stem_layers: [1, 2]
+    stem_layers: [1, 2, 3, 4]
 
 data:
     root_dir: /dev/shm
@@ -84,18 +89,28 @@ logging:
 
 eval:
     generator:
-        max_tokens: 8192
+        max_tokens: 16384
         dtype: bf16
         temperature: 1.0
         top_p: 0.95
     harness:
         tasks:
             - task: hellaswag
-              dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/hellaswag
+            - task: boolq
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/super_glue
             - task: piqa
-              dataset_path: /raid/user_data/rsadhukh/test_data/piqa
-            - task: gsm8k
-              dataset_path: /raid/user_data/rsadhukh/test_data/gsm8k
-        limit: 100
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/piqa
+            - task: winogrande
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/winogrande
+            - task: openbookqa
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/openbookqa
+            - task: arc_easy
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/ai2_arc
+            - task: arc_challenge
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/ai2_arc
+            - task: race
+              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/race
+        batch_size: 32
     validation:
-        max_steps: 1000
+        max_steps: 8000

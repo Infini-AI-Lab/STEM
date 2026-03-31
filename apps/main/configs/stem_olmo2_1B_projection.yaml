@@ -14,7 +14,7 @@ model_type: olmo3
 steps: 10_000
 seed: 42
 
-stem_layers: [1, 2]
+stem_layers: [1, 2, 3, 4]
 
 collect_token_means: true
 token_stat_reduce_chunk_size: 4096
@@ -45,7 +45,7 @@ distributed:
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
     tp_size: 1
-    stem_parallel_size: 2
+    stem_parallel_size: 8
 
 model:
     dim: 2048
@@ -65,7 +65,7 @@ model:
     rope_scaling: null
 
 data:
-    root_dir: /raid/user_data/rsadhukh
+    root_dir: /dev/shm
     sources:
         dclm-baseline_shuffled: 1.0
     batch_size: 8
@@ -77,18 +77,18 @@ data:
     add_eos: true
     tokenizer:
         name: huggingface
-        path: /raid/user_data/rsadhukh/checkpoints/olmo2-1b-stage1-token1T
+        path: /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T
 
 profiling:
     run: false
 
 checkpoint:
-    init_ckpt_path: /raid/user_data/rsadhukh/checkpoints/olmo2-1b-stage1-token1T   # pretrained OLMo2 checkpoint
+    init_ckpt_path: /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T   # pretrained OLMo2 checkpoint
     dump:
-        every: 5000
+        every: 4000
         keep: 1
     eval:
-        every: 2500
+        every: 2000
         keep: 1
 
 logging:

@@ -26,11 +26,37 @@ NODE_RANK=${HOSTNAME##*-}
 echo "NODE_RANK: $NODE_RANK"
 echo "WANDB_MODE: $WANDB_MODE"
 
+
+python3 setup/aws_prepare_hf_dataset.py \
+    --local_dir /dev/shm/global-shard_01_of_10 \
+    --out_dir /dev/shm/dclm-baseline_shuffled \
+    --dataset dclm-baseline \
+    --num_nodes ${NNODES} \
+    --node_rank ${NODE_RANK} \
+    --nchunks 8 
+
+empty_chunks=$(find /dev/shm/dclm-baseline_shuffled -type f -name "*.chunk.*.jsonl" -empty)
+if [ -n "${empty_chunks}" ]; then
+    echo "ERROR: Found empty chunk files. Aborting before training."
+    echo "${empty_chunks}"
+    exit 1
+fi
+echo "Chunk validation passed: no empty chunk files found."
+
+rm -rf /dev/shm/global-shard_01_of_10
+
+echo "########################################################"
+echo "Projection warmup Training starting"
+echo "########################################################"
+
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_projection_warmup \
     config=apps/main/configs/stem_olmo2_1B_projection.yaml \
     dump_dir=/dev/shm/logs/stem_projection_warmup_olmo2_1B \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T/ \
-    logging.wandb.name=stem_projection_warmup_olmo2_1B 
+    logging.wandb.name=stem_projection_warmup_olmo2_1B \
+    stem_layers=[1,2,3,4] \
+    steps=10000
+
 
 # confirm the directory exists
 if [ ! -d "/dev/shm/logs/stem_projection_warmup_olmo2_1B" ]; then
@@ -38,43 +64,25 @@ if [ ! -d "/dev/shm/logs/stem_projection_warmup_olmo2_1B" ]; then
     exit 1
 fi
 
-# python3 -m apps.main.prepare_reparam_init_checkpoint  \
-#     --base-init-ckpt-path /raid/user_data/rsadhukh/checkpoints/olmo2-1b-stage1-token1T   \
-#     --warmup-ckpt-path /dev/shm/logs/stem_projection_warmup_olmo2_1B/checkpoints/0000000020   
+python3 -m apps.main.prepare_reparam_init_checkpoint  \
+    --base-init-ckpt-path /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T   \
+    --warmup-ckpt-path /dev/shm/logs/stem_projection_warmup_olmo2_1B/checkpoints/000000010000  \
+    --output-dir /dev/shm/olmo2-1b-reparam-init \
+    --stem-parallel-size 8 
 
-# python3 setup/aws_prepare_hf_dataset.py \
-#     --local_dir /dev/shm/global-shard_01_of_10 \
-#     --out_dir /dev/shm/dclm-baseline_shuffled \
-#     --dataset dclm-baseline \
-#     --num_nodes ${NNODES} \
-#     --node_rank ${NODE_RANK} \
-#     --nchunks 8 
+echo "########################################################"
+echo "Training starting"
+echo "########################################################"
 
-# empty_chunks=$(find /dev/shm/dclm-baseline_shuffled -type f -name "*.chunk.*.jsonl" -empty)
-# if [ -n "${empty_chunks}" ]; then
-#     echo "ERROR: Found empty chunk files. Aborting before training."
-#     echo "${empty_chunks}"
-#     exit 1
-# fi
-# echo "Chunk validation passed: no empty chunk files found."
-
-# rm -rf /dev/shm/global-shard_01_of_10
-
-# echo "########################################################"
-# echo "Training starting"
-# echo "########################################################"
-
-# torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
-#     config=apps/main/configs/stem_olmo2_1B_prefine.yaml \
-#     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
-#     checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-1T-stem-init \
-#     checkpoint.dump.every=100000 \
-#     checkpoint.dump.keep=2 \
-#     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T/ \
-#     logging.wandb.name=${experiment_name} \
-#     model.stem_layers=[1,2,3,4] \
-#     stem_lr=8e-4 \
-#     stem_weight_decay=0.01 \
-#     stem_warmup=5000 \
-#     stem_lr_min_ratio=0.01 \
-#     eval.validation.max_steps=8000
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_reparam_train \
+    config=apps/main/configs/stem_olmo3_1B_reparam_stage2.yaml \
+    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
+    checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-reparam-init \
+    checkpoint.dump.every=100000 \
+    checkpoint.dump.keep=2 \
+    data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T/ \
+    logging.wandb.name=${experiment_name} \
+    eval.validation.max_steps=8000 \
+    model.stem_layers=[1,2,3,4] \
+    stem_lr=8e-4 \
+    proj_lr=8e-4 
