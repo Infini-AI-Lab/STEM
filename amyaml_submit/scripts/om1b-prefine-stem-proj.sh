@@ -66,7 +66,7 @@ fi
 
 python3 -m apps.main.prepare_reparam_init_checkpoint  \
     --base-init-ckpt-path /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T   \
-    --warmup-ckpt-path /dev/shm/logs/stem_projection_warmup_olmo2_1B/checkpoints/000000010000  \
+    --warmup-ckpt-path /dev/shm/logs/stem_projection_warmup_olmo2_1B/checkpoints/0000010000  \
     --output-dir /dev/shm/olmo2-1b-reparam-init \
     --stem-parallel-size 8 
 

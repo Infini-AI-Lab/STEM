@@ -113,6 +113,7 @@ spec:
                   ./aws/install &&
                   aws s3 sync s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dclm_baseline_1.0_1prct/dclm_baseline_1.0_1prct/ . --region us-east-2 &&
                   cd /code-fsx/beidchen-sandbox/STEM &&
+                  pip install transformers==5.1.0 &&
                   pip install tokenizers &&
                   bash amyaml_submit/scripts/om1b-prefine-stem.sh | tee "/code-fsx/beidchen-sandbox/beidchen-om1b-prefine-stem-023940.log"
               image: 767397878797.dkr.ecr.us-east-1.amazonaws.com/agif-mm-pt-base:stem.v1
