@@ -18,13 +18,20 @@ steps: 10_000
 seed: 42
 
 # Which layers get a projection (replaces w3 input with token embeddings)
-stem_layers: [2, 5, 8, 11, 14]
+stem_layers: [1,2,3,4]
 
 # Loss type: "mse" (layerwise distillation) or "nll" (end-to-end)
 loss_type: mse
 
 # Initialize projections from pretrained w3 weights (recommended)
 init_from_w3: true
+
+# Collect token-wise means mu_v^(l) for stage-2 reparameterization package.
+collect_token_means: true
+# Optional post-pass to further fit A^(l) directly to collected mu_v^(l).
+mean_fit_steps: 0
+mean_fit_batch_size: 4096
+mean_fit_lr: 5e-4
 
 # Optimizer / schedule for the projections
 proj_lr: 2e-3

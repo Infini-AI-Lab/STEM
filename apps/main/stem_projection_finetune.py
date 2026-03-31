@@ -11,7 +11,7 @@ space.  The same standard LMTransformer architecture from
 apps/main/transformer.py is used, but the up-projection (w3) at stem layers
 takes token embeddings as input instead of the layer's hidden state.
 
-Two loss modes are supported (set via ``loss_type``):
+Three loss modes are supported (set via ``loss_type``):
 
   nll  -- End-to-end NLL: hooks replace w3(hidden_state) with proj(tok_emb)
           at stem layers.  The full model forward runs with gradients flowing
@@ -20,11 +20,17 @@ Two loss modes are supported (set via ``loss_type``):
           the frozen layers) but trains with the actual language modelling
           objective.
 
-  mse  -- Layerwise distillation: MSE between original and modified FFN
+  mse  -- Layerwise down-proj distillation: MSE between original and modified FFN
           down-projection outputs:
           MSE(w2(SiLU(w1(x)) * proj(tok_emb)), w2(SiLU(w1(x)) * w3(x)))
           Cheaper (only backprops through the projection), but the objective
           is a proxy for the actual language modelling loss.
+
+  mse_up  -- Layerwise up-proj distillation: MSE between original FFN up-proj
+             output and projection output:
+             MSE(w3(x), proj(tok_emb))
+             This mode only needs to hook/store w3 outputs (plus token
+             embeddings), so it avoids collecting w1/w2 intermediates.
 
 After training, STEM embeddings can be derived by pre-computing:
   stem_emb[token_id] = projection(tok_embeddings.weight[token_id])
@@ -48,7 +54,7 @@ import logging
 import os
 import sys
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from timeit import default_timer as timer
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -175,18 +181,28 @@ class ProjectionFinetuneArgs:
     # Which transformer layers get a projection (replaces w3 input)
     stem_layers: List[int] = field(default_factory=lambda: [1, 3, 5, 7, 9, 11, 13, 15])
 
-    # Loss type: "nll" or "mse"
+    # Loss type: "nll", "mse", or "mse_up"
     #   nll: End-to-end NLL with projection replacing w3 output at stem layers.
     #        NOTE: this requires a full backward pass through the frozen model,
     #        so it is more memory- and compute-intensive than MSE mode.
-    #   mse: Layerwise MSE between original and modified FFN down-projection
-    #        outputs.  Only backprops through the projection modules.
+    #   mse: Layerwise MSE on FFN down-projection outputs
+    #        (w2(SiLU(w1) * proj(tok_emb)) vs w2(SiLU(w1) * w3)).
+    #   mse_up: Layerwise MSE on FFN up-projection outputs
+    #        (proj(tok_emb) vs w3). Only requires hooking w3.
     loss_type: str = "mse"
 
     # Whether to initialize projections from pretrained w3 weights.
     # If True, projections start identical to the original w3 weights, so the
     # model begins in a state close to the pretrained model.
     init_from_w3: bool = True
+    # Collect token-wise dense up-projection means μ_v^(l) for stage-2 reparam.
+    collect_token_means: bool = True
+    # Chunk size used while reducing token stats across ranks.
+    token_stat_reduce_chunk_size: int = 2048
+    # Optional post-pass: further fit projections A^(l) to collected μ_v^(l).
+    mean_fit_steps: int = 0
+    mean_fit_batch_size: int = 4096
+    mean_fit_lr: float = 5e-4
 
     # Optimizer settings for projections
     proj_lr: float = 1e-3
@@ -200,6 +216,10 @@ class ProjectionFinetuneArgs:
     proj_scheduler: str = "cosine"
     proj_warmup: int = 500
     proj_lr_min_ratio: float = 0.01
+    # Periodic projection-replaced eval (0 disables).
+    eval_max_steps: int = 0
+    # Use a different RNG stream for eval dataloader state.
+    eval_seed_offset: int = 1
 
     data: DataArgs = field(default_factory=DataArgs)
     model: LMTransformerArgs = field(default_factory=LMTransformerArgs)
@@ -238,6 +258,16 @@ class FinetuneTrainState(Stateful):
             self.scheduler.load_state_dict(state_dict["scheduler"])
 
 
+@dataclass
+class TokenMeanStats:
+    """
+    Running token-wise dense FFN up-projection statistics for stage-1 export.
+    """
+
+    token_counts: torch.Tensor
+    token_sums: Dict[int, torch.Tensor]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -252,6 +282,175 @@ def compute_ffn_hidden_dim(
         hidden_dim = int(ffn_dim_multiplier * hidden_dim)
     hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
     return hidden_dim
+
+
+def capture_token_embedding_weight(model: torch.nn.Module) -> torch.Tensor:
+    """
+    Capture full token embedding weight [vocab, dim] in an FSDP-safe way.
+    """
+    tok_emb_weight_cache: Dict[str, torch.Tensor] = {}
+
+    def _tok_emb_pre_hook(module, args):
+        weight = module.weight.detach()
+        if isinstance(weight, DTensor):
+            weight = weight.full_tensor()
+        tok_emb_weight_cache["weight"] = weight.clone()
+
+    hook = model.tok_embeddings.register_forward_pre_hook(_tok_emb_pre_hook)
+    device = torch.device("cuda", torch.cuda.current_device())
+    dummy_ids = torch.zeros(1, 32, dtype=torch.long, device=device)
+    with torch.no_grad():
+        model(dummy_ids)
+    hook.remove()
+    return tok_emb_weight_cache["weight"]
+
+
+def initialize_token_mean_stats(
+    vocab_size: int,
+    hidden_dim: int,
+    stem_layers: List[int],
+) -> TokenMeanStats:
+    token_counts = torch.zeros(vocab_size, dtype=torch.int64, device="cpu")
+    token_sums = {
+        layer_idx: torch.zeros(vocab_size, hidden_dim, dtype=torch.float32, device="cpu")
+        for layer_idx in stem_layers
+    }
+    return TokenMeanStats(token_counts=token_counts, token_sums=token_sums)
+
+
+def update_token_mean_stats(
+    stats: TokenMeanStats,
+    input_ids: torch.Tensor,
+    intermediates: Dict[int, Dict[str, torch.Tensor]],
+    stem_layers: List[int],
+):
+    """
+    Update running sums/counts from one batch:
+      sum[v] += w3(x)_pos for positions with token id v
+      count[v] += #positions with token id v
+    """
+    flat_tokens = input_ids.reshape(-1)
+    unique_tokens, inverse, counts = torch.unique(
+        flat_tokens, return_inverse=True, return_counts=True
+    )
+    unique_tokens_cpu = unique_tokens.to(device="cpu")
+    counts_cpu = counts.to(device="cpu", dtype=torch.int64)
+    stats.token_counts.index_add_(0, unique_tokens_cpu, counts_cpu)
+
+    for layer_idx in stem_layers:
+        w3_flat = intermediates[layer_idx]["w3"].reshape(-1, intermediates[layer_idx]["w3"].shape[-1]).float()
+        per_token_sum = torch.zeros(
+            unique_tokens.shape[0],
+            w3_flat.shape[-1],
+            dtype=torch.float32,
+            device=w3_flat.device,
+        )
+        per_token_sum.index_add_(0, inverse, w3_flat)
+        stats.token_sums[layer_idx].index_add_(
+            0,
+            unique_tokens_cpu,
+            per_token_sum.to(device="cpu"),
+        )
+
+
+def reduce_token_mean_stats_across_ranks(
+    stats: TokenMeanStats,
+    stem_layers: List[int],
+    chunk_size: int,
+):
+    if not torch.distributed.is_initialized() or torch.distributed.get_world_size() <= 1:
+        return
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    vocab_size = stats.token_counts.shape[0]
+
+    # Counts
+    for c_start in range(0, vocab_size, chunk_size):
+        c_end = min(c_start + chunk_size, vocab_size)
+        chunk = stats.token_counts[c_start:c_end].to(device=device)
+        torch.distributed.all_reduce(chunk, op=torch.distributed.ReduceOp.SUM)
+        stats.token_counts[c_start:c_end].copy_(chunk.cpu())
+
+    # Layer-wise sums
+    for layer_idx in stem_layers:
+        layer_sum = stats.token_sums[layer_idx]
+        for c_start in range(0, vocab_size, chunk_size):
+            c_end = min(c_start + chunk_size, vocab_size)
+            chunk = layer_sum[c_start:c_end].to(device=device)
+            torch.distributed.all_reduce(chunk, op=torch.distributed.ReduceOp.SUM)
+            layer_sum[c_start:c_end].copy_(chunk.cpu())
+
+
+def compute_token_means_from_stats(
+    stats: TokenMeanStats,
+    stem_layers: List[int],
+) -> Dict[int, torch.Tensor]:
+    means: Dict[int, torch.Tensor] = {}
+    denom = stats.token_counts.clamp_min(1).to(dtype=torch.float32).unsqueeze(-1)
+    for layer_idx in stem_layers:
+        means[layer_idx] = stats.token_sums[layer_idx] / denom
+    return means
+
+
+def fit_projections_to_token_means(
+    model: torch.nn.Module,
+    projections: torch.nn.ModuleList,
+    layer_to_proj_idx: Dict[int, int],
+    stem_layers: List[int],
+    token_means: Dict[int, torch.Tensor],
+    token_counts: torch.Tensor,
+    args: ProjectionFinetuneArgs,
+):
+    if args.mean_fit_steps <= 0:
+        return
+
+    observed = torch.nonzero(token_counts > 0, as_tuple=False).squeeze(-1)
+    if observed.numel() == 0:
+        logger.warning("No observed tokens in token mean stats; skipping mean-fit phase")
+        return
+
+    logger.info(
+        f"Running post-fit of projections to token means for {args.mean_fit_steps} steps "
+        f"on {observed.numel()} observed tokens"
+    )
+    tok_emb_weight = capture_token_embedding_weight(model).cpu()
+    fit_optimizer = AdamW(
+        projections.parameters(),
+        lr=args.mean_fit_lr,
+        betas=(args.proj_beta1, args.proj_beta2),
+        weight_decay=args.proj_weight_decay,
+        eps=args.proj_epsilon,
+        fused=False,
+    )
+    device = torch.device("cuda", torch.cuda.current_device())
+
+    for fit_step in range(args.mean_fit_steps):
+        sample_size = min(args.mean_fit_batch_size, observed.numel())
+        sampled = observed[torch.randint(0, observed.numel(), (sample_size,))]
+        emb = tok_emb_weight[sampled].to(device=device).float()
+
+        loss = torch.tensor(0.0, device=device)
+        for layer_idx in stem_layers:
+            proj_idx = layer_to_proj_idx[layer_idx]
+            target = token_means[layer_idx][sampled].to(device=device).float()
+            pred = projections[proj_idx](emb)
+            loss = loss + F.mse_loss(pred, target)
+        loss = loss / len(stem_layers)
+
+        fit_optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            [p for p in projections.parameters() if p.grad is not None],
+            max_norm=args.proj_clip,
+            foreach=False,
+        )
+        fit_optimizer.step()
+
+        if fit_step % 50 == 0 or fit_step + 1 == args.mean_fit_steps:
+            logger.info(
+                f"[mean-fit] step={fit_step + 1}/{args.mean_fit_steps} "
+                f"mse={loss.detach().item():.6f}"
+            )
 
 
 def capture_w3_weights(
@@ -374,6 +573,45 @@ def collect_intermediates_and_tok_emb(
     return intermediates, tok_emb, original_nll
 
 
+def collect_w3_and_tok_emb(
+    model: torch.nn.Module,
+    input_ids: torch.Tensor,
+    stem_layer_indices: List[int],
+    target: Optional[torch.Tensor] = None,
+) -> Tuple[Dict[int, Dict[str, torch.Tensor]], torch.Tensor, Optional[torch.Tensor]]:
+    """
+    Run frozen forward and capture only w3 outputs + token embeddings.
+    Used by ``loss_type == "mse_up"``.
+    """
+    intermediates: Dict[int, Dict[str, torch.Tensor]] = {idx: {} for idx in stem_layer_indices}
+    tok_emb_cache: Dict[str, torch.Tensor] = {}
+    hooks = []
+
+    def _tok_emb_hook(module, args, output):
+        tok_emb_cache["tok_emb"] = output.detach()
+
+    hooks.append(model.tok_embeddings.register_forward_hook(_tok_emb_hook))
+
+    def _w3_hook(layer_idx: int):
+        def hook_fn(module, inp, out):
+            intermediates[layer_idx]["w3"] = out.detach()
+        return hook_fn
+
+    for layer_idx in stem_layer_indices:
+        ffn = model.layers[layer_idx].feed_forward
+        hooks.append(ffn.w3.register_forward_hook(_w3_hook(layer_idx)))
+
+    with torch.no_grad():
+        output = model(input_ids, target=target)
+
+    for h in hooks:
+        h.remove()
+
+    original_nll = output.detach() if target is not None else None
+    tok_emb = tok_emb_cache["tok_emb"]
+    return intermediates, tok_emb, original_nll
+
+
 def compute_projection_nll(
     model: torch.nn.Module,
     input_ids: torch.Tensor,
@@ -427,6 +665,60 @@ def compute_projection_nll(
     return proj_nll.detach()
 
 
+def run_projection_eval(
+    model: torch.nn.Module,
+    projections: torch.nn.ModuleList,
+    layer_to_proj_idx: Dict[int, int],
+    stem_layers: List[int],
+    eval_loader,
+    eval_data_loader_state: PackTokensState,
+    eval_max_steps: int,
+) -> Tuple[Dict[str, float], PackTokensState]:
+    """
+    Evaluate projection-replaced validation loss on a small eval stream.
+    """
+    was_training = model.training
+    model.eval()
+
+    total_orig = 0.0
+    total_proj = 0.0
+    nsteps = 0
+
+    with torch.no_grad():
+        for _ in range(eval_max_steps):
+            batch, eval_data_loader_state = next(eval_loader)
+            batch = torch.tensor(batch, dtype=torch.long)
+            input_ids = batch[:, :, 0].cuda()
+            target = batch[:, :, 1].cuda()
+
+            original_nll = model(input_ids, target=target).detach()
+            proj_nll = compute_projection_nll(
+                model=model,
+                input_ids=input_ids,
+                target=target,
+                stem_layer_indices=stem_layers,
+                projections=projections,
+                layer_to_proj_idx=layer_to_proj_idx,
+            )
+            total_orig += float(original_nll.item())
+            total_proj += float(proj_nll.item())
+            nsteps += 1
+
+    if was_training:
+        model.train()
+
+    if nsteps == 0:
+        return {"eval/nll_original": 0.0, "eval/nll_projection": 0.0, "eval/nll_gap": 0.0}, eval_data_loader_state
+
+    mean_orig = total_orig / nsteps
+    mean_proj = total_proj / nsteps
+    return {
+        "eval/nll_original": mean_orig,
+        "eval/nll_projection": mean_proj,
+        "eval/nll_gap": mean_proj - mean_orig,
+    }, eval_data_loader_state
+
+
 def sync_projections_across_dp(projections: torch.nn.ModuleList):
     """Broadcast projection weights from rank 0 to all ranks."""
     if not torch.distributed.is_initialized():
@@ -459,25 +751,9 @@ def derive_and_save_stem_embeddings(
 
     The tables are sharded along hidden_dim per STEM MP rank.
     """
-    # Capture token embedding weight via a pre-forward hook (FSDP-safe)
-    tok_emb_weight_cache: Dict[str, torch.Tensor] = {}
-
-    def _tok_emb_pre_hook(module, args):
-        weight = module.weight.detach()
-        if isinstance(weight, DTensor):
-            weight = weight.full_tensor()
-        tok_emb_weight_cache["weight"] = weight.clone()
-
-    hook = model.tok_embeddings.register_forward_pre_hook(_tok_emb_pre_hook)
-
-    device = torch.device("cuda", torch.cuda.current_device())
-    dummy_ids = torch.zeros(1, 32, dtype=torch.long, device=device)
-    with torch.no_grad():
-        model(dummy_ids)
-    hook.remove()
-
-    tok_emb_weight = tok_emb_weight_cache["weight"]  # [vocab_size, dim]
+    tok_emb_weight = capture_token_embedding_weight(model)  # [vocab_size, dim]
     vocab_size = tok_emb_weight.shape[0]
+    device = torch.device("cuda", torch.cuda.current_device())
 
     mp_rank = get_stem_model_parallel_rank()
     mp_size = get_stem_model_parallel_world_size()
@@ -524,6 +800,38 @@ def derive_and_save_stem_embeddings(
     )
 
 
+def save_stage1_reparam_package(
+    projections: torch.nn.ModuleList,
+    args: ProjectionFinetuneArgs,
+    ckpt_dir: Path,
+    stem_layers: List[int],
+    token_stats: TokenMeanStats,
+):
+    token_means = compute_token_means_from_stats(token_stats, stem_layers)
+    package = {
+        "format_version": "stem_reparam_stage1_v1",
+        "model_type": args.model_type,
+        "stem_layers": stem_layers,
+        "vocab_size": args.model.vocab_size,
+        "model_dim": args.model.dim,
+        "hidden_dim": compute_ffn_hidden_dim(
+            args.model.dim, args.model.multiple_of, args.model.ffn_dim_multiplier
+        ),
+        "token_counts": token_stats.token_counts.clone().cpu(),
+        "token_means": {
+            str(layer_idx): token_means[layer_idx].to(dtype=torch.float16).cpu()
+            for layer_idx in stem_layers
+        },
+        "projection_state_dict": {
+            name: param.detach().cpu()
+            for name, param in projections.named_parameters()
+        },
+    }
+    out_path = ckpt_dir / "stage1_reparam.pt"
+    torch.save(package, out_path)
+    logger.info(f"Saved stage-1 reparam package to {out_path}")
+
+
 # ---------------------------------------------------------------------------
 # Checkpoint helpers
 # ---------------------------------------------------------------------------
@@ -535,11 +843,18 @@ def save_projection_checkpoint(
     args: ProjectionFinetuneArgs,
     ckpt_dir: Path,
     model: Optional[torch.nn.Module] = None,
+    token_stats: Optional[TokenMeanStats] = None,
 ):
     """Save projection weights, derived STEM embeddings, and training state."""
     import json
 
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    stem_layers = args.stem_layers
+    if token_stats is not None:
+        reduce_token_mean_stats_across_ranks(
+            token_stats, stem_layers, args.token_stat_reduce_chunk_size
+        )
 
     # Projections are replicated -- save from rank 0 only
     if torch.distributed.get_rank() == 0:
@@ -557,12 +872,32 @@ def save_projection_checkpoint(
             json.dump(train_state.state_dict(), f)
         logger.info(f"Saved train state to {ts_path}")
 
+        if token_stats is not None:
+            stats_path = ckpt_dir / "token_stats.pt"
+            torch.save(
+                {
+                    "token_counts": token_stats.token_counts.clone().cpu(),
+                    "token_sums": {
+                        str(layer_idx): token_stats.token_sums[layer_idx].clone().cpu()
+                        for layer_idx in stem_layers
+                    },
+                },
+                stats_path,
+            )
+            logger.info(f"Saved token mean stats to {stats_path}")
+            save_stage1_reparam_package(
+                projections=projections,
+                args=args,
+                ckpt_dir=ckpt_dir,
+                stem_layers=stem_layers,
+                token_stats=token_stats,
+            )
+
     # Derive and save STEM embedding tables in the shard format
     if model is not None:
         hidden_dim = compute_ffn_hidden_dim(
             args.model.dim, args.model.multiple_of, args.model.ffn_dim_multiplier
         )
-        stem_layers = args.stem_layers
         layer_to_proj_idx = {
             layer_idx: i for i, layer_idx in enumerate(stem_layers)
         }
@@ -759,8 +1094,8 @@ def train(args: ProjectionFinetuneArgs):
             assert hasattr(model.layers[idx].feed_forward, "w3"), (
                 f"Layer {idx} FeedForward has no w3 -- model type '{args.model_type}' may not be compatible"
             )
-        assert args.loss_type in ("nll", "mse"), (
-            f"Invalid loss_type: {args.loss_type!r}. Must be 'nll' or 'mse'"
+        assert args.loss_type in ("nll", "mse", "mse_up"), (
+            f"Invalid loss_type: {args.loss_type!r}. Must be 'nll', 'mse', or 'mse_up'"
         )
         assert args.distributed.tp_size == 1, (
             "Projection finetuning currently requires tp_size=1"
@@ -775,6 +1110,14 @@ def train(args: ProjectionFinetuneArgs):
         logger.info(
             f"Projection: dim={args.model.dim} -> hidden_dim={hidden_dim}"
         )
+        token_stats = None
+        if args.collect_token_means:
+            token_stats = initialize_token_mean_stats(
+                vocab_size=args.model.vocab_size,
+                hidden_dim=hidden_dim,
+                stem_layers=stem_layers,
+            )
+            logger.info("Enabled token mean collection for stage-1 reparameterization")
 
         # ---- Create trainable projections ----
         device = torch.device("cuda", torch.cuda.current_device())
@@ -889,6 +1232,26 @@ def train(args: ProjectionFinetuneArgs):
                 args.data, state=train_state.data_loader_state
             )
         )
+        eval_data_loader = None
+        eval_data_loader_state = None
+        if args.eval_max_steps > 0:
+            eval_data_args = replace(
+                args.data,
+                seed=args.data.seed + args.eval_seed_offset,
+                load_async=False,
+            )
+            eval_data_loader_state = init_dataloader_state_from_args(
+                eval_data_args, dp_rank, dp_degree
+            )
+            eval_data_loader = context_stack.enter_context(
+                build_dataloader_from_args(
+                    eval_data_args, state=eval_data_loader_state
+                )
+            )
+            logger.info(
+                f"Enabled periodic projection eval: eval_max_steps={args.eval_max_steps}, "
+                f"every={args.checkpoint.eval.every}"
+            )
         torch_profiler = context_stack.enter_context(
             maybe_run_profiler(args.dump_dir, model, args.profiling)
         )
@@ -936,6 +1299,8 @@ def train(args: ProjectionFinetuneArgs):
                         model, input_ids, stem_layers, target=target,
                     )
                 )
+                if token_stats is not None:
+                    update_token_mean_stats(token_stats, input_ids, intermediates, stem_layers)
 
                 # 2. Compute projection NLL (for logging, no grad)
                 proj_nll = compute_projection_nll(
@@ -977,6 +1342,38 @@ def train(args: ProjectionFinetuneArgs):
                 # Backward (only projections have requires_grad=True)
                 total_loss.backward()
 
+            elif args.loss_type == "mse_up":
+                # ===========================================================
+                # MSE_UP mode: layerwise up-projection distillation
+                # ===========================================================
+                intermediates, tok_emb, original_nll = collect_w3_and_tok_emb(
+                    model, input_ids, stem_layers, target=target
+                )
+                if token_stats is not None:
+                    update_token_mean_stats(token_stats, input_ids, intermediates, stem_layers)
+
+                proj_nll = compute_projection_nll(
+                    model, input_ids, target, stem_layers,
+                    projections, layer_to_proj_idx,
+                )
+
+                total_loss = torch.tensor(0.0, device="cuda")
+                per_layer_losses: Dict[int, float] = {}
+                for layer_idx in stem_layers:
+                    proj_idx = layer_to_proj_idx[layer_idx]
+                    proj_out = projections[proj_idx](tok_emb.float())
+                    tgt_up = intermediates[layer_idx]["w3"].float().detach()
+                    layer_loss = F.mse_loss(proj_out, tgt_up)
+                    total_loss = total_loss + layer_loss
+                    per_layer_losses[layer_idx] = layer_loss.detach().item()
+
+                total_loss = total_loss / len(stem_layers)
+                total_loss_for_log = total_loss.detach()
+
+                if args.grad_acc_steps > 1:
+                    total_loss = total_loss / args.grad_acc_steps
+                total_loss.backward()
+
             elif args.loss_type == "nll":
                 # ===========================================================
                 # NLL mode: end-to-end with projection replacing w3
@@ -984,6 +1381,11 @@ def train(args: ProjectionFinetuneArgs):
                 # 1. Compute original NLL (for logging, no grad)
                 with torch.no_grad():
                     original_nll = model(input_ids, target=target).detach()
+                if token_stats is not None:
+                    stats_intermediates, _, _ = collect_intermediates_and_tok_emb(
+                        model, input_ids, stem_layers, target=None
+                    )
+                    update_token_mean_stats(token_stats, input_ids, stats_intermediates, stem_layers)
 
                 # 2. Forward with projections replacing w3 (WITH gradients
                 #    flowing through the frozen model to the projections)
@@ -1159,26 +1561,65 @@ def train(args: ProjectionFinetuneArgs):
                 ckpt_dir = ckpt_base / f"{train_state.step:010d}"
                 save_projection_checkpoint(
                     projections, optimizer, train_state, args,
-                    ckpt_dir, model=model,
+                    ckpt_dir, model=model, token_stats=token_stats,
                 )
                 saved = True
+
+            if (
+                eval_data_loader is not None
+                and every_n_steps(train_state, args.checkpoint.eval.every, acc_step=0)
+            ):
+                eval_metrics, eval_data_loader_state = run_projection_eval(
+                    model=model,
+                    projections=projections,
+                    layer_to_proj_idx=layer_to_proj_idx,
+                    stem_layers=stem_layers,
+                    eval_loader=eval_data_loader,
+                    eval_data_loader_state=eval_data_loader_state,
+                    eval_max_steps=args.eval_max_steps,
+                )
+                eval_metrics = dist_mean_dict(eval_metrics)
+                eval_metrics["global_step"] = train_state.step
+                if get_is_master():
+                    metric_logger.log(eval_metrics)
+                logger.info(
+                    f"[eval] step={train_state.step} "
+                    f"nll_orig={eval_metrics['eval/nll_original']:.4f} "
+                    f"nll_proj={eval_metrics['eval/nll_projection']:.4f} "
+                    f"gap={eval_metrics['eval/nll_gap']:.4f}"
+                )
 
             if preemption_flag["flag"]:
                 if not saved:
                     ckpt_dir = ckpt_base / f"{train_state.step:010d}"
                     save_projection_checkpoint(
                         projections, optimizer, train_state, args,
-                        ckpt_dir, model=model,
+                        ckpt_dir, model=model, token_stats=token_stats,
                     )
                 requeue_slurm_job()
                 sys.exit(0)
+
+        if token_stats is not None and args.mean_fit_steps > 0:
+            reduce_token_mean_stats_across_ranks(
+                token_stats, stem_layers, args.token_stat_reduce_chunk_size
+            )
+            token_means = compute_token_means_from_stats(token_stats, stem_layers)
+            fit_projections_to_token_means(
+                model=model,
+                projections=projections,
+                layer_to_proj_idx=layer_to_proj_idx,
+                stem_layers=stem_layers,
+                token_means=token_means,
+                token_counts=token_stats.token_counts,
+                args=args,
+            )
 
         # ---- Final save ----
         if not saved:
             ckpt_dir = ckpt_base / f"{train_state.step:010d}"
             save_projection_checkpoint(
                 projections, optimizer, train_state, args,
-                ckpt_dir, model=model,
+                ckpt_dir, model=model, token_stats=token_stats,
             )
 
     gc.collect()

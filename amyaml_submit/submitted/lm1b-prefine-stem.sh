@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-dclm-stem-100B-3"
+experiment_name="lm1b-dclm-stem-100B-extended"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -25,12 +25,29 @@ NODE_RANK=${HOSTNAME##*-}
 echo "NODE_RANK: $NODE_RANK"
 echo "WANDB_MODE: $WANDB_MODE"
 
+S3_GLOBAL_SHARD_URI="s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dclm_baseline_1.0_4prct_raw/global-shard_01_of_10"
+LOCAL_S3_SHARD_NAME="local-shard_${NODE_RANK}_of_10"
+LOCAL_S3_SHARD_URI="${S3_GLOBAL_SHARD_URI}/${LOCAL_S3_SHARD_NAME}/"
+LOCAL_RAW_DIR="/dev/shm/${LOCAL_S3_SHARD_NAME}"
+LOCAL_PREPARED_DIR="/dev/shm/dclm-baseline_shuffled"
+
+if [ "${NODE_RANK}" -ge "${NNODES}" ]; then
+    echo "Error: NODE_RANK (${NODE_RANK}) must be < NNODES (${NNODES})"
+    exit 1
+fi
+
+echo "Syncing node-local shard from ${LOCAL_S3_SHARD_URI}"
+rm -rf "${LOCAL_RAW_DIR}" "${LOCAL_PREPARED_DIR}"
+cmd="aws s3 sync ${LOCAL_S3_SHARD_URI} ${LOCAL_RAW_DIR} --region us-east-2 --only-show-errors"
+echo "Running: ${cmd}"
+eval ${cmd}
+
 python3 setup/aws_prepare_hf_dataset.py \
-    --local_dir /dev/shm/global-shard_01_of_10 \
-    --out_dir /dev/shm/dclm-baseline_shuffled \
+    --local_dir "${LOCAL_RAW_DIR}" \
+    --out_dir "${LOCAL_PREPARED_DIR}" \
     --dataset dclm-baseline \
-    --num_nodes ${NNODES} \
-    --node_rank ${NODE_RANK} \
+    --num_nodes 1 \
+    --node_rank 0 \
     --nchunks 8 
 
 empty_chunks=$(find /dev/shm/dclm-baseline_shuffled -type f -name "*.chunk.*.jsonl" -empty)
@@ -41,7 +58,7 @@ if [ -n "${empty_chunks}" ]; then
 fi
 echo "Chunk validation passed: no empty chunk files found."
 
-rm -rf /dev/shm/global-shard_01_of_10
+rm -rf "${LOCAL_RAW_DIR}"
 
 python3 apps/main/prepare_stem_checkpoint.py \
     --ckpt-path /checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/distcp \
@@ -69,7 +86,10 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     model.stem_layers=[2,6,10,14] \
     logging.wandb.name=${experiment_name} \
     stem_lr=8e-4 \
-    stem_weight_decay=0.01 \
-    stem_warmup=5000 \
+    stem_weight_decay=1e-4 \
+    steps=800000 \
+    optim.warmup=20000 \
+    stem_warmup=10000 \
     stem_lr_min_ratio=0.01 \
+    data.node_local=true \
     eval.validation.max_steps=8000

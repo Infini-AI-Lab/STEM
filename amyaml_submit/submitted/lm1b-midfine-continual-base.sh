@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-midtrain-base-100B"
+experiment_name="lm1b-midtrain-base-100B-continual"
 stage1_name="lm1b-midtrain-base-100B-math"
 stage2_name="lm1b-midtrain-base-100B-code"
 stage3_name="lm1b-midtrain-base-100B-stem"
@@ -41,6 +41,7 @@ if [ ! -d "/dev/shm/Llama-1B-dclm-base" ]; then
     echo "Error: /dev/shm/Llama-1B-dclm-base directory does not exist"
     exit 1
 fi
+
 
 echo "########################################################"
 echo "Data preparation starting"
@@ -80,6 +81,17 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
     logging.wandb.name=${stage1_name} 
 
 echo "########################################################"
+echo "Post-math Evaluation starting"
+echo "########################################################"
+
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.eval \
+    config=apps/main/configs/continual_eval.yaml \
+    ckpt_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}/checkpoints/0000040000 \
+    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}-math \
+    wandb.project=stem \
+    wandb.name=lm1b-midtrain-base-100B-continual-math
+
+echo "########################################################"
 echo "Code training starting"
 echo "########################################################"
 
@@ -94,6 +106,17 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
     logging.wandb.name=${stage2_name} 
 
 echo "########################################################"
+echo "Post-code Evaluation starting"
+echo "########################################################"
+
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.eval \
+    config=apps/main/configs/continual_eval.yaml \
+    ckpt_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}/checkpoints/0000080000 \
+    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}-code \
+    wandb.project=stem \
+    wandb.name=lm1b-midtrain-base-100B-continual-code
+
+echo "########################################################"
 echo "Stem training starting"
 echo "########################################################"
 
@@ -106,3 +129,14 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/Llama-3.2-1B/original/tokenizer.model \
     stage_steps=70000 \
     logging.wandb.name=${stage3_name} 
+
+echo "########################################################"
+echo "Post-stem Evaluation starting"
+echo "########################################################"
+
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.eval \
+    config=apps/main/configs/continual_eval.yaml \
+    ckpt_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}/checkpoints/0000150000 \
+    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}-stem \
+    wandb.project=stem \
+    wandb.name=lm1b-midtrain-base-100B-continual-stem

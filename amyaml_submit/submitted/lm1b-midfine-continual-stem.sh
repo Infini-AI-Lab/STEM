@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="lm1b-midtrain-base-100B"
+experiment_name="lm1b-midtrain-stem-100B-continual"
 stage1_name="lm1b-midtrain-stem-100B-math"
 stage2_name="lm1b-midtrain-stem-100B-code"
 stage3_name="lm1b-midtrain-stem-100B-stem"
@@ -80,6 +80,13 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     model.stem_layers=[2,6,10,14] \
     logging.wandb.name=${stage1_name} 
 
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_eval \
+    config=apps/main/configs/continual_stem_eval.yaml \
+    ckpt_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}/checkpoints/0000040000 \
+    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}-math \
+    wandb.project=stem \
+    wandb.name=lm1b-midtrain-stem-100B-continual-math
+
 echo "########################################################"
 echo "Code training starting"
 echo "########################################################"
@@ -95,6 +102,13 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     model.stem_layers=[2,6,10,14] \
     logging.wandb.name=${stage2_name} 
 
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_eval \
+    config=apps/main/configs/continual_stem_eval.yaml \
+    ckpt_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}/checkpoints/0000080000 \
+    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}-code \
+    wandb.project=stem \
+    wandb.name=lm1b-midtrain-stem-100B-continual-code
+
 echo "########################################################"
 echo "Stem training starting"
 echo "########################################################"
@@ -109,3 +123,10 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     stage_steps=70000 \
     model.stem_layers=[2,6,10,14] \
     logging.wandb.name=${stage3_name} 
+
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_eval \
+    config=apps/main/configs/continual_stem_eval.yaml \
+    ckpt_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}/checkpoints/0000150000 \
+    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name}-stem \
+    wandb.project=stem \
+    wandb.name=lm1b-midtrain-stem-100B-continual-stem

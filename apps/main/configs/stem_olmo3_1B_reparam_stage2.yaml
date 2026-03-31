@@ -1,0 +1,101 @@
+dump_dir: logs/stem_reparam_stage2
+name: "stem_olmo3_1B_reparam_stage2"
+model_type: olmo3
+seed: 777
+steps: 200_000
+
+# checkpoint.init_ckpt_path must point to a prepared reparam init checkpoint
+# containing:
+#   - distcp model payload with embedded projections.{i}.weight
+#   - stem_shards/stem_model_mp*.pt (residual tables)
+
+# Projection branch (A) optimizer
+proj_lr: 5e-4
+proj_weight_decay: 0.01
+proj_warmup: 5000
+proj_lr_min_ratio: 0.1
+proj_clip: 1.0
+
+# Residual branch (R) optimizer
+optim:
+    lr: 1e-3
+    weight_decay: 1e-4
+    warmup: 5000
+    lr_min_ratio: 0.1
+    clip: 1.0
+
+distributed:
+    fsdp_type: full_shard
+    compile: false
+    model_dtype: bf16
+    matmul_allow_tf32: false
+    selective_activation_checkpointing: false
+    tp_size: 1
+    stem_parallel_size: 2
+
+model:
+    dim: 2048
+    ffn_dim_multiplier: 1.5000915583
+    multiple_of: 256
+    n_layers: 16
+    n_heads: 16
+    n_kv_heads: 16
+    head_dim: 128
+    weight_tying: false
+    init_base_std: 0.02
+    init_std_factor: disabled
+    norm_eps: 1.0e-6
+    max_seqlen: 4096
+    vocab_size: 100352
+    rope_theta: 500000.0
+    rope_scaling: null
+    stem_layers: [1, 2]
+
+data:
+    root_dir: /dev/shm
+    sources:
+        dclm-baseline_shuffled: 1.0
+    batch_size: 4
+    prefetch_size: 1024
+    seq_len: 4096
+    n_views: 2
+    load_async: true
+    add_bos: true
+    add_eos: true
+    tokenizer:
+        name: huggingface
+        path: checkpoints/olmo2-1b-stage1-token1T
+
+checkpoint:
+    # Prepared by apps/main/prepare_reparam_init_checkpoint.py
+    init_ckpt_path: checkpoints/olmo2-1b-reparam-init
+    dump:
+        every: 10000
+        keep: 1
+    eval:
+        every: 10000
+        keep: 1
+
+logging:
+    freq: 10
+    wandb:
+        project: "stem"
+        name: "stem-olmo3-reparam-stage2"
+
+eval:
+    generator:
+        max_tokens: 8192
+        dtype: bf16
+        temperature: 1.0
+        top_p: 0.95
+    harness:
+        tasks:
+            - task: hellaswag
+              dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
+            - task: piqa
+              dataset_path: /raid/user_data/rsadhukh/test_data/piqa
+            - task: gsm8k
+              dataset_path: /raid/user_data/rsadhukh/test_data/gsm8k
+        limit: 100
+    validation:
+        max_steps: 1000

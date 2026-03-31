@@ -1,6 +1,6 @@
 dump_dir: logs/debug
-name: "stem_olmo3_1B_prefine"
-model_type: olmo3
+name: "stem_olmo2_1B_compressed_prefine"
+model_type: "olmo3_compressed"
 steps: 200_000
 probe_freq: 100
 seed: 777
@@ -56,14 +56,13 @@ data:
     add_eos: true
     tokenizer:
         name: huggingface
-        path: checkpoints/olmo2-1b-stage1-token1T
+        path: /raid/user_data/rsadhukh/checkpoints/olmo2-1b-stage1-token1T
 
 profiling:
     run: true
 
 checkpoint:
-    # Student initialization checkpoint (typically prepared by prepare_stem_checkpoint.py)
-    init_ckpt_path: checkpoints/olmo2-1b-stem-1T-init
+    init_ckpt_path: /raid/user_data/rsadhukh/checkpoints/olmo2-1b-stage1-token1T
     dump:
         every: 10000
         keep: 1
@@ -75,7 +74,7 @@ logging:
     freq: 10
     wandb:
         project: "stem"
-        name: "stem-olmo3-warmup"
+        name: "stem-olmo2-compressed-prefine-test"
 
 eval:
     generator:

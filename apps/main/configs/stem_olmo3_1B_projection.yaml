@@ -1,0 +1,102 @@
+# Stage-1 projection training for OLMo3 1B:
+# collect token-wise dense FFN means, train shared A^(l), and export stage-1 package.
+#
+# Usage:
+#   torchrun --nproc-per-node=2 --rdzv-endpoint=localhost:47780 \
+#       -m apps.main.stem_projection_finetune \
+#       config=apps/main/configs/stem_olmo3_1B_projection.yaml
+
+dump_dir: logs/stem_olmo3_1B_projection
+name: "stem_projection_olmo3_1B_stage1"
+model_type: olmo3
+steps: 20_000
+seed: 777
+
+# STEM layers to convert in stage-1
+stem_layers: [1, 2, 3, 4]
+
+# Distillation objective during main training loop
+loss_type: mse
+init_from_w3: true
+
+# Collect token-wise means mu_v^(l) for stage-2 reparameterization package
+collect_token_means: true
+token_stat_reduce_chunk_size: 2048
+
+# Post-pass directly fitting A^(l) to mu_v^(l)
+mean_fit_steps: 2000
+mean_fit_batch_size: 4096
+mean_fit_lr: 5e-4
+
+# Projection optimizer
+proj_lr: 2e-3
+proj_weight_decay: 0.05
+proj_beta1: 0.9
+proj_beta2: 0.95
+proj_epsilon: 1e-8
+proj_clip: 1.0
+proj_scheduler: cosine
+proj_warmup: 500
+proj_lr_min_ratio: 0.01
+
+grad_acc_steps: 1
+
+distributed:
+    fsdp_type: full_shard
+    compile: false
+    model_dtype: bf16
+    matmul_allow_tf32: false
+    selective_activation_checkpointing: false
+    tp_size: 1
+    stem_parallel_size: 2
+
+model:
+    dim: 2048
+    ffn_dim_multiplier: 1.5000915583
+    multiple_of: 256
+    n_layers: 16
+    n_heads: 16
+    n_kv_heads: 16
+    head_dim: 128
+    weight_tying: false
+    init_base_std: 0.02
+    init_std_factor: disabled
+    norm_eps: 1.0e-6
+    max_seqlen: 4096
+    vocab_size: 100352
+    rope_theta: 500000.0
+    rope_scaling: null
+
+data:
+    root_dir: /raid/user_data/rsadhukh
+    sources:
+        dclm-baseline_shuffled: 1.0
+    batch_size: 2
+    prefetch_size: 1024
+    seq_len: 4096
+    n_views: 2
+    load_async: true
+    add_bos: true
+    add_eos: true
+    tokenizer:
+        name: huggingface
+        path: checkpoints/olmo2-1b-stage1-token1T
+
+profiling:
+    run: false
+
+checkpoint:
+    # Dense pretrained OLMo checkpoint
+    init_ckpt_path: checkpoints/olmo2-1b-stage1-token1T
+    dump:
+        every: 5000
+        keep: 2
+    eval:
+        every: 20000
+        keep: 1
+
+logging:
+    freq: 10
+    wandb:
+        project: "stem"
+        name: "stem-projection-olmo3-1b-stage1"
