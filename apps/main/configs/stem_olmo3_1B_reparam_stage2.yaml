@@ -35,7 +35,7 @@ distributed:
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
     tp_size: 1
-    stem_parallel_size: 8
+    stem_parallel_size: 2
 
 model:
     dim: 2048

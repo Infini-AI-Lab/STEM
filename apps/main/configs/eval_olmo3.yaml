@@ -1,9 +1,9 @@
 name: "qwen3_evals"
-ckpt_dir: checkpoints/Qwen3-1.7B-Base-lingua/
-dump_dir: logs/qwen3_evals
-model_type: qwen3
+ckpt_dir: /raid/user_data/rsadhukh/checkpoints/olmo2-1b-stage1-token1T
+dump_dir: logs/olmo3_evals
+model_type: olmo3
 generator:
-  max_tokens: 4096
+  max_tokens: 16384
   dtype: bf16
   temperature: 0.0
   top_p: 0.95
@@ -11,26 +11,26 @@ generator:
 
 harness:
   tasks:
-    # - task: hellaswag
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
-    # - task: boolq
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/super_glue
-    # - task: piqa
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/piqa
-    # - task: winogrande
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/winogrande
-    # - task: openbookqa
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/openbookqa
-    # - task: arc_easy
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
-    # - task: arc_challenge
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
-    # - task: race
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/race
-    - task: gsm8k
-      dataset_path: /raid/user_data/rsadhukh/test_data/gsm8k
-    - task: mmlu
-      dataset_path: /raid/user_data/rsadhukh/test_data/mmlu
-  batch_size: 16
+    - task: hellaswag
+      dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
+    - task: boolq
+      dataset_path: /raid/user_data/rsadhukh/test_data/super_glue
+    - task: piqa
+      dataset_path: /raid/user_data/rsadhukh/test_data/piqa
+    - task: winogrande
+      dataset_path: /raid/user_data/rsadhukh/test_data/winogrande
+    - task: openbookqa
+      dataset_path: /raid/user_data/rsadhukh/test_data/openbookqa
+    - task: arc_easy
+      dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
+    - task: arc_challenge
+      dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
+    - task: race
+      dataset_path: /raid/user_data/rsadhukh/test_data/race
+    # - task: gsm8k
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/gsm8k
+    # - task: mmlu
+    #   dataset_path: /raid/user_data/rsadhukh/test_data/mmlu
+  batch_size: 64
 validation: null
 
