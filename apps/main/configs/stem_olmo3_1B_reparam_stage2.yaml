@@ -59,6 +59,7 @@ data:
     root_dir: /dev/shm
     sources:
         dclm-baseline_shuffled: 1.0
+    node_local: true
     batch_size: 4
     prefetch_size: 1024
     seq_len: 4096
@@ -112,4 +113,4 @@ eval:
               dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/race
         batch_size: 32
     validation:
-        max_steps: 8000
+        max_steps: 2000
