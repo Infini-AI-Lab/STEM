@@ -659,9 +659,24 @@ def train(args: ProjectionWarmupArgs):
                 }
                 for layer_idx, ll in per_layer_losses.items():
                     to_sync[f"loss/mse_layer_{layer_idx}"] = ll
-                metrics.update(dist_mean_dict(to_sync))
+                synced_losses = dist_mean_dict(to_sync)
+                metrics.update(synced_losses)
                 if get_is_master():
                     metric_logger.log(metrics)
+                    log_msg = (
+                        f"step: {train_state.step}"
+                        f"  acc: {train_state.acc_step}"
+                        f"  mse: {synced_losses['loss/mse_up_total']:.4f}"
+                        f"  nll: {synced_losses['loss/nll_projection']:.4f}"
+                        f"  grad: {grad_norm:.2e}"
+                        f"  wps: {wps:.2e}"
+                        f"  iter: {curr_iter_time:>7}"
+                        f"  data: {data_load_time:>5}"
+                        f"  lr: {curr_lr:.2e}"
+                        f"  mem: {gpu_mem_stats.max_active_pct:.0f}%"
+                        f"  pow: {gpu_mem_stats.power_draw/1000:.1f} W"
+                    )
+                    logger.info(log_msg)
                 gpu_memory_monitor.reset_peak_stats()
                 nwords_since_last_log = 0
                 time_last_log = timer()

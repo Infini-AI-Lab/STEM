@@ -4,7 +4,7 @@ set -x
 
 project_name="stem"
 experiment_name="olmo2-1b-stem-proj-warmup-1_1"
-NNODES=4
+NNODES=1
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
 WANDB_DIR=/scratch/scratch/beidchen/projects/stem_wandb 
@@ -67,22 +67,22 @@ fi
 python3 -m apps.main.prepare_reparam_init_checkpoint  \
     --base-init-ckpt-path /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T   \
     --warmup-ckpt-path /dev/shm/logs/stem_projection_warmup_olmo2_1B/checkpoints/0000005000  \
-    --output-dir /dev/shm/olmo2-1b-reparam-init \
+    --output-dir /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-reparam-init \
     --stem-parallel-size 2 
 
-echo "########################################################"
-echo "Training starting"
-echo "########################################################"
+# echo "########################################################"
+# echo "Training starting"
+# echo "########################################################"
 
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_reparam_train \
-    config=apps/main/configs/stem_olmo3_1B_reparam_stage2.yaml \
-    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
-    checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-reparam-init \
-    checkpoint.dump.every=100000 \
-    checkpoint.dump.keep=2 \
-    data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T/ \
-    logging.wandb.name=${experiment_name} \
-    eval.validation.max_steps=8000 \
-    model.stem_layers=[1,2,3,4] \
-    stem_lr=8e-4 \
-    proj_lr=8e-4 
+# torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_reparam_train \
+#     config=apps/main/configs/stem_olmo3_1B_reparam_stage2.yaml \
+#     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
+#     checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-reparam-init \
+#     checkpoint.dump.every=100000 \
+#     checkpoint.dump.keep=2 \
+#     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T/ \
+#     logging.wandb.name=${experiment_name} \
+#     eval.validation.max_steps=8000 \
+#     model.stem_layers=[1,2,3,4] \
+#     stem_lr=8e-4 \
+#     proj_lr=8e-4 

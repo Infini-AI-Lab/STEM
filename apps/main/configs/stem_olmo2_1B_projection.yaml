@@ -45,7 +45,7 @@ distributed:
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
     tp_size: 1
-    stem_parallel_size: 8
+    stem_parallel_size: 2
 
 model:
     dim: 2048
@@ -85,10 +85,10 @@ profiling:
 checkpoint:
     init_ckpt_path: /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T   # pretrained OLMo2 checkpoint
     dump:
-        every: 4000
+        every: 1000 
         keep: 1
     eval:
-        every: 2000
+        every: 1000
         keep: 1
 
 logging:
