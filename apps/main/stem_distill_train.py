@@ -10,6 +10,36 @@ from lingua.transformer import cross_entropy
 from apps.main import stem_train
 from apps.main import train as base_train
 
+# Chunk size along the sequence dimension when computing KL divergence.
+# Smaller values reduce peak GPU memory at the cost of slightly more kernel
+# launches. Tune based on vocab size: 128 works for V≥32K; increase for
+# smaller vocab or if memory is not the bottleneck.
+_KL_CHUNK_SIZE = 128
+
+
+def _chunked_kl_div(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    temp: float,
+) -> torch.Tensor:
+    """KL divergence computed in sequence-length chunks to cap peak memory.
+
+    Instead of materialising full [B, T, V] log-prob tensors twice, we iterate
+    over chunks of size _KL_CHUNK_SIZE along T and accumulate a scalar sum.
+    Peak extra allocation is 4 × [B, chunk, V] rather than 4 × [B, T, V].
+    """
+    B, T, _ = student_logits.shape
+    kl_sum = student_logits.new_zeros(())
+    for start in range(0, T, _KL_CHUNK_SIZE):
+        s_chunk = student_logits[:, start : start + _KL_CHUNK_SIZE, :]
+        t_chunk = teacher_logits[:, start : start + _KL_CHUNK_SIZE, :]
+        s_lp = F.log_softmax(s_chunk / temp, dim=-1)
+        t_lp = F.log_softmax(t_chunk.float() / temp, dim=-1)
+        kl_sum = kl_sum + F.kl_div(s_lp, t_lp, reduction="sum", log_target=True)
+    # Normalise to match the original batchmean-over-sequence convention and
+    # apply the temperature-squared scaling from the Hinton et al. recipe.
+    return kl_sum / (B * T) * (temp ** 2)
+
 
 @dataclass
 class DistillStemTrainArgs(stem_train.StemTrainArgs):
@@ -33,7 +63,6 @@ def build_distill_model_cls(
         _distill_temperature = distill_temperature
         _teacher_model_cls = teacher_model_cls
         _teacher_ckpt_path = teacher_ckpt_path
-        _compile_teacher = False
 
         def _get_teacher_model(self) -> torch.nn.Module:
             teacher_model = getattr(self, "_teacher_model", None)
@@ -55,14 +84,12 @@ def build_distill_model_cls(
             teacher_model.eval()
             for param in teacher_model.parameters():
                 param.requires_grad = False
-            if self._compile_teacher:
-                teacher_model.compile()
+            teacher_model = torch.compile(teacher_model)
 
             # Store as a non-registered attribute so it is not optimized/saved.
             object.__setattr__(self, "_teacher_model", teacher_model)
             return teacher_model
 
-        @torch.compiler.disable
         def compute_teacher_logits(
             self,
             token_values: torch.Tensor,
@@ -72,13 +99,17 @@ def build_distill_model_cls(
         ) -> torch.Tensor:
             teacher_model = self._get_teacher_model()
             with torch.no_grad():
-                return teacher_model(
-                    token_values=token_values,
-                    target=None,
-                    tok_idx=tok_idx,
-                    mask=mask,
-                    attn_impl=attn_impl,
-                )
+                # Cast to bf16 to halve memory bandwidth for the logit tensor;
+                # the chunked KL div upcasts teacher log-probs to float32
+                # internally so numerical precision is preserved.
+                with torch.autocast("cuda", dtype=torch.bfloat16):
+                    return teacher_model(
+                        token_values=token_values,
+                        target=None,
+                        tok_idx=tok_idx,
+                        mask=mask,
+                        attn_impl=attn_impl,
+                    )
 
         def forward(
             self,
@@ -110,18 +141,7 @@ def build_distill_model_cls(
                 )
 
             temp = self._distill_temperature
-            student_log_probs = F.log_softmax(student_logits / temp, dim=-1)
-            teacher_log_probs = F.log_softmax(teacher_logits / temp, dim=-1)
-
-            distill_loss = (
-                F.kl_div(
-                    student_log_probs,
-                    teacher_log_probs,
-                    reduction="batchmean",
-                    log_target=True,
-                ) / student_log_probs.size(1)
-                * (temp ** 2)
-            )
+            distill_loss = _chunked_kl_div(student_logits, teacher_logits, temp)
             total_loss = self._ce_loss_weight * ce_loss + self._distill_loss_weight * distill_loss
             # Keep logging comparable with other methods: forward value is CE,
             # but gradients come from the weighted distillation objective.
@@ -150,7 +170,6 @@ def patch_registry_for_distillation(args: DistillStemTrainArgs):
             distill_temperature=args.distill_temperature,
             teacher_ckpt_path=teacher_ckpt_path,
         )
-        distill_cls._compile_teacher = bool(args.distributed.compile)
         patched_registry[model_type] = (
             distill_cls,
             args_cls,
