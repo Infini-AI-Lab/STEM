@@ -121,6 +121,10 @@ class TrainArgs:
     # Model type: "llama", "qwen3", or "olmo3"
     model_type: str = "llama"
 
+    # Layer indices whose up-projection (w3) should remain randomly initialized
+    # after loading from init_ckpt_path (not overwritten by checkpoint weights).
+    stem_up_proj_layers: List[int] = field(default_factory=list)
+
     # Number of gradient accumulation steps
     # Total batch size is batch_size*grad_acc_steps
     grad_acc_steps: int = 1
@@ -418,7 +422,16 @@ def train(args: TrainArgs):
                 logger.info(f"Loading initial model from {args.checkpoint.init_ckpt_path}")
                 load_from_checkpoint(args.checkpoint.init_ckpt_path, model, model_key="model") # Put model_key="" if its directly the model checkpoint
             model.rope_embeddings.reset_parameters() # For RoPe initialization since it's a buffer it might not be loaded
-        
+            if args.stem_up_proj_layers:
+                logger.info(
+                    f"Re-initializing w3 (up-projection) for STEM layers after init checkpoint load: {args.stem_up_proj_layers}"
+                )
+                std = args.model.init_base_std or (args.model.dim ** -0.5)
+                with torch.no_grad():
+                    for layer_idx in args.stem_up_proj_layers:
+                        ff = model.layers[layer_idx].feed_forward
+                        torch.nn.init.trunc_normal_(ff.w3.weight, mean=0.0, std=std, a=-3 * std, b=3 * std)
+
         checkpoint.load(model, optimizer, train_state, world_mesh)
         stage_start_step = train_state.step
         if args.stage_steps is None:

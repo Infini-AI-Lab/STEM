@@ -63,15 +63,15 @@ rm -rf "${LOCAL_RAW_DIR}"
 
 python3 -m apps.main.prepare_stem_checkpoint \
     --ckpt-path /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token4T/ \
-    --output-dir /dev/shm/olmo2-1b-1T-stem-init \
+    --output-dir /dev/shm/olmo2-1b-4T-stem-init \
     --stem-layers 1 2 3 4 \
     --stem-parallel-size 2 \
     --tokenizer-name huggingface \
     --tokenizer-path /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token4T/
 
 # confirm the directory exists
-if [ ! -d "/dev/shm/olmo2-1b-1T-stem-init" ]; then
-    echo "Error: /dev/shm/olmo2-1b-1T-stem-init directory does not exist"
+if [ ! -d "/dev/shm/olmo2-1b-4T-stem-init" ]; then
+    echo "Error: /dev/shm/olmo2-1b-4T-stem-init directory does not exist"
     exit 1
 fi
 
@@ -82,7 +82,7 @@ echo "########################################################"
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     config=apps/main/configs/stem_olmo2_1B_prefine.yaml \
     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
-    checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-1T-stem-init \
+    checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-4T-stem-init \
     checkpoint.dump.every=100000 \
     checkpoint.dump.keep=2 \
     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token4T/ \
