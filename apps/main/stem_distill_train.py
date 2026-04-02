@@ -14,7 +14,7 @@ from apps.main import train as base_train
 # Smaller values reduce peak GPU memory at the cost of slightly more kernel
 # launches. Tune based on vocab size: 128 works for V≥32K; increase for
 # smaller vocab or if memory is not the bottleneck.
-_KL_CHUNK_SIZE = 128
+_KL_CHUNK_SIZE = 2048
 
 
 def _chunked_kl_div(
