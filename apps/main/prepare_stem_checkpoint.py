@@ -74,6 +74,10 @@ def load_consolidated_checkpoint(ckpt_path: str) -> Dict[str, torch.Tensor]:
     logger.info(f"Loading consolidated checkpoint from {consolidated_path}")
     state_dict = torch.load(consolidated_path, map_location="cpu", weights_only=False)
     logger.info(f"Loaded {len(state_dict)} keys from checkpoint")
+    if "model" in state_dict:
+        logger.info("Checkpoint has 'model' key; using state_dict['model']")
+        state_dict = state_dict["model"]
+        state_dict = {"model." + k: v for k, v in state_dict.items()}
     return state_dict
 
 
@@ -189,13 +193,16 @@ def compute_stem_embeddings(
         
         del state_dict[w3_key]
 
+        norms = stem_weight.norm(dim=-1)
+        mean_norm = norms.mean().item()
+        std_norm = norms.std().item()
         logger.info(
             f"  Layer {layer_idx:>2} (stem idx {stem_idx}): "
             f"norm_source={norm_source}, "
             f"w3_weight {tuple(w3_weight.shape)}, "
             f" -> stem {tuple(stem_weight.shape)}, "
             f"norm={stem_weight.norm():.4f}, "
-            f"mean={stem_weight.mean():.6f}, std={stem_weight.std():.6f}"
+            f"mean={mean_norm:.6f}, std={std_norm:.6f}"
         )
 
     return stem_weights
