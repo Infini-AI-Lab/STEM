@@ -143,9 +143,12 @@ def build_distill_model_cls(
             temp = self._distill_temperature
             distill_loss = _chunked_kl_div(student_logits, teacher_logits, temp)
             total_loss = self._ce_loss_weight * ce_loss + self._distill_loss_weight * distill_loss
-            # Keep logging comparable with other methods: forward value is CE,
-            # but gradients come from the weighted distillation objective.
-            return total_loss + (ce_loss - total_loss).detach()
+            # loss.item() is CE (for loss/out); backward follows total_loss.
+            loss_for_backward = total_loss + (ce_loss - total_loss).detach()
+            return stem_train.StemTrainLossOut(
+                loss=loss_for_backward,
+                distill_loss=distill_loss.detach(),
+            )
 
     DistillStemModel.__name__ = f"{base_model_cls.__name__}Distill"
     return DistillStemModel

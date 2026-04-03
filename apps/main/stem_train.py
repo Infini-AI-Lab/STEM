@@ -11,7 +11,7 @@ from contextlib import ExitStack
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 import numpy as np
@@ -100,6 +100,36 @@ def sync_stem_embeddings_across_dp(model):
 import wandb
 
 logger = logging.getLogger()
+
+
+@dataclass
+class StemTrainLossOut:
+    """Bundle for training: backward through ``loss``.
+
+    For distillation, ``loss`` is built so ``loss.item()`` is CE (for ``loss/out``
+    logging) while autograd follows the weighted CE+KL objective. Optional
+    ``distill_loss`` is the raw KL term for ``loss/distill`` metrics.
+    """
+
+    loss: torch.Tensor
+    distill_loss: Optional[torch.Tensor] = None
+
+
+def unpack_stem_train_loss_out(
+    out: Union[torch.Tensor, StemTrainLossOut],
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    if isinstance(out, StemTrainLossOut):
+        return out.loss, out.distill_loss
+    return out, None
+
+
+def _tensor_to_log_scalar(t: Optional[torch.Tensor]) -> Optional[float]:
+    if t is None:
+        return None
+    if isinstance(t, DTensor):
+        t = t.full_tensor()
+    return t.item()
+
 
 @dataclass
 class StemTrainArgs(TrainArgs):
@@ -503,10 +533,11 @@ def train(args: StemTrainArgs):
                     # So we divide bsz by 2 or seqlen by 2
                     probe_bsz = max(1, bsz // 2)
                     probe_seq = seqlen if (bsz // 2 >= 1) else (seqlen // 2)
-                    probe_loss = model(
+                    probe_raw = model(
                         input_ids[:probe_bsz, :probe_seq],
                         labels[:probe_bsz, :probe_seq],
                     )
+                    probe_loss, _ = unpack_stem_train_loss_out(probe_raw)
                     probe_loss.backward()
                     # We zero grads to cancel this fake step
                     optimizer["lm"].zero_grad()
@@ -527,9 +558,11 @@ def train(args: StemTrainArgs):
                 )
 
             if teacher_logits is None:
-                loss = model(input_ids, labels)
+                raw_loss_out = model(input_ids, labels)
             else:
-                loss = model(input_ids, labels, teacher_logits=teacher_logits)
+                raw_loss_out = model(input_ids, labels, teacher_logits=teacher_logits)
+
+            loss, log_distill_t = unpack_stem_train_loss_out(raw_loss_out)
 
             if args.grad_acc_steps > 1:
                 model.set_requires_gradient_sync(train_state.acc_step == 0)
@@ -676,6 +709,9 @@ def train(args: StemTrainArgs):
 
                 to_sync = {}
                 to_sync["loss/out"] = loss.item()
+                distill_aux = _tensor_to_log_scalar(log_distill_t)
+                if distill_aux is not None:
+                    to_sync["loss/distill"] = distill_aux
 
                 alpha_dict = {}
                 for layer_idx, layer in enumerate(model.lm_transformer.layers):
@@ -702,6 +738,8 @@ def train(args: StemTrainArgs):
                     f"  loss: {round(loss.item(),4):>7}"
                     f"  grad: {grad_norm:.2e}"
                 )
+                if distill_aux is not None:
+                    log_msg += f"  distill: {round(distill_aux, 4):>7}"
                 if stem_grad_norm >= 0:
                     log_msg += f"  stem_grad: {stem_grad_norm:.2e}"
                 log_msg += (
