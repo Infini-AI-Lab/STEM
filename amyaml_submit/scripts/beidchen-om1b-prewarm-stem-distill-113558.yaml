@@ -114,6 +114,7 @@ spec:
                   cd /code-fsx/beidchen-sandbox/STEM &&
                   pip install transformers==5.1.0 &&
                   pip install tokenizers &&
+                  pip install huggingface_hub[cli] &&
                   bash amyaml_submit/scripts/om1b-prewarm-stem-distill.sh | tee "/code-fsx/beidchen-sandbox/beidchen-om1b-prewarm-stem-distill-113558.log"
               image: 767397878797.dkr.ecr.us-east-1.amazonaws.com/agif-mm-pt-base:stem.v1
               imagePullPolicy: Always
