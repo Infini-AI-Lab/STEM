@@ -8,15 +8,16 @@
 # Usage:
 #   bash setup/download_eval_datasets.sh /raid/user_data/rsadhukh/test_data
 #
-# Each dataset is cloned from its HuggingFace repo (with LFS data), and any
-# legacy .py dataset scripts are removed (newer `datasets` versions reject
-# them with "Dataset scripts are no longer supported").
+# Each dataset is fetched with `hf download` (pip install 'huggingface_hub[cli]').
+# Legacy top-level .py dataset scripts are removed (newer
+# `datasets` versions reject them with "Dataset scripts are no longer supported").
 # ============================================================================
 
 set -euo pipefail
 
 ROOT_DIR="${1:?Usage: $0 <local_root_dir>}"
 mkdir -p "$ROOT_DIR"
+command -v hf >/dev/null || { echo "error: hf not found (pip install 'huggingface_hub[cli]')" >&2; exit 1; }
 
 # ── Mapping: local_dir_name  →  HuggingFace repo ID ──────────────────────
 #
@@ -43,9 +44,10 @@ declare -A DATASETS=(
     ["race"]="EleutherAI/race"
     ["gsm8k"]="openai/gsm8k"
     ["mmlu"]="cais/mmlu"
+    ["mbpp"]="google-research-datasets/mbpp"
 )
 
-clone_dataset() {
+download_dataset() {
     local name="$1"
     local repo="$2"
     local dest="$ROOT_DIR/$name"
@@ -55,8 +57,8 @@ clone_dataset() {
         return
     fi
 
-    echo "[CLONE] $name  ← https://huggingface.co/datasets/$repo"
-    GIT_LFS_SKIP_SMUDGE=0 git clone "https://huggingface.co/datasets/$repo" "$dest"
+    echo "[DOWNLOAD] $name  ← datasets/$repo"
+    hf download "$repo" --repo-type dataset --local-dir "$dest"
 
     # Remove legacy .py dataset scripts that cause:
     #   RuntimeError: Dataset scripts are no longer supported
@@ -74,7 +76,7 @@ echo "=== Downloading eval datasets to: $ROOT_DIR ==="
 echo ""
 
 for name in "${!DATASETS[@]}"; do
-    clone_dataset "$name" "${DATASETS[$name]}"
+    download_dataset "$name" "${DATASETS[$name]}"
     echo ""
 done
 
