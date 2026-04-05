@@ -7,6 +7,7 @@ wandb
 tokenizer
 data
 logs
+analysis
 **/__pycache__
 inference/checkpoints
 inference/tests/Data

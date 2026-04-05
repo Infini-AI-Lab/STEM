@@ -52,11 +52,6 @@ download_dataset() {
     local repo="$2"
     local dest="$ROOT_DIR/$name"
 
-    if [ -d "$dest" ]; then
-        echo "[SKIP]  $name  — already exists at $dest"
-        return
-    fi
-
     echo "[DOWNLOAD] $name  ← datasets/$repo"
     hf download "$repo" --repo-type dataset --local-dir "$dest"
 
