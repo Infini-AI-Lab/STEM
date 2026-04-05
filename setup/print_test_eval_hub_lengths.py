@@ -15,7 +15,7 @@ from pathlib import Path
 
 from datasets import load_dataset
 
-DEFAULT_ROOT = "/sharedscratch/rsadhukh/data/test_eval"
+DEFAULT_ROOT = "/data-fsx/beidchen-sandbox/data/eval_data"
 
 # (label, subdir under root, config or None, split)
 SINGLE = [
