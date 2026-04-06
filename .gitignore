@@ -12,6 +12,7 @@ analysis
 inference/checkpoints
 inference/tests/Data
 logs
+refs
 checkpoints
 tests
 run.sh
