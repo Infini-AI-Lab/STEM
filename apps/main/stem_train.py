@@ -591,6 +591,20 @@ def train(args: StemTrainArgs):
                         grad_norm.full_tensor() if isinstance(grad_norm, DTensor) else grad_norm
                     ).item()
                 
+                # Sync stem_embeddings gradients across STEM data-parallel ranks.
+                # FSDP handles gradient sync for lm_transformer, but stem_embeddings
+                # are managed manually and need an explicit all-reduce when there are
+                # multiple data-parallel groups (e.g. multi-node with intra-node STEM MP).
+                if get_stem_data_parallel_world_size() > 1:
+                    dp_group = get_stem_data_parallel_group()
+                    for param in model.stem_embeddings.parameters():
+                        if param.grad is not None:
+                            torch.distributed.all_reduce(
+                                param.grad,
+                                op=torch.distributed.ReduceOp.AVG,
+                                group=dp_group,
+                            )
+
                 # Clip gradients from stem_embeddings (regular Tensors, manually managed)
                 stem_params = [p for p in model.stem_embeddings.parameters() if p.grad is not None]
                 if stem_params:
@@ -614,20 +628,6 @@ def train(args: StemTrainArgs):
                             logger.warning(
                                 f"Warning: {len(zero_grads)}/{len(params_with_grad)} stem_embeddings parameters "
                                 f"have zero gradients."
-                            )
-
-                # Sync stem_embeddings gradients across STEM data-parallel ranks.
-                # FSDP handles gradient sync for lm_transformer, but stem_embeddings
-                # are managed manually and need an explicit all-reduce when there are
-                # multiple data-parallel groups (e.g. multi-node with intra-node STEM MP).
-                if get_stem_data_parallel_world_size() > 1:
-                    dp_group = get_stem_data_parallel_group()
-                    for param in model.stem_embeddings.parameters():
-                        if param.grad is not None:
-                            torch.distributed.all_reduce(
-                                param.grad,
-                                op=torch.distributed.ReduceOp.AVG,
-                                group=dp_group,
                             )
 
                 optimizer["lm"].step()

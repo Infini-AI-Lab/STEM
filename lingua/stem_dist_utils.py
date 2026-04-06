@@ -116,7 +116,8 @@ def _gather_along_first_dim_stem(x: torch.Tensor) -> torch.Tensor:
     Gather tensors along first dimension within Stem process group.
     Similar to _gather_along_first_dim in mp_utils.py but uses Stem process group.
     """
-    assert x.is_contiguous()
+    if not x.is_contiguous():
+        x = x.contiguous()
     stem_size = get_stem_model_parallel_world_size()
     if stem_size == 1:
         return x
@@ -141,7 +142,8 @@ def _split_along_first_dim_stem(x: torch.Tensor) -> torch.Tensor:
     Split tensor along first dimension and keep the slice for this Stem rank.
     Similar to _split_along_first_dim in mp_utils.py.
     """
-    assert x.is_contiguous()
+    if not x.is_contiguous():
+        x = x.contiguous()
     stem_size = get_stem_model_parallel_world_size()
     if stem_size == 1:
         return x
@@ -167,7 +169,8 @@ def _gather_along_last_dim_stem(x: torch.Tensor) -> torch.Tensor:
     Gather tensors along last dimension within Stem process group.
     Similar to _gather_along_last_dim in mp_utils.py.
     """
-    assert x.is_contiguous()
+    if not x.is_contiguous():
+        x = x.contiguous()
     stem_size = get_stem_model_parallel_world_size()
     if stem_size == 1:
         return x
@@ -191,7 +194,8 @@ def _split_along_last_dim_stem(x: torch.Tensor) -> torch.Tensor:
     Split tensor along last dimension and keep the slice for this Stem rank.
     Similar to _split_along_last_dim in mp_utils.py.
     """
-    assert x.is_contiguous()
+    if not x.is_contiguous():
+        x = x.contiguous()
     stem_size = get_stem_model_parallel_world_size()
     if stem_size == 1:
         return x
@@ -217,7 +221,8 @@ def _reduce_scatter_along_first_dim_stem(x: torch.Tensor) -> torch.Tensor:
     Reduce-scatter along first dimension within Stem process group.
     Similar to _reduce_scatter_along_first_dim in mp_utils.py.
     """
-    assert x.is_contiguous()    
+    if not x.is_contiguous():
+        x = x.contiguous()
     stem_size = get_stem_model_parallel_world_size()
     if stem_size == 1:
         return x
@@ -342,6 +347,22 @@ class _ScatterEmbeddingsFromStem(torch.autograd.Function):
         return _gather_along_first_dim_stem(grad_output)
 
 
+class _ReduceScatterEmbeddingsForStem(torch.autograd.Function):
+    """
+    Reduce-scatter embeddings across Stem ranks along batch dimension.
+    Forward: reduce-scatter along first dim
+    Backward: gather gradients along first dim
+    """
+
+    @staticmethod
+    def forward(ctx, embeddings: torch.Tensor) -> torch.Tensor:
+        return _reduce_scatter_along_first_dim_stem(embeddings)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
+        return _gather_along_first_dim_stem(grad_output)
+
+
 class _AllToAllForStem(torch.autograd.Function):
     @staticmethod
     def forward(ctx, embeddings: torch.Tensor) -> torch.Tensor:
@@ -393,6 +414,19 @@ def scatter_embeddings_for_stem(embeddings: torch.Tensor) -> torch.Tensor:
         local_embeddings: [batch_size_local, seq_len, hidden_dim]
     """
     return _ScatterEmbeddingsFromStem.apply(embeddings)
+
+
+def reduce_scatter_embeddings_for_stem(embeddings: torch.Tensor) -> torch.Tensor:
+    """
+    Reduce-scatter embeddings across Stem ranks along batch dimension.
+
+    Args:
+        embeddings: [batch_size_total, seq_len, hidden_dim]
+
+    Returns:
+        local_embeddings: [batch_size_local, seq_len, hidden_dim]
+    """
+    return _ReduceScatterEmbeddingsForStem.apply(embeddings)
 
 
 def _initialize_affine_weight(
@@ -540,6 +574,107 @@ class ParallelEmbedding(torch.nn.Module):
                 self.init_method(self.weight)
 
 
+class VocabParallelEmbedding(torch.nn.Module):
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        padding_idx: Optional[int] = None,
+        max_norm: Optional[float] = None,
+        norm_type: float = 2.0,
+        scale_grad_by_freq: bool = False,
+        sparse: bool = False,
+        init_method: Callable[
+            [torch.Tensor], torch.Tensor
+        ] = torch.nn.init.xavier_normal_,
+        keep_master_weight_for_test: bool = False,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        super(VocabParallelEmbedding, self).__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.padding_idx = padding_idx
+        self.max_norm = max_norm
+        self.norm_type = norm_type
+        self.scale_grad_by_freq = scale_grad_by_freq
+        self.sparse = sparse
+        self._weight = None
+
+        world_size = get_stem_model_parallel_world_size()
+        self.num_embeddings_per_partition = divide_and_check_no_remainder(
+            self.num_embeddings, world_size
+        )
+        rank = get_stem_model_parallel_rank()
+        self.vocab_start_index = rank * self.num_embeddings_per_partition
+        self.vocab_end_index = self.vocab_start_index + self.num_embeddings_per_partition
+
+        self.weight = Parameter(
+            torch.empty(self.num_embeddings_per_partition, self.embedding_dim, device=device)
+        )
+        self.init_method = init_method
+        self.keep_master_weight_for_test = keep_master_weight_for_test
+        self.master_weight = None
+        self.reset_parameters()
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        input_parallel = gather_tokens_for_stem(input_)
+
+        input_mask = (input_parallel < self.vocab_start_index) | (
+            input_parallel >= self.vocab_end_index
+        )
+        masked_input = input_parallel.clone() - self.vocab_start_index
+        masked_input[input_mask] = 0
+        local_padding_idx = None
+        if self.padding_idx is not None:
+            if self.vocab_start_index <= self.padding_idx < self.vocab_end_index:
+                local_padding_idx = self.padding_idx - self.vocab_start_index
+
+        output_parallel = F.embedding(
+            masked_input,
+            self.weight,
+            local_padding_idx,
+            self.max_norm,
+            self.norm_type,
+            self.scale_grad_by_freq,
+            self.sparse,
+        )
+        output_parallel = output_parallel.masked_fill(input_mask.unsqueeze(-1), 0.0)
+
+        return reduce_scatter_embeddings_for_stem(output_parallel)
+
+    def reset_parameters(self):
+        if self.weight.device.type == "meta":
+            return
+        if not self.weight.is_cuda and self.weight.device.type != "cpu":
+            return
+
+        try:
+            master_weight = _initialize_affine_weight(
+                self.weight,
+                self.num_embeddings,
+                self.embedding_dim,
+                self.num_embeddings_per_partition,
+                0,
+                self.init_method,
+                stride=1,
+                return_master_weight=self.keep_master_weight_for_test,
+            )
+            if self.keep_master_weight_for_test:
+                self.master_weight = master_weight
+            if self.weight.numel() > 0 and self.weight.abs().max() == 0:
+                logger.warning(
+                    "VocabParallelEmbedding initialization resulted in zeros, using fallback initialization"
+                )
+                with torch.no_grad():
+                    self.init_method(self.weight)
+        except Exception as e:
+            logger.warning(
+                f"VocabParallelEmbedding model parallel initialization failed: {e}, using fallback initialization"
+            )
+            with torch.no_grad():
+                self.init_method(self.weight)
+
+
 # ---------------------------------------------------------------------------
 # Verification / self-test
 # ---------------------------------------------------------------------------
@@ -631,7 +766,8 @@ def verify_parallel_embedding(
     )
 
     pemb(inp_same).sum().backward()
-    ref(inp_same).sum().backward()
+    inp_same_global = _gather_along_first_dim_stem(inp_same.contiguous())
+    ref(inp_same_global).sum().backward()
 
     shard_lo = rank * pemb.embedding_dim_per_partition
     shard_hi = shard_lo + pemb.embedding_dim_per_partition
@@ -720,6 +856,143 @@ def verify_parallel_embedding(
     return global_passed
 
 
+def verify_vocab_parallel_embedding(
+    num_embeddings: int = 1024,
+    embedding_dim: int = 128,
+    batch_size: int = 4,
+    seq_len: int = 16,
+    seed: int = 42,
+    atol: float = 1e-5,
+    rtol: float = 1e-5,
+) -> bool:
+    """Verify ``VocabParallelEmbedding`` against a vanilla ``nn.Embedding`` reference."""
+    rank = get_stem_model_parallel_rank()
+    world_size = get_stem_model_parallel_world_size()
+    device = torch.device(f"cuda:{torch.cuda.current_device()}")
+
+    if rank == 0:
+        logger.info(
+            f"=== verify_vocab_parallel_embedding  (world_size={world_size}) ==="
+        )
+
+    pemb = VocabParallelEmbedding(
+        num_embeddings,
+        embedding_dim,
+        device=device,
+        init_method=lambda w: torch.nn.init.normal_(w, mean=0.0, std=0.02),
+    )
+
+    full_weight = _gather_along_first_dim_stem(pemb.weight.data)
+    ref = torch.nn.Embedding(num_embeddings, embedding_dim, device=device)
+    with torch.no_grad():
+        ref.weight.copy_(full_weight)
+
+    checks: Dict[str, bool] = {}
+
+    pemb.train()
+    torch.manual_seed(seed + rank)
+    inp = torch.randint(0, num_embeddings, (batch_size, seq_len), device=device)
+
+    out_par = pemb(inp)
+    out_ref = ref(inp)
+
+    ok = torch.allclose(out_par, out_ref, atol=atol, rtol=rtol)
+    checks["train_forward"] = ok
+    if not ok:
+        logger.error(
+            f"  [FAIL] train_forward — rank {rank}, "
+            f"max |diff| = {(out_par - out_ref).abs().max().item():.2e}"
+        )
+
+    pemb.zero_grad()
+    ref.zero_grad()
+
+    torch.manual_seed(seed)
+    inp_same = torch.randint(
+        0, num_embeddings, (batch_size, seq_len), device=device
+    )
+
+    pemb(inp_same).sum().backward()
+    inp_same_global = _gather_along_first_dim_stem(inp_same.contiguous())
+    ref(inp_same_global).sum().backward()
+
+    shard_lo = rank * pemb.num_embeddings_per_partition
+    shard_hi = shard_lo + pemb.num_embeddings_per_partition
+    ref_grad_shard = ref.weight.grad[shard_lo:shard_hi, :]
+
+    if pemb.weight.grad is None:
+        checks["train_backward"] = False
+        logger.error(
+            f"  [FAIL] train_backward — rank {rank}, grad is None"
+        )
+    else:
+        ok = torch.allclose(
+            pemb.weight.grad, ref_grad_shard, atol=atol, rtol=rtol
+        )
+        checks["train_backward"] = ok
+        if not ok:
+            logger.error(
+                f"  [FAIL] train_backward — rank {rank}, "
+                f"max |diff| = "
+                f"{(pemb.weight.grad - ref_grad_shard).abs().max().item():.2e}"
+            )
+
+    pemb.eval()
+    torch.manual_seed(seed)
+    inp_eval_same = torch.randint(
+        0, num_embeddings, (batch_size, seq_len), device=device
+    )
+
+    out_par_eval = pemb(inp_eval_same)
+    out_ref_eval = ref(inp_eval_same)
+
+    ok = torch.allclose(out_par_eval, out_ref_eval, atol=atol, rtol=rtol)
+    checks["eval_forward_same_shape"] = ok
+    if not ok:
+        logger.error(
+            f"  [FAIL] eval_forward_same_shape — rank {rank}, "
+            f"max |diff| = {(out_par_eval - out_ref_eval).abs().max().item():.2e}"
+        )
+
+    torch.manual_seed(seed + 999)
+    inp_eval_same_all = torch.randint(
+        0, num_embeddings, (batch_size + 2, seq_len + 5), device=device
+    )
+
+    out_par_eval2 = pemb(inp_eval_same_all)
+    out_ref_eval2 = ref(inp_eval_same_all)
+
+    ok = torch.allclose(out_par_eval2, out_ref_eval2, atol=atol, rtol=rtol)
+    checks["eval_forward_same_input_all_ranks"] = ok
+    if not ok:
+        logger.error(
+            f"  [FAIL] eval_forward_same_input_all_ranks — rank {rank}, "
+            f"max |diff| = {(out_par_eval2 - out_ref_eval2).abs().max().item():.2e}"
+        )
+
+    all_local = all(checks.values())
+    passed_t = torch.tensor(
+        [int(all_local)], device=device, dtype=torch.long
+    )
+    if dist.is_initialized() and _MODEL_PARALLEL_GROUP is not None:
+        dist.all_reduce(
+            passed_t,
+            op=dist.ReduceOp.MIN,
+            group=get_stem_model_parallel_group(),
+        )
+    global_passed = passed_t.item() == 1
+
+    if rank == 0:
+        for name, ok in checks.items():
+            logger.info(f"  [{'PASS' if ok else 'FAIL'}] {name}")
+        summary = "ALL PASSED" if global_passed else "SOME FAILED"
+        (logger.info if global_passed else logger.error)(
+            f"=== {summary} ==="
+        )
+
+    return global_passed
+
+
 # ---------------------------------------------------------------------------
 # Standalone entry-point — run with:
 #   torchrun --nproc_per_node=<N> lingua/stem_dist_utils.py
@@ -740,7 +1013,8 @@ if __name__ == "__main__":
     world_size = dist.get_world_size()
     initialize_stem_process_group(world_size)
 
-    ok = verify_parallel_embedding()
+    # ok = verify_parallel_embedding()
+    ok = verify_vocab_parallel_embedding()
 
     dist.barrier()
     dist.destroy_process_group()
