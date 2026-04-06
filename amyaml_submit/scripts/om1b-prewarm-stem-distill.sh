@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="olmo2-1b-1T-stem-distill100B-teach1.1T"
+experiment_name="olmo2-1b-1.1T-stem-distill100B"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -64,14 +64,13 @@ rm -rf "${LOCAL_RAW_DIR}"
 hf download Rano23/olmo2-1b-1T-warmup100B --local-dir /dev/shm/olmo2-1b-1T-warmup100B --include "checkpoints/0000200000/*"
 hf download Rano23/olmo2-1b-stage1-token1T --local-dir /dev/shm/olmo2-1b-stage1-token1T 
 
-
 python3 -m apps.main.prepare_stem_checkpoint \
-    --ckpt-path /dev/shm/olmo2-1b-stage1-token1T \
+    --ckpt-path /dev/shm/olmo2-1b-1T-warmup100B/checkpoints/0000200000 \
     --output-dir /dev/shm/olmo2-1b-1T-stem-init \
     --stem-layers 1 2 3 4 \
     --stem-parallel-size 2 \
     --tokenizer-name huggingface \
-    --tokenizer-path /dev/shm/olmo2-1b-stage1-token1T
+    --tokenizer-path /dev/shm/olmo2-1b-stage1-token1T/
 
 # confirm the directory exists
 if [ ! -d "/dev/shm/olmo2-1b-1T-stem-init" ]; then
@@ -89,10 +88,11 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_distill_train \
     checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-1T-stem-init \
     checkpoint.dump.every=100000 \
     checkpoint.dump.keep=2 \
-    data.tokenizer.path=/dev/shm/olmo2-1b-stage1-token1T \
+    data.tokenizer.path=/dev/shm/olmo2-1b-stage1-token1T/ \
     logging.wandb.name=${experiment_name} \
     model.stem_layers=[1,2,3,4] \
     stem_lr=8e-4 \
+    stem_weight_decay=0.01 \
     stem_warmup=5000 \
     stem_lr_min_ratio=0.01 \
     ce_loss_weight=1.0 \
