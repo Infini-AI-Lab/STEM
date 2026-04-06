@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="olmo2-1b-1T-stem-distill100B"
+experiment_name="olmo2-1b-1T-stem-distill100B-0wd"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -92,7 +92,6 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_distill_train \
     logging.wandb.name=${experiment_name} \
     model.stem_layers=[1,2,3,4] \
     stem_lr=8e-4 \
-    stem_weight_decay=0.01 \
     stem_warmup=5000 \
     stem_lr_min_ratio=0.01 \
     ce_loss_weight=1.0 \
