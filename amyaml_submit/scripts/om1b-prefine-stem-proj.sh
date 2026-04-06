@@ -3,8 +3,8 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="olmo2-1b-1T-stem-distill100B"
-NNODES=4
+experiment_name="olmo2-1b-stem-proj-warmup250M"
+NNODES=1
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
 WANDB_DIR=/scratch/scratch/beidchen/projects/stem_wandb 
@@ -64,38 +64,47 @@ rm -rf "${LOCAL_RAW_DIR}"
 hf download Rano23/olmo2-1b-stage1-token1T --local-dir /dev/shm/olmo2-1b-stage1-token1T 
 
 
-python3 -m apps.main.prepare_stem_checkpoint \
-    --ckpt-path /dev/shm/olmo2-1b-stage1-token1T \
-    --output-dir /dev/shm/olmo2-1b-1T-stem-init \
-    --stem-layers 1 2 3 4 \
-    --stem-parallel-size 2 \
-    --tokenizer-name huggingface \
-    --tokenizer-path /dev/shm/olmo2-1b-stage1-token1T
+echo "########################################################"
+echo "Projection warmup Training starting"
+echo "########################################################"
+
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_projection_warmup \
+    config=apps/main/configs/stem_olmo2_1B_projection.yaml \
+    dump_dir=/dev/shm/logs/stem_projection_warmup_olmo2_1B \
+    checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-stage1-token1T \
+    data.tokenizer.path=/dev/shm/olmo2-1b-stage1-token1T/ \
+    logging.wandb.name=stem_projection_warmup_olmo2_1B \
+    stem_layers=[1,2,3,4] \
+    steps=10000
+
 
 # confirm the directory exists
-if [ ! -d "/dev/shm/olmo2-1b-1T-stem-init" ]; then
-    echo "Error: /dev/shm/olmo2-1b-1T-stem-init directory does not exist"
+if [ ! -d "/dev/shm/logs/stem_projection_warmup_olmo2_1B" ]; then
+    echo "Error: /dev/shm/logs/stem_projection_warmup_olmo2_1B directory does not exist"
     exit 1
 fi
 
-echo "########################################################"
-echo "Training starting"
-echo "########################################################"
+mkdir -p /data-fsx/beidchen-sandbox/data/checkpoints
 
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_distill_train \
-    config=apps/main/configs/stem_olmo2_1B_prefine_distill.yaml \
-    dump_dir=/data-fsx/beidchen-sandbox/data/logs/${experiment_name} \
-    checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-1T-stem-init \
-    checkpoint.dump.every=100000 \
-    checkpoint.dump.keep=2 \
-    data.tokenizer.path=/dev/shm/olmo2-1b-stage1-token1T \
-    logging.wandb.name=${experiment_name} \
-    model.stem_layers=[1,2,3,4] \
-    stem_lr=8e-4 \
-    stem_weight_decay=0.01 \
-    stem_warmup=5000 \
-    stem_lr_min_ratio=0.01 \
-    ce_loss_weight=1.0 \
-    distill_loss_weight=0.4 \
-    distill_temperature=2.0 \
-    teacher_ckpt_path=/dev/shm/olmo2-1b-stage1-token1T
+python3 -m apps.main.prepare_reparam_init_checkpoint  \
+    --base-init-ckpt-path /dev/shm/olmo2-1b-stage1-token1T   \
+    --warmup-ckpt-path /dev/shm/logs/stem_projection_warmup_olmo2_1B/checkpoints/0000010000  \
+    --output-dir /data-fsx/beidchen-sandbox/data/checkpoints/olmo2-1b-reparam-init \
+    --stem-parallel-size 2 
+
+# echo "########################################################"
+# echo "Training starting"
+# echo "########################################################"
+
+# torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_reparam_train \
+#     config=apps/main/configs/stem_olmo3_1B_reparam_stage2.yaml \
+#     dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
+#     checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-reparam-init \
+#     checkpoint.dump.every=100000 \
+#     checkpoint.dump.keep=2 \
+#     data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T/ \
+#     logging.wandb.name=${experiment_name} \
+#     eval.validation.max_steps=8000 \
+#     model.stem_layers=[1,2,3,4] \
+#     stem_lr=8e-4 \
+#     proj_lr=8e-4 
