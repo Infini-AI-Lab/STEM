@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from functools import partial
 import math
+from typing import Optional
 
 import logging
 from torch import nn
@@ -29,6 +30,12 @@ class OptimArgs:
     decay_fraction: float = 0.1
 
     exp_factor: float = 0.5
+
+    # Segment training: LR is computed as if the run were step `initial_token_offset`..`initial_token_offset + n_local_steps`
+    # along a trajectory that ends at `global_final_step` (schedule horizon). When `global_final_step` is None, the
+    # horizon is the local `n_steps` passed to `build_lr_fn` / `build_optimizer`.
+    initial_token_offset: int = 0
+    global_final_step: Optional[int] = None
 
 
 def lr_linear(step: int, warmup: int, n_steps: int, min_ratio: float) -> float:
@@ -109,11 +116,17 @@ def lr_wsd(
 
 
 def build_lr_fn(args: OptimArgs, n_steps: int):
+    schedule_n_steps = (
+        args.global_final_step if args.global_final_step is not None else n_steps
+    )
     if args.scheduler == "constant":
         lr_fn = lambda x: 1.0
     elif args.scheduler == "linear":
         lr_fn = partial(
-            lr_linear, warmup=args.warmup, n_steps=n_steps, min_ratio=args.lr_min_ratio
+            lr_linear,
+            warmup=args.warmup,
+            n_steps=schedule_n_steps,
+            min_ratio=args.lr_min_ratio,
         )
     elif args.scheduler == "inv_sqrt":
         lr_fn = partial(
@@ -126,7 +139,7 @@ def build_lr_fn(args: OptimArgs, n_steps: int):
         lr_fn = partial(
             lr_cosine,
             warmup=args.warmup,
-            n_steps=n_steps,
+            n_steps=schedule_n_steps,
             cycle_length=args.cycle_length,
             theta=args.cosine_theta,
             min_ratio=args.lr_min_ratio,
@@ -136,13 +149,19 @@ def build_lr_fn(args: OptimArgs, n_steps: int):
         lr_fn = partial(
             lr_wsd,
             warmup=args.warmup,
-            n_steps=n_steps,
+            n_steps=schedule_n_steps,
             decay_fraction=args.decay_fraction,
             cycle_length=args.cycle_length,
             min_ratio=args.lr_min_ratio,
         )
     else:
         raise NotImplementedError(f"Unknown scheduler: {args.scheduler}")
+
+    if args.scheduler != "constant" and args.initial_token_offset != 0:
+        base_fn = lr_fn
+        off = args.initial_token_offset
+        lr_fn = lambda step: base_fn(step + off)
+
     return lr_fn
 
 

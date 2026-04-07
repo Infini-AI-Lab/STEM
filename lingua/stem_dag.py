@@ -56,14 +56,15 @@ class STEMDagFeedForward(StemFeedForward):
     ):
         super().__init__(dim, hidden_dim, multiple_of, ffn_dim_multiplier, mp_size)
         self.w3 = nn.Linear(dim, self.hidden_dim, bias=False)
-        self.alpha_init = alpha_init
-        self.alpha = nn.Parameter(torch.tensor([alpha_init]))
+        # self.alpha_init = alpha_init
+        # self.alpha = nn.Parameter(torch.tensor([alpha_init]))
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         x1 = self.w1(x.view_as(x))
         x3 = self.w3(x.view_as(x))
-        sigmoid_alpha = torch.sigmoid(self.alpha)
-        up = (1.0 - sigmoid_alpha) * x3 + sigmoid_alpha * y
+        # sigmoid_alpha = torch.sigmoid(self.alpha)
+        # up = (1.0 - sigmoid_alpha) * x3 + sigmoid_alpha * y
+        up = x3 + y # ablation: remove gating and just sum the projection and stem signal
         output = self.w2(F.silu(x1) * up)
         return output
 
@@ -77,7 +78,7 @@ class STEMDagFeedForward(StemFeedForward):
             a=-3 * in_init_std,
             b=3 * in_init_std,
         )
-        self.alpha.data.fill_(self.alpha_init)
+        # self.alpha.data.fill_(self.alpha_init)
 
 
 # =========================================================================

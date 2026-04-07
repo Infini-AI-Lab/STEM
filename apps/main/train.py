@@ -431,7 +431,7 @@ def train(args: TrainArgs):
                     for layer_idx in args.stem_up_proj_layers:
                         ff = model.layers[layer_idx].feed_forward
                         torch.nn.init.trunc_normal_(ff.w3.weight, mean=0.0, std=std, a=-3 * std, b=3 * std)
-
+        
         checkpoint.load(model, optimizer, train_state, world_mesh)
         stage_start_step = train_state.step
         if args.stage_steps is None:

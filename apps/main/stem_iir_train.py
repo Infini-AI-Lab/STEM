@@ -250,7 +250,9 @@ def train(args: IIRStemTrainArgs):
                         f"device={param.device}, shape={param.shape}, "
                         f"norm={param_norm:.6f}, is_zero={is_zero}"
                     )
-                    if is_zero:
+                    if is_zero and not getattr(
+                        args.model, "stem_embeddings_zero_reset", False
+                    ):
                         logger.error(
                             f"ERROR: stem_embeddings[{i}].{param_name} is still all zeros after init_weights()!"
                         )
@@ -349,13 +351,21 @@ def train(args: IIRStemTrainArgs):
                     "skipping random reset"
                 )
             else:
-                logger.info(
-                    "No pre-computed stem embeddings in init checkpoint, "
-                    "initializing randomly"
-                )
-                with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
-                    torch.manual_seed(args.model.seed)
+                if getattr(args.model, "stem_embeddings_zero_reset", False):
+                    logger.info(
+                        "No pre-computed stem embeddings in init checkpoint, "
+                        "initializing stem embeddings to zeros "
+                        "(model.stem_embeddings_zero_reset=True)"
+                    )
                     model.reset_stem_embeddings()
+                else:
+                    logger.info(
+                        "No pre-computed stem embeddings in init checkpoint, "
+                        "re-initializing with ParallelEmbedding default (Xavier normal)"
+                    )
+                    with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+                        torch.manual_seed(args.model.seed)
+                        model.reset_stem_embeddings()
             sync_stem_params_across_dp(model)
         
         checkpoint.load(model, optimizer, train_state, world_mesh)

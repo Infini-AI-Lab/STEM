@@ -407,9 +407,10 @@ class StemLMTransformer(nn.Module):
         
     @torch.no_grad()
     def reset_stem_embeddings(self):
-        """Reset parameters of stem_embeddings."""
+        """Reset stem embedding weights (Xavier normal by default, or zeros if configured)."""
         import logging
         logger = logging.getLogger()
+        zero_reset = getattr(self.args, "stem_embeddings_zero_reset", False)
         for i, embedding in enumerate(self.stem_embeddings):
             # Verify device before resetting
             weight_device = embedding.weight.device
@@ -417,6 +418,13 @@ class StemLMTransformer(nn.Module):
                 logger.warning(
                     f"stem_embeddings[{i}].weight is still on meta device, skipping initialization"
                 )
+                continue
+            if zero_reset:
+                embedding.weight.zero_()
+                if embedding.weight.numel() > 0:
+                    logger.debug(
+                        f"stem_embeddings[{i}].weight zero-initialized, device={weight_device}"
+                    )
                 continue
             embedding.reset_parameters()
             # Verify initialization succeeded

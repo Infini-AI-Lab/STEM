@@ -1,0 +1,92 @@
+# Projection PC warmup for STEM embeddings (hook-free).
+#
+# Collects principal component statistics for token embeddings
+# to the STEM up-projection space using the OLMo3 architecture.
+#
+# Usage:
+#   torchrun --nproc_per_node=2 -m apps.main.stem_projection_pc_warmup_nohooks \
+#       config=apps/main/configs/stem_olmo2_1B_projection_pc_warmup.yaml
+
+dump_dir: logs/stem_projection_pc_warmup_olmo2_1B
+name: "stem_projection_pc_warmup_olmo2_1B"
+model_type: olmo3
+steps: 10_000
+seed: 42
+
+stem_layers: [1, 2, 3, 4]
+
+collect_dtype: "bf16"
+stats_dtype: "fp32"
+
+vocab_shard_size: 0
+vocab_shard_rank: -1
+
+token_stat_reduce_chunk_size: 4096
+min_count_for_pc_update: 32
+max_token_count_collect: 50000
+oja_eps: 1e-3
+
+save_mean_stats: true
+save_pc_stats: true
+save_as_stem_shards: true
+
+eval_max_steps: 0
+
+grad_acc_steps: 1
+
+distributed:
+    fsdp_type: full_shard
+    compile: false
+    model_dtype: bf16
+    matmul_allow_tf32: false
+    selective_activation_checkpointing: false
+    tp_size: 1
+    stem_parallel_size: 2
+
+model:
+    dim: 2048
+    ffn_dim_multiplier: 1.5000915583
+    multiple_of: 256
+    n_layers: 16
+    n_heads: 16
+    n_kv_heads: 16
+    head_dim: 128
+    weight_tying: false
+    init_base_std: 0.02
+    init_std_factor: disabled
+    norm_eps: 1.0e-6
+    max_seqlen: 4096
+    vocab_size: 100352
+    rope_theta: 500000.0
+    rope_scaling: null
+
+data:
+    root_dir: /dev/shm
+    sources:
+        dclm-baseline_shuffled: 1.0
+    node_local: true
+    batch_size: 8
+    prefetch_size: 1024
+    seq_len: 4096
+    n_views: 2
+    load_async: true
+    add_bos: true
+    add_eos: true
+    tokenizer:
+        name: huggingface
+        path: /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T
+
+profiling:
+    run: false
+
+checkpoint:
+    init_ckpt_path: /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T
+    dump:
+        every: 1000
+        keep: 1
+
+logging:
+    freq: 10
+    wandb:
+        project: "stem"
+        name: "stem-projection-pc-warmup-olmo2-1B"

@@ -83,7 +83,8 @@ def sync_stem_embeddings_across_dp(model):
       - FSDP-sharded lm_transformer init may consume different amounts of RNG
         on different ranks, causing the RNG state to diverge by the time
         stem_embeddings are initialized.
-      - reset_stem_embeddings() after checkpoint loading also uses RNG.
+      - reset_stem_embeddings() after checkpoint loading also uses RNG
+        (unless model.stem_embeddings_zero_reset is True).
 
     Must be called after any stem_embeddings initialization or reset.
     """
@@ -248,13 +249,6 @@ def train(args: StemTrainArgs):
                 )
             for param in embedding.parameters():
                 param.requires_grad = True
-                # Debug: Check if parameter is initialized (not all zeros)
-                if param.numel() > 0:
-                    is_zero = (param.abs().max() == 0).item()
-                    if is_zero:
-                        logger.warning(
-                            f"stem_embeddings[{i}] parameter {param.shape} is all zeros before init_weights()"
-                        )
         logger.info("Ensured stem_embeddings parameters require gradients")
 
         # Initialize model weights if not loading from init checkpoint
@@ -278,7 +272,9 @@ def train(args: StemTrainArgs):
                         f"device={param.device}, shape={param.shape}, "
                         f"norm={param_norm:.6f}, is_zero={is_zero}"
                     )
-                    if is_zero:
+                    if is_zero and not getattr(
+                        args.model, "stem_embeddings_zero_reset", False
+                    ):
                         logger.error(
                             f"ERROR: stem_embeddings[{i}].{param_name} is still all zeros after init_weights()!"
                         )
@@ -421,13 +417,21 @@ def train(args: StemTrainArgs):
                     "skipping random reset"
                 )
             else:
-                logger.info(
-                    "No pre-computed stem embeddings in init checkpoint, "
-                    "initializing randomly"
-                )
-                with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
-                    torch.manual_seed(args.model.seed)
+                if getattr(args.model, "stem_embeddings_zero_reset", False):
+                    logger.info(
+                        "No pre-computed stem embeddings in init checkpoint, "
+                        "initializing stem embeddings to zeros "
+                        "(model.stem_embeddings_zero_reset=True)"
+                    )
                     model.reset_stem_embeddings()
+                else:
+                    logger.info(
+                        "No pre-computed stem embeddings in init checkpoint, "
+                        "re-initializing with ParallelEmbedding default (Xavier normal)"
+                    )
+                    with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+                        torch.manual_seed(args.model.seed)
+                        model.reset_stem_embeddings()
             # Ensure stem_embeddings are identical across DP ranks
             sync_stem_embeddings_across_dp(model)
         

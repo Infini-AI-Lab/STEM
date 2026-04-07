@@ -173,12 +173,20 @@ class IIRStemLMTransformer(nn.Module):
         """Reset parameters of ``stem_embeddings`` (IIR params are kept)."""
         import logging
         logger = logging.getLogger()
+        zero_reset = getattr(self.args, "stem_embeddings_zero_reset", False)
         for i, embedding in enumerate(self.stem_embeddings):
             weight_device = embedding.weight.device
             if weight_device.type == "meta":
                 logger.warning(
                     f"stem_embeddings[{i}].weight on meta device, skipping init"
                 )
+                continue
+            if zero_reset:
+                embedding.weight.zero_()
+                if embedding.weight.numel() > 0:
+                    logger.debug(
+                        f"stem_embeddings[{i}].weight zero-initialized, device={weight_device}"
+                    )
                 continue
             embedding.reset_parameters()
             if embedding.weight.numel() > 0:
