@@ -98,5 +98,7 @@ eval:
               dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/ai2_arc
             - task: race
               dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/race
+            - task: mmlu
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/mmlu
     validation:
         max_steps: 1000

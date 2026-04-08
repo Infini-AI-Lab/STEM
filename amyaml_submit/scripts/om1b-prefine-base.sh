@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="olmo2-1b-base-1T-extend100B-2"
+experiment_name="olmo2-1b-base-4T-extend100B"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -61,7 +61,7 @@ echo "Chunk validation passed: no empty chunk files found."
 
 rm -rf "${LOCAL_RAW_DIR}"
 
-hf download Rano23/olmo2-1b-base-token1T --local-dir /dev/shm/olmo2-1b-base-token1T
+hf download Rano23/olmo2-1b-base-token4T --local-dir /dev/shm/olmo2-1b-base-token4T
 
 echo "########################################################"
 echo "Training starting"
@@ -70,9 +70,11 @@ echo "########################################################"
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.train \
     config=apps/main/configs/olmo2_1B_prefine.yaml \
     dump_dir=/data-fsx/beidchen-sandbox/data/logs/${experiment_name} \
-    checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-base-token1T/ \
+    checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-base-token4T/ \
     checkpoint.continue_training_from_init=true \
     checkpoint.dump.every=25000 \
     checkpoint.dump.keep=2 \
-    data.tokenizer.path=/dev/shm/olmo2-1b-base-token1T/ \
-    logging.wandb.name=${experiment_name} 
+    data.tokenizer.path=/dev/shm/olmo2-1b-base-token4T/ \
+    logging.wandb.name=${experiment_name} \
+    optim.initial_token_offset=1907359 \
+    optim.global_final_step=2384186
