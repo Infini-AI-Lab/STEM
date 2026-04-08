@@ -1,0 +1,22 @@
+name: stem_longcat_ngram_train
+dump_dir: /tmp/stem_longcat_ngram_train
+seed: 42
+steps: 2000
+batch_size: 4
+seq_len: 64
+grad_acc_steps: 1
+log_interval: 100
+checkpoint_interval: 1000
+
+model:
+  vocab_size: 256
+  hidden_size: 32
+  pad_token_id: 0
+  eos_token_id: 1
+  emb_neighbor_num: 3
+  emb_split_num: 2
+  ngram_vocab_size_ratio: 0.5
+
+optim:
+  lr: 0.0003
+  weight_decay: 0.01

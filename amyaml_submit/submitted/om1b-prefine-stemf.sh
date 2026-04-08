@@ -61,13 +61,15 @@ echo "Chunk validation passed: no empty chunk files found."
 
 rm -rf "${LOCAL_RAW_DIR}"
 
+hf download Rano23/olmo2-1b-stage1-token4T --local-dir /dev/shm/olmo2-1b-stage1-token4T 
+
 python3 -m apps.main.prepare_stem_checkpoint \
-    --ckpt-path /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token4T/ \
+    --ckpt-path /dev/shm/olmo2-1b-stage1-token4T/ \
     --output-dir /dev/shm/olmo2-1b-4T-stem-init \
     --stem-layers 1 2 3 4 \
     --stem-parallel-size 2 \
     --tokenizer-name huggingface \
-    --tokenizer-path /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token4T/
+    --tokenizer-path /dev/shm/olmo2-1b-stage1-token4T/
 
 # confirm the directory exists
 if [ ! -d "/dev/shm/olmo2-1b-4T-stem-init" ]; then
@@ -81,11 +83,11 @@ echo "########################################################"
 
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     config=apps/main/configs/stem_olmo2_1B_prefine.yaml \
-    dump_dir=/checkpoints-fsx/beidchen-sandbox/STEM/logs/${experiment_name} \
+    dump_dir=/data-fsx/beidchen-sandbox/data/logs/${experiment_name} \
     checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-4T-stem-init \
     checkpoint.dump.every=100000 \
     checkpoint.dump.keep=2 \
-    data.tokenizer.path=/checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token4T/ \
+    data.tokenizer.path=/dev/shm/olmo2-1b-stage1-token4T/ \
     logging.wandb.name=${experiment_name} \
     model.stem_layers=[1,2,3,4] \
     stem_lr=8e-4 \

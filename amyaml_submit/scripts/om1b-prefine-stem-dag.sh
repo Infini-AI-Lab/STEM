@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="olmo2-1b-1.1T-stem-distill100B"
+experiment_name="olmo2-1b-stem-dag-1T-extend100B"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -61,41 +61,20 @@ echo "Chunk validation passed: no empty chunk files found."
 
 rm -rf "${LOCAL_RAW_DIR}"
 
-hf download Rano23/olmo2-1b-1T-warmup100B --local-dir /dev/shm/olmo2-1b-1T-warmup100B --include "checkpoints/0000200000/*"
-hf download Rano23/olmo2-1b-stage1-token1T --local-dir /dev/shm/olmo2-1b-stage1-token1T 
-
-python3 -m apps.main.prepare_stem_checkpoint \
-    --ckpt-path /dev/shm/olmo2-1b-1T-warmup100B/checkpoints/0000200000 \
-    --output-dir /dev/shm/olmo2-1b-1T-stem-init \
-    --stem-layers 1 2 3 4 \
-    --stem-parallel-size 2 \
-    --tokenizer-name huggingface \
-    --tokenizer-path /dev/shm/olmo2-1b-stage1-token1T/
-
-# confirm the directory exists
-if [ ! -d "/dev/shm/olmo2-1b-1T-stem-init" ]; then
-    echo "Error: /dev/shm/olmo2-1b-1T-stem-init directory does not exist"
-    exit 1
-fi
+hf download Rano23/olmo2-1b-base-token1T --local-dir /dev/shm/olmo2-1b-base-token1T
 
 echo "########################################################"
 echo "Training starting"
 echo "########################################################"
 
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_distill_train \
-    config=apps/main/configs/stem_olmo2_1B_prefine_distill.yaml \
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_dag_train \
+    config=apps/main/configs/stem_dag_olmo2_1B_prefine.yaml \
     dump_dir=/data-fsx/beidchen-sandbox/data/logs/${experiment_name} \
-    checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-1T-stem-init \
-    checkpoint.dump.every=100000 \
+    checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-base-token1T/ \
+    checkpoint.continue_training_from_init=true \
+    checkpoint.dump.every=25000 \
     checkpoint.dump.keep=2 \
-    data.tokenizer.path=/dev/shm/olmo2-1b-stage1-token1T/ \
+    data.tokenizer.path=/dev/shm/olmo2-1b-base-token1T/ \
     logging.wandb.name=${experiment_name} \
     model.stem_layers=[1,2,3,4] \
-    stem_lr=8e-4 \
-    stem_weight_decay=0.01 \
-    stem_warmup=5000 \
-    stem_lr_min_ratio=0.01 \
-    ce_loss_weight=1.0 \
-    distill_loss_weight=0.4 \
-    distill_temperature=2.0 \
-    teacher_ckpt_path=/dev/shm/olmo2-1b-1T-warmup100B/checkpoints/0000200000/
+    model.stem_embeddings_zero_reset=true 
