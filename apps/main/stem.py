@@ -480,6 +480,33 @@ class StemLMTransformer(nn.Module):
         if hasattr(self.lm_transformer, "set_requires_gradient_sync"):
             self.lm_transformer.set_requires_gradient_sync(requires_sync)
 
+    def freeze_up_projections(self):
+        """
+        Set ``requires_grad=False`` on w3 (up-projection) in stem layers that have it.
+
+        Base STEM stem FFNs use ``StemFeedForward`` (no w3). DAG-STEM and similar
+        variants use an FFN with w3; those parameters are frozen when present.
+
+        Call after checkpoint load so resumed runs re-apply the freeze.
+        Returns the number of parameter tensors frozen.
+        """
+        import logging
+
+        logger = logging.getLogger()
+        count = 0
+        for layer_idx in self.lm_transformer.stem_layers:
+            layer = self.lm_transformer.layers[layer_idx]
+            ffn = layer.feed_forward
+            if hasattr(ffn, "w3"):
+                for param in ffn.w3.parameters():
+                    param.requires_grad = False
+                    count += 1
+                logger.info(
+                    f"Frozen w3 at layer {layer_idx} ({ffn.w3.weight.shape})"
+                )
+        logger.info(f"Total w3 parameters frozen: {count}")
+        return count
+
 
 # =============================================================================
 # Qwen3 & OLMo3 StemLMTransformer variants

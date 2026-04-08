@@ -150,8 +150,8 @@ class StemTrainArgs(TrainArgs):
     # Freeze backbone (lm_transformer) parameters during training.
     train_stage: Optional[int] = None
     resume_stage: bool = False
-    
-    
+
+
 preemption_flag = dict(flag=False)
 
 
@@ -439,6 +439,12 @@ def train(args: StemTrainArgs):
         
         # Load from latest checkpoint (or continue from init checkpoint)
         checkpoint.load(model, optimizer, train_state, world_mesh)
+        # DAG-STEM only: ``DagStemTrainArgs.freeze_stem_up_proj`` (not on ``StemTrainArgs``).
+        if getattr(args, "freeze_stem_up_proj", False):
+            n_frozen = model.freeze_up_projections()
+            logger.info(
+                f"freeze_stem_up_proj=True: froze {n_frozen} up-projection parameter tensor(s)"
+            )
         stage_start_step = train_state.step
         if args.stage_steps is None:
             target_step = args.steps

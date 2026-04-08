@@ -12,6 +12,11 @@ Usage::
 
     torchrun --nproc-per-node=4 -m apps.main.stem_dag_train \\
         config=apps/main/configs/stem_dag_llama3_1B.yaml
+
+Optional: set ``freeze_stem_up_proj: true`` in the config (or
+``freeze_stem_up_proj=true`` on the CLI) to keep DAG-STEM layer w3
+(up-projection) fixed while training stem embeddings and the rest of
+the backbone (subject to ``train_stage``).
 """
 
 from dataclasses import dataclass, field
@@ -34,6 +39,8 @@ class DagStemTrainArgs(StemTrainArgs):
     from ``StemTrainArgs`` and overrides the model field so that OmegaConf
     can parse ``alpha_init`` from the config."""
     model: STEMDagLMTransformerArgs = field(default_factory=STEMDagLMTransformerArgs)
+    # Freeze w3 (up-projection) in DAG-STEM stem layers after checkpoint load.
+    freeze_stem_up_proj: bool = False
 
 
 def main():

@@ -63,20 +63,25 @@ class NgramEmbedding(nn.Module):
     def _init_ngram_embeddings(self) -> None:
         num_embedders = self.k * (self.n - 1)
         emb_dim = int(self.config.hidden_size) // num_embedders
-        pad_id = int(self.config.pad_token_id)
 
-        embedders = []
-        post_projs = []
+        offsets: List[int] = []
+        o = 0
         for i in range(num_embedders):
-            vs = int(self.m + i * 2 + 1)
-            pidx = pad_id if pad_id < vs else None
-            emb = nn.Embedding(vs, emb_dim, padding_idx=pidx)
-            proj = nn.Linear(emb_dim, int(self.config.hidden_size), bias=False)
-            embedders.append(emb)
-            post_projs.append(proj)
+            offsets.append(o)
+            o += int(self.m + i * 2 + 1)
+        # One shared padding row (per-branch padding_idx is not expressible in a single table).
+        self.ngram_embedding = nn.Embedding(
+            o + 1, emb_dim, padding_idx=o
+        )
+        self.register_buffer(
+            "ngram_offsets",
+            torch.tensor(offsets, dtype=torch.long),
+            persistent=False,
+        )
 
-        self.embedders = nn.ModuleList(embedders)
-        self.post_projs = nn.ModuleList(post_projs)
+        self.post_proj = nn.Linear(
+            int(self.config.hidden_size), int(self.config.hidden_size), bias=False
+        )
 
     def _shift_right_ignore_eos(
         self, tensor: torch.Tensor, n: int, eos_token_id: int
@@ -150,16 +155,19 @@ class NgramEmbedding(nn.Module):
         else:
             context = input_ids
 
-        device = self.word_embeddings.weight.device
-        x = self.word_embeddings(input_ids.to(device)).clone()
+        x = self.word_embeddings(input_ids).clone() 
 
         vocab_mods = self._precompute_vocab_mods()
         eos_id = int(self.config.eos_token_id)
+        pad_id = int(self.config.pad_token_id)
+        pad_row = self.ngram_embedding.padding_idx
+        assert pad_row is not None
 
         shifted_ids: Dict[int, torch.Tensor] = {}
         for i in range(2, self.n + 1):
             shifted_ids[i] = self._shift_right_ignore_eos(context, i - 1, eos_id)
 
+        flat_stack: List[torch.Tensor] = []
         for i in range(2, self.n + 1):
             for j in range(self.k):
                 index = (i - 2) * self.k + j
@@ -168,11 +176,15 @@ class NgramEmbedding(nn.Module):
                 ngram_ids = self._get_ngram_ids(
                     context, shifted_ids, vocab_mods[(i, j)], ngram=i
                 )
-                new_ids = (ngram_ids % emb_vocab_dim)[..., -seq_len:]
+                new_ids = (ngram_ids % emb_vocab_dim)[..., -seq_len:].long()
+                flat = self.ngram_offsets[index] + new_ids
+                if pad_id < emb_vocab_dim:
+                    flat = flat.masked_fill(new_ids == pad_id, pad_row)
+                flat_stack.append(flat)
 
-                x_ngram = self.embedders[index](new_ids)
-                x_proj = self.post_projs[index](x_ngram)
-                x = x + x_proj
+        # (B, S, R, emb_dim) -> (B, S, hidden_size); single gather + one projection.
+        ngram_flat = self.ngram_embedding(torch.stack(flat_stack, dim=-1)).flatten(-2, -1)
+        x = x + self.post_proj(ngram_flat)
 
         x = x / (1 + self.k * (self.n - 1))
         return x
