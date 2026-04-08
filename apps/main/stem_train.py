@@ -336,6 +336,8 @@ def train(args: StemTrainArgs):
             warmup=stem_warmup,
             scheduler=stem_scheduler_name,
             lr_min_ratio=stem_lr_min_ratio,
+            initial_token_offset=0,
+            global_final_step=args.steps,
         )
         logger.info(
             f"Stem scheduler: scheduler={stem_scheduler_name}, warmup={stem_warmup}, "

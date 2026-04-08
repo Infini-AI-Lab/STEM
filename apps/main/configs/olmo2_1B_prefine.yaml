@@ -83,20 +83,20 @@ eval:
     harness:
         tasks:
             - task: hellaswag
-              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/hellaswag
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/hellaswag
             - task: boolq
-              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/super_glue
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/super_glue
             - task: piqa
-              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/piqa
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/piqa
             - task: winogrande
-              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/winogrande
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/winogrande
             - task: openbookqa
-              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/openbookqa
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/openbookqa
             - task: arc_easy
-              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/ai2_arc
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/ai2_arc
             - task: arc_challenge
-              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/ai2_arc
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/ai2_arc
             - task: race
-              dataset_path: /checkpoints-fsx/beidchen-sandbox/stem/eval_data/race
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/race
     validation:
         max_steps: 1000
