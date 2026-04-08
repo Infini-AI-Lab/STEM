@@ -78,5 +78,5 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_dag_train \
     logging.wandb.name=${experiment_name} \
     model.stem_layers=[1,2,3,4] \
     model.stem_embeddings_zero_reset=true \
-    initial_token_offset=1907359 \
-    global_final_step=2384186
+    optim.initial_token_offset=1907359 \
+    optim.global_final_step=2384186
