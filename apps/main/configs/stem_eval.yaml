@@ -14,8 +14,8 @@ harness:
   tasks:
     - task: hellaswag
       dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
-    # - task: boolq
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/super_glue
+    - task: boolq
+      dataset_path: /raid/user_data/rsadhukh/test_data/super_glue
     # - task: nq_open
     #   num_fewshot: 5
     - task: piqa

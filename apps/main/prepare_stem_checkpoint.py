@@ -20,13 +20,15 @@ This initialises STEM embeddings so that each token's embedding matches the
 original FFN up-projection output (after normalization), providing a
 "functionally equivalent" starting point for STEM training.
 
-The output directory contains:
+With ``--output-dir``, that directory contains:
   - A DCP backbone checkpoint with the w3 weights removed for stem layers
   - An updated ``params.json`` with ``stem_layers`` and ``stem_parallel_size``
   - A ``stem_shards/`` subdirectory with the pre-computed embeddings, sharded
     along the embedding dimension to match ``stem_parallel_size``.
 
-The resulting directory can be used directly as ``checkpoint.init_ckpt_path``
+Without ``--output-dir``, only ``<ckpt-path>/stem_shards/`` is written.
+
+The full output directory can be used directly as ``checkpoint.init_ckpt_path``
 in ``stem_train.py``.
 
 Usage
@@ -36,6 +38,9 @@ Usage
         --output-dir checkpoints/Llama-3.2-1B-stem-init \\
         --stem-layers 1 3 5 7 9 11 13 15 \\
         --stem-parallel-size 8
+
+    Omit ``--output-dir`` to only write ``<ckpt-path>/stem_shards/`` (no DCP
+    backbone save and no ``params.json`` copy).
 """
 
 import argparse
@@ -277,8 +282,12 @@ def main():
     )
     parser.add_argument(
         "--output-dir",
-        required=True,
-        help="Output directory for the new checkpoint with stem embeddings",
+        default=None,
+        help=(
+            "Output directory for the full STEM checkpoint (DCP backbone, "
+            "params.json, stem_shards). If omitted, only "
+            "<ckpt-path>/stem_shards/ is written."
+        ),
     )
     parser.add_argument(
         "--stem-layers",
@@ -327,7 +336,8 @@ def main():
     )
 
     ckpt_path = Path(args.ckpt_path)
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) if args.output_dir is not None else None
+    stem_shards_parent = output_dir if output_dir is not None else ckpt_path
 
     if not ckpt_path.exists():
         logger.error(f"Checkpoint path does not exist: {ckpt_path}")
@@ -366,56 +376,68 @@ def main():
         compressed_lookup=compressed_lookup,
     )
 
-    # ---- 3. Save modified backbone via DCP ----
-    output_dir.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("MASTER_ADDR", "localhost")
-    os.environ.setdefault("MASTER_PORT", "29512")
-    dist.init_process_group(backend="gloo", world_size=1, rank=0)
+    # ---- 3. Save modified backbone via DCP (full checkpoint only) ----
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MASTER_ADDR", "localhost")
+        os.environ.setdefault("MASTER_PORT", "29512")
+        dist.init_process_group(backend="gloo", world_size=1, rank=0)
 
-    logger.info(f"Saving modified backbone (w3 removed for stem layers) to {output_dir}")
-    dcp.save(state_dict, checkpoint_id=str(output_dir))
-    logger.info("Backbone DCP checkpoint saved")
+        logger.info(
+            f"Saving modified backbone (w3 removed for stem layers) to {output_dir}"
+        )
+        dcp.save(state_dict, checkpoint_id=str(output_dir))
+        logger.info("Backbone DCP checkpoint saved")
 
-    dist.destroy_process_group()
+        dist.destroy_process_group()
+
+        # ---- 4. Save updated params.json ----
+        with open(ckpt_path / "params.json", "r") as f:
+            params_dict = json.load(f)
+        if "model" not in params_dict:
+            params_dict = {"model": params_dict}
+        params_dict["model"]["stem_layers"] = args.stem_layers
+        if args.use_compressed_tokenizer:
+            if compressed_vocab_size is None:
+                raise RuntimeError("compressed_vocab_size is not set")
+            params_dict["model"]["stem_vocab_size"] = compressed_vocab_size
+        params_dict["distributed"] = params_dict.get("distributed", {})
+        params_dict["distributed"]["stem_parallel_size"] = args.stem_parallel_size
+        with open(output_dir / "params.json", "w") as f:
+            json.dump(params_dict, f)
+        logger.info(
+            f"Saved params.json with stem_layers={args.stem_layers}, "
+            f"stem_parallel_size={args.stem_parallel_size}, "
+            f"stem_vocab_size={params_dict['model'].get('stem_vocab_size', 'full_vocab')}"
+        )
+    else:
+        logger.info(
+            "No --output-dir: skipping DCP backbone save and params.json; "
+            f"writing stem_shards under {stem_shards_parent / 'stem_shards'}"
+        )
 
     # Free memory – we no longer need the full checkpoint
     del state_dict
 
-    # ---- 4. Save updated params.json ----
-    with open(ckpt_path / "params.json", "r") as f:
-        params_dict = json.load(f)
-    if "model" not in params_dict:
-        params_dict = {"model": params_dict}
-    params_dict["model"]["stem_layers"] = args.stem_layers
-    if args.use_compressed_tokenizer:
-        if compressed_vocab_size is None:
-            raise RuntimeError("compressed_vocab_size is not set")
-        params_dict["model"]["stem_vocab_size"] = compressed_vocab_size
-    params_dict["distributed"] = params_dict.get("distributed", {})
-    params_dict["distributed"]["stem_parallel_size"] = args.stem_parallel_size
-    with open(output_dir / "params.json", "w") as f:
-        json.dump(params_dict, f)
-    logger.info(
-        f"Saved params.json with stem_layers={args.stem_layers}, "
-        f"stem_parallel_size={args.stem_parallel_size}, "
-        f"stem_vocab_size={params_dict['model'].get('stem_vocab_size', 'full_vocab')}"
-    )
-
     # ---- 5. Save stem shards ----
-    if not (output_dir / "stem_shards").exists():
+    stem_shards_dir = stem_shards_parent / "stem_shards"
+    if not stem_shards_dir.exists():
         logger.info(
             f"Saving stem shards with stem_parallel_size={args.stem_parallel_size}"
         )
-        save_stem_shards(stem_weights, output_dir, args.stem_parallel_size)
+        save_stem_shards(stem_weights, stem_shards_parent, args.stem_parallel_size)
     else:
-        logger.info(f"Stem shards already exist at {output_dir / 'stem_shards'}")
+        logger.info(f"Stem shards already exist at {stem_shards_dir}")
 
     # ---- Done ----
     logger.info("")
-    logger.info(f"STEM checkpoint saved to: {output_dir}")
-    logger.info(
-        f"To use in stem_train.py, set:  checkpoint.init_ckpt_path={output_dir}"
-    )
+    if output_dir is not None:
+        logger.info(f"STEM checkpoint saved to: {output_dir}")
+        logger.info(
+            f"To use in stem_train.py, set:  checkpoint.init_ckpt_path={output_dir}"
+        )
+    else:
+        logger.info(f"Stem shards only: {stem_shards_dir}")
     logger.info(
         f"Stem layers: {args.stem_layers}  |  "
         f"Parallel size: {args.stem_parallel_size}  |  "
