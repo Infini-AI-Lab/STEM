@@ -260,6 +260,9 @@ def validate_train_args(args: TrainArgs, output_size: int):
     if args.logging.wandb is not None:
         args.logging.wandb.name = args.name
 
+    if args.data.pack_skip_common_threshold is not None:
+        args.data.pack_skip_vocab_size = output_size
+
     if args.probe_freq is not None:
         assert (
             args.distributed.tp_size == 1

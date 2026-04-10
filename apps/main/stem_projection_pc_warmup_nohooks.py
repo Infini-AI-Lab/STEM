@@ -9,7 +9,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from timeit import default_timer as timer
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from omegaconf import OmegaConf
 import torch
@@ -128,6 +128,10 @@ class ProjectionPCWarmupArgs(TrainArgs):
     save_as_stem_shards: bool = True
 
     eval_max_steps: int = 0
+
+    # Log token coverage metrics; use log_token_coverage_freq=1 for every step (see logging.freq).
+    log_token_coverage: bool = True
+    log_token_coverage_freq: Optional[int] = 100
 
 
 @dataclass
@@ -518,6 +522,56 @@ def log_token_count_coverage_summary(stats: TokenPCStats, min_count_for_pc_updat
         )
 
 
+@torch.no_grad()
+def compute_step_coverage_metrics(
+    token_stats: TokenPCStats,
+    flat_input_ids: torch.Tensor,
+    min_count_for_pc_update: int,
+) -> Dict[str, Any]:
+    """
+    Per-step coverage for logging.
+
+    - batch_unique_types: unique token ids in this rank's batch (input stream).
+    - global_vocab_types_count_gt_0: vocab ids with any positive token_counts on
+      any rank. When each rank holds the full vocab table (default shard), we must
+      not SUM local ``(tc > 0).sum()`` scalars (that double-counts types seen on
+      multiple ranks); we all_reduce MAX of 0/1 masks per vocab id instead.
+    - global_vocab_types_count_ge_min_pc: ids with local count >= min on at least
+      one rank (same MAX trick when stats are replicated per rank).
+    """
+    tc = token_stats.token_counts
+    device = tc.device
+    batch_unique = int(flat_input_ids.unique().numel())
+
+    ws = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+    replicated_full_vocab = token_stats.shard_vocab_size == token_stats.vocab_size
+
+    if ws > 1 and replicated_full_vocab:
+        mask_gt0 = (tc > 0).to(torch.int32)
+        torch.distributed.all_reduce(mask_gt0, op=torch.distributed.ReduceOp.MAX)
+        global_gt0 = int((mask_gt0 > 0).sum().item())
+
+        mask_ge = (tc >= min_count_for_pc_update).to(torch.int32)
+        torch.distributed.all_reduce(mask_ge, op=torch.distributed.ReduceOp.MAX)
+        global_ge = int((mask_ge > 0).sum().item())
+    elif ws > 1:
+        local_seen = (tc > 0).sum().to(dtype=torch.int64, device=device)
+        local_ge = (tc >= min_count_for_pc_update).sum().to(dtype=torch.int64, device=device)
+        buf = torch.stack([local_seen, local_ge])
+        torch.distributed.all_reduce(buf, op=torch.distributed.ReduceOp.SUM)
+        global_gt0 = int(buf[0].item())
+        global_ge = int(buf[1].item())
+    else:
+        global_gt0 = int((tc > 0).sum().item())
+        global_ge = int((tc >= min_count_for_pc_update).sum().item())
+
+    return {
+        "batch_unique_types": batch_unique,
+        "global_vocab_types_count_gt_0": global_gt0,
+        "global_vocab_types_count_ge_min_pc": global_ge,
+    }
+
+
 def _save_local_pc_stats(stats: TokenPCStats, train_state: PCWarmupState, ckpt_dir: Path):
     rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
     world_size = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
@@ -883,22 +937,48 @@ def train(args: ProjectionPCWarmupArgs):
                 import xformers.profiler
                 xformers.profiler.step()
 
-            if every_n_steps(train_state, args.logging.freq):
+            cov_freq = (
+                args.log_token_coverage_freq
+                if args.log_token_coverage_freq is not None
+                else args.logging.freq
+            )
+            cov_step = (
+                args.log_token_coverage
+                and cov_freq > 0
+                and train_state.step % cov_freq == 0
+            )
+            cov_metrics: Optional[Dict[str, Any]] = None
+            if cov_step:
+                cov_metrics = compute_step_coverage_metrics(
+                    token_stats,
+                    flat_input_ids,
+                    args.min_count_for_pc_update,
+                )
+
+            log_main = every_n_steps(train_state, args.logging.freq)
+            if log_main:
                 time_delta = timer() - time_last_log
                 wps = nwords_since_last_log / (time_delta * args.distributed.tp_size)
                 gpu_mem_stats = gpu_memory_monitor.get_peak_stats()
                 total_tokens = dp_degree * train_state.step * args.data.batch_size * args.data.seq_len
-                metrics = flatten_dict(
-                    {
-                        "global_step": train_state.step,
-                        "speed": {"wps": wps, "curr_iter_time": curr_iter_time, "data_load_time": data_load_time},
-                        "optim": {"total_tokens": total_tokens},
-                        "memory": gpu_mem_stats._asdict(),
-                    },
-                    sep="/",
-                )
+                metrics_dict: Dict[str, Any] = {
+                    "global_step": train_state.step,
+                    "speed": {"wps": wps, "curr_iter_time": curr_iter_time, "data_load_time": data_load_time},
+                    "optim": {"total_tokens": total_tokens},
+                    "memory": gpu_mem_stats._asdict(),
+                }
+                if cov_metrics is not None:
+                    metrics_dict["coverage"] = cov_metrics
+                metrics = flatten_dict(metrics_dict, sep="/")
                 if get_is_master():
                     metric_logger.log(metrics)
+                    extra = ""
+                    if cov_metrics is not None:
+                        extra = (
+                            f"  cov_u:{cov_metrics['batch_unique_types']}"
+                            f"  cov_gt0:{cov_metrics['global_vocab_types_count_gt_0']}"
+                            f"  cov_ge:{cov_metrics['global_vocab_types_count_ge_min_pc']}"
+                        )
                     logger.info(
                         f"step: {train_state.step}"
                         f"  wps: {wps:.2e}"
@@ -906,10 +986,24 @@ def train(args: ProjectionPCWarmupArgs):
                         f"  data: {data_load_time:>5}"
                         f"  mem: {gpu_mem_stats.max_active_pct:.0f}%"
                         f"  pow: {gpu_mem_stats.power_draw/1000:.1f} W"
+                        f"{extra}"
                     )
                 gpu_memory_monitor.reset_peak_stats()
                 nwords_since_last_log = 0
                 time_last_log = timer()
+            elif cov_metrics is not None and get_is_master():
+                metric_logger.log(
+                    flatten_dict(
+                        {"global_step": train_state.step, "coverage": cov_metrics},
+                        sep="/",
+                    )
+                )
+                logger.info(
+                    f"step: {train_state.step}"
+                    f"  cov_u:{cov_metrics['batch_unique_types']}"
+                    f"  cov_gt0:{cov_metrics['global_vocab_types_count_gt_0']}"
+                    f"  cov_ge:{cov_metrics['global_vocab_types_count_ge_min_pc']}"
+                )
 
             if every_n_steps(train_state, args.checkpoint.dump.every):
                 ckpt_dir = ckpt_base / f"{train_state.step:010d}"

@@ -75,6 +75,8 @@ data:
     tokenizer:
         name: huggingface
         path: /checkpoints-fsx/beidchen-sandbox/stem/olmo2-1b-stage1-token1T
+    pack_skip_common_threshold: 1000
+    pack_skip_max_skips: 10000
 
 profiling:
     run: false

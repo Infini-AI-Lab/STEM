@@ -11,7 +11,7 @@ from multiprocessing.synchronize import Event as EventClass
 import os
 from pathlib import Path
 from queue import Full
-from typing import Dict, Any, Iterator, Optional, TypedDict
+from typing import Any, Dict, Iterator, Optional, Tuple, TypedDict
 from lingua.tokenizer import build_tokenizer, TokenizerArgs
 import numpy as np
 import logging
@@ -437,6 +437,45 @@ def pack_tokens(
                 previous_state = state
 
 
+def skip_all_common_packed_sequences(
+    iterator: Iterator[Tuple[np.ndarray, Any]],
+    vocab_size: int,
+    common_threshold: int,
+    max_skips_per_yield: int,
+) -> Iterator[Tuple[np.ndarray, Any]]:
+    """
+    Drop packed chunks where every input token (view 0) is already "common":
+    local_counts[t] > common_threshold. Counts are per iterator instance (per async
+    producer or per rank), not synchronized across workers.
+
+    On accept, increments local_counts by one per position in chunk[:, 0], then
+    saturates each entry at ``common_threshold + 1`` so counts cannot grow without
+    bound (overflow-safe; still correct for the ``> common_threshold`` test).
+    After max_skips_per_yield consecutive skips, accepts the next chunk anyway.
+    """
+    if vocab_size <= 0:
+        raise ValueError(f"vocab_size must be positive, got {vocab_size}")
+    if common_threshold < 0:
+        raise ValueError(f"common_threshold must be >= 0, got {common_threshold}")
+    count_cap = common_threshold + 1
+    local_counts = np.zeros(vocab_size, dtype=np.int64)
+
+    for chunk, pack_state in iterator:
+        skips = 0
+        while True:
+            inp = np.asarray(chunk[:, 0], dtype=np.int64)
+            inp = np.clip(inp, 0, vocab_size - 1)
+            common = local_counts[inp] > common_threshold
+            if bool(common.all()) and skips < max_skips_per_yield:
+                skips += 1
+                chunk, pack_state = next(iterator)
+                continue
+            np.add.at(local_counts, inp, 1)
+            np.minimum(local_counts, count_cap, out=local_counts)
+            yield chunk, pack_state
+            break
+
+
 def batch_and_shuffle_prefetched_sequences(
     data_loader: Iterator,
     batch_size: int,
@@ -670,6 +709,9 @@ def setup_sources(multi_state):
 @contextlib.contextmanager
 def build_dataloader(
     state: PrefetchState,
+    pack_skip_common_threshold: Optional[int] = None,
+    pack_skip_max_skips: int = 10_000,
+    pack_skip_vocab_size: Optional[int] = None,
 ):
     pack_state = state["it_state"]
     tokenizer_state = pack_state["it_state"]
@@ -695,6 +737,19 @@ def build_dataloader(
         data_it,
         pack_state,
     )
+
+    if pack_skip_common_threshold is not None:
+        if pack_skip_vocab_size is None or pack_skip_vocab_size <= 0:
+            raise ValueError(
+                "pack_skip_vocab_size must be set to tokenizer vocabulary size when "
+                "pack_skip_common_threshold is set"
+            )
+        data_it = skip_all_common_packed_sequences(
+            iter(data_it),
+            vocab_size=pack_skip_vocab_size,
+            common_threshold=pack_skip_common_threshold,
+            max_skips_per_yield=pack_skip_max_skips,
+        )
 
     data_it = batch_and_shuffle_prefetched_sequences(
         data_loader=data_it,
@@ -790,6 +845,12 @@ class DataArgs:
     load_async: bool = True
     prefetch_size: int = 64
     tokenizer: TokenizerArgs = field(default_factory=TokenizerArgs)
+    # Local pack-time filter: skip chunks whose every input token has been seen
+    # more than pack_skip_common_threshold times on this data iterator instance.
+    # pack_skip_vocab_size is set from the tokenizer in validate_train_args when enabled.
+    pack_skip_common_threshold: Optional[int] = None
+    pack_skip_max_skips: int = 10_000
+    pack_skip_vocab_size: int = -1
 
 
 def init_dataloader_state_from_args(
@@ -818,7 +879,22 @@ def build_dataloader_from_args(
     args: DataArgs,
     state: Optional[PrefetchState] = None,
 ):
-    data_builder = partial(build_dataloader, state)
+    threshold = args.pack_skip_common_threshold
+    vocab: Optional[int] = None
+    if threshold is not None:
+        if args.pack_skip_vocab_size <= 0:
+            raise ValueError(
+                "pack_skip_vocab_size must be positive when pack_skip_common_threshold is set; "
+                "validate_train_args normally sets it from the tokenizer"
+            )
+        vocab = args.pack_skip_vocab_size
+    data_builder = partial(
+        build_dataloader,
+        state,
+        pack_skip_common_threshold=threshold,
+        pack_skip_max_skips=args.pack_skip_max_skips,
+        pack_skip_vocab_size=vocab,
+    )
     if args.load_async:
         return async_iterator(args.prefetch_size, data_builder)
     else:
