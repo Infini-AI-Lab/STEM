@@ -36,7 +36,7 @@ spec:
                         values:
                           - p5en.48xlarge
           tolerations:
-            - key: minorics-rl-forge-recipe
+            - key: tagyoung-forge-post-training
               operator: Equal
               value: "True"
               effect: NoSchedule
