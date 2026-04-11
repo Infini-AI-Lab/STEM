@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="olmo2-1b-stem-dag-4T-extend100B-freezeup"
+experiment_name="olmo2-1b-stem-dag-4T-extend100B-freezeup-warmup"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -80,4 +80,6 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_dag_train \
     model.stem_embeddings_zero_reset=true \
     optim.initial_token_offset=1907359 \
     optim.global_final_step=2384186 \
-    freeze_stem_up_proj=true
+    freeze_stem_up_proj=true \
+    stem_lr=2e-3 \
+    stem_lr_min_ratio=0.3

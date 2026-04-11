@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="olmo2-1b-stem-4T-extend100B-warmup"
+experiment_name="olmo2-1b-4T-stem-distill100B"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -61,8 +61,6 @@ echo "Chunk validation passed: no empty chunk files found."
 
 rm -rf "${LOCAL_RAW_DIR}"
 
-rm -rf /data-fsx/beidchen-sandbox/data/logs/${experiment_name}
-
 hf download Rano23/olmo2-1b-base-token4T --local-dir /dev/shm/olmo2-1b-base-token4T
 
 echo "########################################################"
@@ -76,22 +74,31 @@ python3 -m apps.main.prepare_stem_checkpoint \
     --tokenizer-name huggingface \
     --tokenizer-path /dev/shm/olmo2-1b-base-token4T
 
+# confirm the directory exists
+if [ ! -d "/dev/shm/olmo2-1b-base-token4T-stem-init" ]; then
+    echo "Error: /dev/shm/olmo2-1b-base-token4T-stem-init directory does not exist"
+    exit 1
+fi
 
 echo "########################################################"
 echo "Training starting"
 echo "########################################################"
 
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
-    config=apps/main/configs/stem_olmo2_1B_prefine.yaml \
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_distill_train \
+    config=apps/main/configs/stem_olmo2_1B_prefine_distill.yaml \
     dump_dir=/data-fsx/beidchen-sandbox/data/logs/${experiment_name} \
-    checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-base-token4T/ \
-    checkpoint.continue_training_from_init=true \
-    checkpoint.dump.every=25000 \
+    checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-base-token4T-stem-init \
+    checkpoint.dump.every=100000 \
     checkpoint.dump.keep=2 \
-    data.tokenizer.path=/dev/shm/olmo2-1b-base-token4T/ \
+    data.tokenizer.path=/dev/shm/olmo2-1b-base-token4T \
     logging.wandb.name=${experiment_name} \
     model.stem_layers=[1,2,3,4] \
     optim.initial_token_offset=1907359 \
     optim.global_final_step=2384186 \
     stem_lr=2e-3 \
-    stem_lr_min_ratio=0.3
+    stem_lr_min_ratio=0.3 \
+    ce_loss_weight=1.0 \
+    distill_loss_weight=0.4 \
+    distill_temperature=2.0 \
+    teacher_ckpt_path=/dev/shm/olmo2-1b-base-token4T/ \
+    train_stage=0

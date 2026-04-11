@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="olmo2-1b-stem-4T-extend100B"
+experiment_name="olmo2-1b-stem-4T-extend100B-warmup"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -92,4 +92,6 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
     logging.wandb.name=${experiment_name} \
     model.stem_layers=[1,2,3,4] \
     optim.initial_token_offset=1907359 \
-    optim.global_final_step=2384186 
+    optim.global_final_step=2384186 \
+    stem_lr=2e-3 \
+    stem_lr_min_ratio=0.3
