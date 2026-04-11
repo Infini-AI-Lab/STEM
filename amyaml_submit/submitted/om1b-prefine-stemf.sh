@@ -61,8 +61,6 @@ echo "Chunk validation passed: no empty chunk files found."
 
 rm -rf "${LOCAL_RAW_DIR}"
 
-rm -rf /data-fsx/beidchen-sandbox/data/logs/${experiment_name}
-
 hf download Rano23/olmo2-1b-base-token4T --local-dir /dev/shm/olmo2-1b-base-token4T
 
 echo "########################################################"
