@@ -74,11 +74,6 @@ python3 -m apps.main.prepare_stem_checkpoint \
     --tokenizer-name huggingface \
     --tokenizer-path /dev/shm/olmo2-1b-base-token4T
 
-# confirm the directory exists
-if [ ! -d "/dev/shm/olmo2-1b-base-token4T-stem-init" ]; then
-    echo "Error: /dev/shm/olmo2-1b-base-token4T-stem-init directory does not exist"
-    exit 1
-fi
 
 echo "########################################################"
 echo "Training starting"
@@ -87,7 +82,7 @@ echo "########################################################"
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_distill_train \
     config=apps/main/configs/stem_olmo2_1B_prefine_distill.yaml \
     dump_dir=/data-fsx/beidchen-sandbox/data/logs/${experiment_name} \
-    checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-base-token4T-stem-init \
+    checkpoint.init_ckpt_path=/dev/shm/olmo2-1b-base-token4T \
     checkpoint.dump.every=100000 \
     checkpoint.dump.keep=2 \
     data.tokenizer.path=/dev/shm/olmo2-1b-base-token4T \
