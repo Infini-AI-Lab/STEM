@@ -1,6 +1,6 @@
-dump_dir: logs/stem_dag_olmo2_1B
-name: stem_dag_olmo2_1B_midtrain
-model_type: olmo3_dag
+dump_dir: logs/debug
+name: "olmo2_1B_midfine"
+model_type: olmo3
 steps: 50_000
 probe_freq: 100
 seed: 777
@@ -14,7 +14,6 @@ optim:
     lr_min_ratio: 0.0
     clip: 1.0
 
-
 distributed:
     fsdp_type: full_shard
     compile: true
@@ -22,7 +21,6 @@ distributed:
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
     tp_size: 1
-    stem_parallel_size: 2
 
 model:
     dim: 2048
@@ -40,19 +38,18 @@ model:
     vocab_size: 100352
     rope_theta: 500000.0
     rope_scaling: null
-    stem_layers: [1, 2, 3, 4]
-    alpha_init: -5.0
 
 data:
     root_dir: /dev/shm/dolmino-mix_shuffled
     sources:
-        CommonCrawlHQ: 22.5
-        Code_Main: 20.0
-        Math_Main: 18.06
-        InstQA_Main: 11.1
-        Reasoning_Traces: 7.49
-        STEM_Heavy: 10.0
-        Flashcards_RCQA: 8.9
+        # CommonCrawlHQ: 22.5
+        # Code_Main: 20.0
+        # Math_Main: 18.06
+        # InstQA_Main: 11.1
+        # Reasoning_Traces: 7.49
+        # STEM_Heavy: 10.0
+        # Flashcards_RCQA: 8.9
+        dclm-baseline_shuffled: 1.0
     node_local: true
     batch_size: 4
     prefetch_size: 1024
@@ -65,12 +62,12 @@ data:
         name: huggingface
         path: checkpoints/olmo2-1b-stage1-token1T
 
-
 profiling:
     run: true
 
 checkpoint:
-    init_ckpt_path: checkpoints/olmo2-1b-dag-stem-init
+    # Student initialization checkpoint (typically prepared by prepare_stem_checkpoint.py)
+    init_ckpt_path: checkpoints/olmo2-1b-stem-1T-init
     dump:
         every: 10000
         keep: 1
@@ -82,7 +79,7 @@ logging:
     freq: 10
     wandb:
         project: "stem"
-        name: "stem-dag-olmo2-1B-midtrain"
+        name: "olmo2-1B-midfine"
 
 eval:
     generator:
@@ -115,4 +112,4 @@ eval:
         confirm_run_unsafe_code: true
         batch_size: 64
     validation:
-        max_steps: 2000
+        max_steps: 1000
