@@ -11,6 +11,7 @@ WANDB_DIR=/scratch/scratch/beidchen/projects/stem_wandb
 export WANDB_API_KEY="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"
 export WANDB_DIR
 export WANDB_MODE=offline
+export HF_ALLOW_CODE_EVAL=1
 
 echo "$HOSTNAME $(hostname -I)"
 echo "$HOSTNAME $(hostname -I | awk '{print $2}')"
