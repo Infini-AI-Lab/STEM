@@ -397,16 +397,18 @@ def train(args: StemTrainArgs):
             from lingua.stem_checkpoint import load_from_checkpoint
             if args.checkpoint.continue_training_from_init:
                 load_from_checkpoint(
-                    args.checkpoint.init_ckpt_path, 
-                    model, 
+                    args.checkpoint.init_ckpt_path,
+                    model,
                     optimizer=optimizer,
-                    model_key="model"
+                    model_key="model",
+                    legacy_lm_transformer=args.checkpoint.legacy_init_ckpt_lm_transformer,
                 )
             else:
                 load_from_checkpoint(
-                    args.checkpoint.init_ckpt_path, 
-                    model, 
-                    model_key="model"
+                    args.checkpoint.init_ckpt_path,
+                    model,
+                    model_key="model",
+                    legacy_lm_transformer=args.checkpoint.legacy_init_ckpt_lm_transformer,
                 )
             model.rope_embeddings.reset_parameters() # For RoPe initialization since it's a buffer it might not be loaded
             # Only reset stem_embeddings if pre-computed embeddings were NOT found

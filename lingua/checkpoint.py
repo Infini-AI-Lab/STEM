@@ -60,6 +60,9 @@ class CheckpointArgs:
     path: Optional[str] = None
     init_ckpt_path: Optional[str] = None
     continue_training_from_init: bool = False
+    # If True, stem_checkpoint.load_from_checkpoint uses model.lm_transformer for
+    # DCP (pre-STEM-layout inits). Default False matches StemCheckpointManager saves.
+    legacy_init_ckpt_lm_transformer: bool = False
 
 
 def _get_key_step(name: str):

@@ -289,9 +289,20 @@ def train(args: StemReparamTrainArgs):
                 "(must contain distcp model with projections + stem_shards)."
             )
         if args.checkpoint.continue_training_from_init:
-            load_from_checkpoint(args.checkpoint.init_ckpt_path, model, optimizer=None, model_key="model")
+            load_from_checkpoint(
+                args.checkpoint.init_ckpt_path,
+                model,
+                optimizer=None,
+                model_key="model",
+                legacy_lm_transformer=args.checkpoint.legacy_init_ckpt_lm_transformer,
+            )
         else:
-            load_from_checkpoint(args.checkpoint.init_ckpt_path, model, model_key="model")
+            load_from_checkpoint(
+                args.checkpoint.init_ckpt_path,
+                model,
+                model_key="model",
+                legacy_lm_transformer=args.checkpoint.legacy_init_ckpt_lm_transformer,
+            )
         model.rope_embeddings.reset_parameters()
         check_model_value_range(model, range=10.0, std=1.0)
 

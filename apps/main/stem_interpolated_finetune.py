@@ -527,12 +527,14 @@ def train(args: InterpolatedFinetuneArgs):
                     model,
                     optimizer=optimizer,
                     model_key="model",
+                    legacy_lm_transformer=args.checkpoint.legacy_init_ckpt_lm_transformer,
                 )
             else:
                 load_from_checkpoint(
                     args.checkpoint.init_ckpt_path,
                     model,
                     model_key="model",
+                    legacy_lm_transformer=args.checkpoint.legacy_init_ckpt_lm_transformer,
                 )
             model.rope_embeddings.reset_parameters()
 

@@ -500,7 +500,18 @@ def load_from_checkpoint(
     optimizer: Optional[Union[torch.optim.Optimizer, Dict[str, torch.optim.Optimizer]]] = None,
     model_key: str = "model",
     optim_key: str = "optim",
+    legacy_lm_transformer: bool = False,
 ):
+    """
+    Load a DCP checkpoint into ``model`` (and optionally LM + stem optimizers).
+
+    By default (``legacy_lm_transformer=False``), the backbone DCP layout matches
+    ``StemCheckpointManager.save`` / a prior STEM stage: full-model
+    ``get_state_dict`` with ParallelEmbedding tensors under ``stem_shards/``.
+
+    Set ``legacy_lm_transformer=True`` for older init checkpoints whose DCP keys
+    were produced for ``model.lm_transformer`` only (no full-root layout).
+    """
     ckpt_path = Path(ckpt_dir)
 
     if not (ckpt_path / ".metadata").exists():
@@ -509,7 +520,6 @@ def load_from_checkpoint(
             "`torch.distributed.checkpoint.format_utils.torch_save_to_dcp` before loading it"
         )
 
-    # Extract stem_optimizer from optimizer dict if present
     if isinstance(optimizer, dict):
         backbone_optimizer = optimizer.get("lm")
         stem_optimizer = optimizer.get("stem")
@@ -517,18 +527,31 @@ def load_from_checkpoint(
         backbone_optimizer = optimizer
         stem_optimizer = None
 
-    # 1) Build backbone state_dict containers WITHOUT STEM params
-    backbone_state_dict = {}
-    if backbone_optimizer is not None:
-        backbone_state_dict[model_key], backbone_state_dict[optim_key] = dcp_get_state_dict(model.lm_transformer, backbone_optimizer)
+    if legacy_lm_transformer:
+        backbone_state_dict: Dict[str, Any] = {}
+        if backbone_optimizer is not None:
+            backbone_state_dict[model_key], backbone_state_dict[optim_key] = (
+                dcp_get_state_dict(model.lm_transformer, backbone_optimizer)
+            )
+        else:
+            backbone_state_dict[model_key] = dcp_get_model_state_dict(
+                model.lm_transformer
+            )
+            if model_key == "":
+                backbone_state_dict = backbone_state_dict.pop(model_key)
+        dcp.load(backbone_state_dict, checkpoint_id=str(ckpt_path))
     else:
-        backbone_state_dict[model_key] = dcp_get_model_state_dict(model.lm_transformer)
-        if model_key == "": 
-            backbone_state_dict = backbone_state_dict.pop(model_key)
-    dcp.load(backbone_state_dict, checkpoint_id=str(ckpt_path))
+        fsdp_state_dict, _, _ = split_backbone_and_stem_state_dict(
+            model,
+            optimizer,
+            model_key=model_key,
+            optim_key=optim_key,
+            stem_optimizer=stem_optimizer,
+        )
+        dcp.load(fsdp_state_dict, checkpoint_id=str(ckpt_path))
 
-    # 3) Load STEM shards (model params and optimizer states) for current STEM MP rank
-    #    (no-op if stem_shards dir doesn't exist, e.g. old checkpoints)
+    # Load STEM shards (model params and optimizer states) for current STEM MP rank
+    # (no-op if stem_shards dir doesn't exist, e.g. old checkpoints)
     load_stem_shards_resharded(model, ckpt_path, stem_optimizer=stem_optimizer)
   
 
