@@ -3,7 +3,7 @@ export PYTHONPATH=/code-fsx/beidchen-sandbox/STEM:$PYTHONPATH
 set -x
 
 project_name="stem"
-experiment_name="olmo2-1b-stem-dag-4T-midfine100B"
+experiment_name="olmo2-1b-stem-4T-midfine100B"
 NNODES=4
 
 export TORCHINDUCTOR_CACHE_DIR=/scratch/scratch/beidchen/torchinductor_cache/${HOSTNAME} 
@@ -51,12 +51,11 @@ echo "########################################################"
 echo "Training starting"
 echo "########################################################"
 
-torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_dag_train \
-    config=apps/main/configs/stem_dag_olmo2_1B_midtrain.yaml \
+torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_train \
+    config=apps/main/configs/stem_olmo2_1B_midtrain.yaml \
     dump_dir=/data-fsx/beidchen-sandbox/data/logs/${experiment_name} \
-    checkpoint.init_ckpt_path=/data-fsx/beidchen-sandbox/data/logs/olmo2-1b-stem-dag-4T-extend100B-freezeup/checkpoints/0000050000 \
+    checkpoint.init_ckpt_path=/data-fsx/beidchen-sandbox/data/logs/olmo2-1b-stem-4T-extend100B-warmup/checkpoints/0000050000 \
     checkpoint.continue_training_from_init=true \
-    checkpoint.merge_lm_optim_seed_ckpt_path=/dev/shm/olmo2-1b-base-token4T \
     checkpoint.dump.every=25000 \
     checkpoint.dump.keep=2 \
     data.tokenizer.path=/dev/shm/olmo2-1b-base-token4T \
