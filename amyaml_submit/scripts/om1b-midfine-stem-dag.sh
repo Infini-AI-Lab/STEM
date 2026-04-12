@@ -55,6 +55,7 @@ torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_dag_train \
     dump_dir=/data-fsx/beidchen-sandbox/data/logs/${experiment_name} \
     checkpoint.init_ckpt_path=/data-fsx/beidchen-sandbox/data/logs/olmo2-1b-stem-dag-4T-extend100B-freezeup-warmup/checkpoints/0000050000 \
     checkpoint.continue_training_from_init=true \
+    checkpoint.merge_lm_optim_seed_ckpt_path=/dev/shm/olmo2-1b-base-token4T \
     checkpoint.dump.every=25000 \
     checkpoint.dump.keep=2 \
     data.tokenizer.path=/dev/shm/olmo2-1b-base-token4T \

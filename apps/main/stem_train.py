@@ -393,23 +393,51 @@ def train(args: StemTrainArgs):
         
         # Load from init checkpoint if specified (before loading from latest checkpoint)
         if args.checkpoint.init_ckpt_path:
-            logger.info(f"Loading initial model from {args.checkpoint.init_ckpt_path}")
-            from lingua.stem_checkpoint import load_from_checkpoint
-            if args.checkpoint.continue_training_from_init:
-                load_from_checkpoint(
+            from lingua.stem_checkpoint import (
+                load_from_checkpoint,
+                merge_stem_backbone_dcp_seed_then_warmup,
+            )
+
+            seed_merge = getattr(
+                args.checkpoint, "merge_lm_optim_seed_ckpt_path", None
+            )
+            if seed_merge:
+                if not args.checkpoint.continue_training_from_init:
+                    raise ValueError(
+                        "checkpoint.merge_lm_optim_seed_ckpt_path requires "
+                        "checkpoint.continue_training_from_init=true "
+                        "(LM + stem optimizers must exist for merge)."
+                    )
+                logger.info(
+                    "Merging init checkpoints: legacy seed=%s then warmup=%s",
+                    seed_merge,
                     args.checkpoint.init_ckpt_path,
+                )
+                merge_stem_backbone_dcp_seed_then_warmup(
                     model,
-                    optimizer=optimizer,
-                    model_key="model",
-                    legacy_lm_transformer=args.checkpoint.legacy_init_ckpt_lm_transformer,
+                    optimizer,
+                    seed_merge,
+                    args.checkpoint.init_ckpt_path,
                 )
             else:
-                load_from_checkpoint(
-                    args.checkpoint.init_ckpt_path,
-                    model,
-                    model_key="model",
-                    legacy_lm_transformer=args.checkpoint.legacy_init_ckpt_lm_transformer,
+                logger.info(
+                    f"Loading initial model from {args.checkpoint.init_ckpt_path}"
                 )
+                if args.checkpoint.continue_training_from_init:
+                    load_from_checkpoint(
+                        args.checkpoint.init_ckpt_path,
+                        model,
+                        optimizer=optimizer,
+                        model_key="model",
+                        legacy_lm_transformer=args.checkpoint.legacy_init_ckpt_lm_transformer,
+                    )
+                else:
+                    load_from_checkpoint(
+                        args.checkpoint.init_ckpt_path,
+                        model,
+                        model_key="model",
+                        legacy_lm_transformer=args.checkpoint.legacy_init_ckpt_lm_transformer,
+                    )
             model.rope_embeddings.reset_parameters() # For RoPe initialization since it's a buffer it might not be loaded
             # Only reset stem_embeddings if pre-computed embeddings were NOT found
             # in the init checkpoint.  If stem_shards/ exists (e.g. produced by
@@ -490,6 +518,7 @@ def train(args: StemTrainArgs):
         nwords_since_last_log = 0
         time_last_log = timer()
         gc.collect()
+        logger.info(f"Starting training from step {train_state.step}")
         while train_state.step < target_step:
             # We constrain train_state.acc_step to be in range 0 to args.grad_acc_steps - 1
             train_state.acc_step += 1

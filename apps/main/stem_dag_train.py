@@ -17,6 +17,20 @@ Optional: set ``freeze_stem_up_proj: true`` in the config (or
 ``freeze_stem_up_proj=true`` on the CLI) to keep DAG-STEM layer w3
 (up-projection) fixed while training stem embeddings and the rest of
 the backbone (subject to ``train_stage``).
+
+Optional **in-process merge** (same logic as ``merge_stem_lm_optim_ckpt``):
+when ``checkpoint.merge_lm_optim_seed_ckpt_path`` is set, training loads the
+seed (strict, always ``lm_transformer``-only / HF-style DCP) then
+``checkpoint.init_ckpt_path`` (warmup, partial DCP) then stem shards from
+``init_ckpt_path``. Requires ``checkpoint.continue_training_from_init=true``.
+
+Example (midtraining after warmup that omitted frozen ``w3`` optim)::
+
+    torchrun --nproc-per-node=2 -m apps.main.stem_dag_train \\
+        config=apps/main/configs/stem_dag_olmo2_1B.yaml \\
+        checkpoint.init_ckpt_path=/path/warmup/checkpoints/0000000100 \\
+        checkpoint.continue_training_from_init=true \\
+        checkpoint.merge_lm_optim_seed_ckpt_path=/path/hf-or-lm-only-seed-with-full-optim
 """
 
 from dataclasses import dataclass, field

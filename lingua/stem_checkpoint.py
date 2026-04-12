@@ -553,7 +553,114 @@ def load_from_checkpoint(
     # Load STEM shards (model params and optimizer states) for current STEM MP rank
     # (no-op if stem_shards dir doesn't exist, e.g. old checkpoints)
     load_stem_shards_resharded(model, ckpt_path, stem_optimizer=stem_optimizer)
-  
+
+
+def _default_load_planner_allow_partial():
+    """Return a load planner that tolerates keys missing from the checkpoint."""
+    try:
+        from torch.distributed.checkpoint import DefaultLoadPlanner
+    except ImportError:  # pragma: no cover
+        from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
+    return DefaultLoadPlanner(allow_partial_load=True)
+
+
+@torch.no_grad()
+def merge_stem_backbone_dcp_seed_then_warmup(
+    model: nn.Module,
+    optimizer: Union[torch.optim.Optimizer, Dict[str, torch.optim.Optimizer]],
+    seed_ckpt_dir: str,
+    warmup_ckpt_dir: str,
+) -> None:
+    """
+    Merge a **legacy seed** DCP (``lm_transformer`` + LM optim only, e.g. HF /
+    ``convert_*_to_lingua``) with a **warmup** full-root STEM DCP (may omit LM
+    optimizer shards for frozen params, e.g. DAG-STEM ``w3`` under
+    ``freeze_stem_up_proj``).
+
+    Steps:
+
+    1. Strict ``dcp.load`` from ``seed_ckpt_dir`` into
+       ``dcp_get_state_dict(model.lm_transformer, lm_optimizer)`` (same as
+       ``load_from_checkpoint(..., legacy_lm_transformer=True)``). Optionally
+       loads ``stem_shards/`` from the seed if present.
+    2. Partial ``dcp.load`` from ``warmup_ckpt_dir`` into the full-root backbone
+       state dict (``allow_partial_load=True``): warmup overwrites present keys;
+       absent keys (e.g. frozen ``w3`` Adam state) keep seed values.
+    3. ``load_stem_shards_resharded`` from ``warmup_ckpt_dir`` for ParallelEmbedding
+       weights and stem optimizer state.
+
+    The seed must match the geometry at warmup start (so ``w3`` Adam state still
+    matches ``w3`` weights if they did not train during warmup).
+    """
+    seed_path = Path(seed_ckpt_dir)
+    warmup_path = Path(warmup_ckpt_dir)
+    for label, p in (("seed", seed_path), ("warmup", warmup_path)):
+        if not (p / ".metadata").exists():
+            raise ValueError(
+                f"{label} checkpoint is not a DCP directory (missing .metadata): {p}"
+            )
+
+    if isinstance(optimizer, dict):
+        backbone_optimizer = optimizer.get("lm")
+        stem_optimizer = optimizer.get("stem")
+    else:
+        backbone_optimizer = optimizer
+        stem_optimizer = None
+
+    if backbone_optimizer is None:
+        raise ValueError(
+            "merge_stem_backbone_dcp_seed_then_warmup requires an LM optimizer "
+            "in ``optimizer`` (e.g. ``{'lm': ..., 'stem': ...}``)."
+        )
+
+    model_key = "model"
+    optim_key = "optim"
+
+    seed_lm_sd: Dict[str, Any] = {}
+    seed_lm_sd[model_key], seed_lm_sd[optim_key] = dcp_get_state_dict(
+        model.lm_transformer, backbone_optimizer
+    )
+    logger.info(
+        "STEM merge: strict legacy seed load (lm_transformer only): %s",
+        seed_ckpt_dir,
+    )
+    dcp.load(seed_lm_sd, checkpoint_id=str(seed_path))
+    
+    if (seed_path / STEM_SUBDIR_NAME).exists() and any(
+        (seed_path / STEM_SUBDIR_NAME).glob("stem_model_mp*.pt")
+    ):
+        logger.info(
+            "STEM merge: loading stem_shards from seed (optional): %s",
+            seed_ckpt_dir,
+        )
+        load_stem_shards_resharded(
+            model, seed_path, stem_optimizer=stem_optimizer
+        )
+
+    fsdp_state_dict, _, _ = split_backbone_and_stem_state_dict(
+        model,
+        optimizer,
+        model_key=model_key,
+        optim_key=optim_key,
+        stem_optimizer=stem_optimizer,
+    )
+
+    logger.info(
+        "STEM merge: partial load from warmup (missing keys keep seed values): %s",
+        warmup_ckpt_dir,
+    )
+    planner = _default_load_planner_allow_partial()
+    dcp.load(
+        fsdp_state_dict,
+        checkpoint_id=str(warmup_path),
+        planner=planner,
+    )
+
+    logger.info("STEM merge: stem_shards from warmup: %s", warmup_ckpt_dir)
+    load_stem_shards_resharded(
+        model, warmup_path, stem_optimizer=stem_optimizer
+    )
+
 
 def consolidate_stem_shards(ckpt_dir: str):
     """

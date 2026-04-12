@@ -42,14 +42,13 @@ model:
 data:
     root_dir: /dev/shm/dolmino-mix_shuffled
     sources:
-        # CommonCrawlHQ: 22.5
-        # Code_Main: 20.0
-        # Math_Main: 18.06
-        # InstQA_Main: 11.1
-        # Reasoning_Traces: 7.49
-        # STEM_Heavy: 10.0
-        # Flashcards_RCQA: 8.9
-        dclm-baseline_shuffled: 1.0
+        CommonCrawlHQ: 22.5
+        Code_Main: 20.0
+        Math_Main: 18.06
+        InstQA_Main: 11.1
+        Reasoning_Traces: 7.49
+        STEM_Heavy: 10.0
+        Flashcards_RCQA: 8.9
     node_local: true
     batch_size: 4
     prefetch_size: 1024

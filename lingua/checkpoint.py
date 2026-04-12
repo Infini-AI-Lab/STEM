@@ -63,6 +63,11 @@ class CheckpointArgs:
     # If True, stem_checkpoint.load_from_checkpoint uses model.lm_transformer for
     # DCP (pre-STEM-layout inits). Default False matches StemCheckpointManager saves.
     legacy_init_ckpt_lm_transformer: bool = False
+    # Optional: merge ``merge_lm_optim_seed_ckpt_path`` (HF / ``lm_transformer``-only
+    # DCP with full LM optim) with ``init_ckpt_path`` (warmup STEM DCP, may omit frozen
+    # w3 optim) in process before training. Requires ``continue_training_from_init=true``;
+    # ``init_ckpt_path`` is the warmup tree; see ``merge_stem_backbone_dcp_seed_then_warmup``.
+    merge_lm_optim_seed_ckpt_path: Optional[str] = None
 
 
 def _get_key_step(name: str):

@@ -28,8 +28,6 @@ optim:
     warmup: 0
     lr_min_ratio: 0.1
     clip: 1.0
-    initial_token_offset: 480000
-    global_final_step: 2384186
 
 stem_lr: 8e-4
 stem_weight_decay: 1e-4
