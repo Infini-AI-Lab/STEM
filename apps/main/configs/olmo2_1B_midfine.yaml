@@ -8,7 +8,7 @@ grad_acc_steps: 4
 
 optim:
     scheduler: "linear"
-    lr: 7.44e-4
+    lr: 7.44e-5
     weight_decay: 0.1
     warmup: 0
     lr_min_ratio: 0.0
