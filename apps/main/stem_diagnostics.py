@@ -30,6 +30,10 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
 from omegaconf import OmegaConf
 
 from lingua.args import dataclass_from_dict
@@ -70,8 +74,8 @@ class DiagnosticsArgs:
     data_sources: Optional[List[str]] = None
     tokenizer_name: str = "tiktoken"
     tokenizer_path: str = ""
-    seq_len: int = 2048
-    max_batches: int = 50
+    seq_len: int = 4096
+    max_batches: int = 2000
     batch_size: int = 4
 
     compute_loss_decomposition: bool = True
@@ -566,6 +570,11 @@ class FFNInternalAnalyzer:
         self._stores_4b: Dict[int, Dict] = {}
         self._w3_mean_gpu: Dict[int, torch.Tensor] = {}  # GPU copies for Phase 4b
 
+        # Per-batch coverage tracking (for vocabulary coverage analysis)
+        self._seen_tokens = torch.zeros(self.vocab_size, dtype=torch.bool)
+        self.coverage_per_batch: List[Dict[str, Any]] = []  # [{batch, unique, total, frac}, ...]
+        self._total_tokens_seen = 0
+
     # -----------------------------------------------------------------
     # Phase 4a: accumulate per-token w3 statistics from vanilla model
     # -----------------------------------------------------------------
@@ -592,6 +601,18 @@ class FFNInternalAnalyzer:
         _ = forward_vanilla(self.vanilla_model, input_ids)
 
         token_ids_cpu = input_ids.flatten().cpu()  # (B*S,)
+
+        # Track vocabulary coverage
+        batch_unique = token_ids_cpu.unique()
+        self._seen_tokens[batch_unique] = True
+        self._total_tokens_seen += token_ids_cpu.shape[0]
+        cumulative_unique = self._seen_tokens.sum().item()
+        self.coverage_per_batch.append({
+            "batch": len(self.coverage_per_batch) + 1,
+            "cumulative_unique_tokens": int(cumulative_unique),
+            "cumulative_total_tokens": int(self._total_tokens_seen),
+            "coverage_fraction": cumulative_unique / self.vocab_size,
+        })
 
         for li in self.stem_layer_indices:
             w3_out = self._stores_4a[li]["w3_out"]  # (B, S, d_ffn)
@@ -644,6 +665,236 @@ class FFNInternalAnalyzer:
 
         # Free sums to reclaim memory
         self.w3_sum.clear()
+
+    def compute_coverage_analysis(self, dump_dir: str) -> Dict[str, Any]:
+        """Analyze vocabulary coverage from Phase 4a and generate diagnostic plots.
+
+        Produces:
+        - Token occurrence distribution statistics
+        - Coverage vs batch count curve (observed + projected)
+        - Per-occurrence-count histogram
+        - Recommended batch count for target coverage levels
+        """
+        # Use the first STEM layer's count (identical across layers since tokens are shared)
+        li = self.stem_layer_indices[0]
+        count = self.w3_count[li]  # (V,)
+
+        V = self.vocab_size
+        active_mask = count > 0
+        n_active = active_mask.sum().item()
+        n_zero = V - n_active
+        coverage_frac = n_active / V
+        total_tokens = count.sum().item()
+
+        # Per-token occurrence counts for active tokens
+        active_counts = count[active_mask].float()
+
+        # Occurrence distribution statistics
+        stats = {
+            "vocab_size": V,
+            "active_tokens": int(n_active),
+            "zero_count_tokens": int(n_zero),
+            "coverage_fraction": coverage_frac,
+            "total_token_occurrences": int(total_tokens),
+            "num_batches_used": len(self.coverage_per_batch),
+            "tokens_per_batch": int(total_tokens / len(self.coverage_per_batch)) if self.coverage_per_batch else 0,
+        }
+
+        if n_active > 0:
+            stats["min_occurrence"] = int(active_counts.min().item())
+            stats["max_occurrence"] = int(active_counts.max().item())
+            stats["mean_occurrence"] = active_counts.mean().item()
+            stats["median_occurrence"] = active_counts.median().item()
+            stats["std_occurrence"] = active_counts.std().item()
+
+            # Occurrence quantiles
+            for q in [1, 5, 10, 25, 50, 75, 90, 95, 99]:
+                val = torch.quantile(active_counts, q / 100.0).item()
+                stats[f"p{q}_occurrence"] = val
+
+            # Tokens by occurrence bucket
+            buckets = [(1, 1), (2, 5), (6, 10), (11, 50), (51, 100), (101, 500), (501, None)]
+            bucket_counts = {}
+            for lo, hi in buckets:
+                if hi is None:
+                    mask_b = active_counts >= lo
+                    label = f"{lo}+"
+                else:
+                    mask_b = (active_counts >= lo) & (active_counts <= hi)
+                    label = f"{lo}-{hi}"
+                bucket_counts[label] = int(mask_b.sum().item())
+            stats["occurrence_buckets"] = bucket_counts
+
+        # Coverage per batch (already tracked during Phase 4a)
+        stats["coverage_per_batch"] = self.coverage_per_batch
+
+        # --- Projected coverage at larger batch counts ---
+        # Use Heaps' law: V(n) = K * n^beta, fit from observed data
+        if len(self.coverage_per_batch) >= 5:
+            obs_n = torch.tensor([e["cumulative_total_tokens"] for e in self.coverage_per_batch], dtype=torch.float64)
+            obs_v = torch.tensor([e["cumulative_unique_tokens"] for e in self.coverage_per_batch], dtype=torch.float64)
+
+            # Log-log linear regression: log(V) = log(K) + beta * log(n)
+            log_n = obs_n.log()
+            log_v = obs_v.log()
+            # Filter valid entries
+            valid = (log_n.isfinite()) & (log_v.isfinite())
+            if valid.sum() >= 2:
+                ln = log_n[valid]
+                lv = log_v[valid]
+                n_pts = ln.shape[0]
+                # Least squares: [log(K), beta] = (X^T X)^{-1} X^T y
+                X = torch.stack([torch.ones(n_pts, dtype=torch.float64), ln], dim=1)
+                params = torch.linalg.lstsq(X, lv).solution
+                log_K, beta = params[0].item(), params[1].item()
+                K = math.exp(log_K)
+
+                stats["heaps_law_K"] = K
+                stats["heaps_law_beta"] = beta
+
+                # Project to various batch counts
+                tpb = stats["tokens_per_batch"]
+                projections = {}
+                for target_batches in [100, 200, 500, 1000, 2000, 5000]:
+                    proj_tokens = target_batches * tpb
+                    proj_unique = min(K * (proj_tokens ** beta), V)
+                    projections[str(target_batches)] = {
+                        "total_tokens": proj_tokens,
+                        "projected_unique": int(proj_unique),
+                        "projected_coverage": proj_unique / V,
+                    }
+                stats["coverage_projections"] = projections
+
+                # Estimated batches for target coverage levels
+                targets = {}
+                for target_cov in [0.50, 0.75, 0.90, 0.95, 0.99]:
+                    target_unique = target_cov * V
+                    if target_unique <= K:
+                        needed_tokens = 1
+                    else:
+                        needed_tokens = (target_unique / K) ** (1.0 / beta) if beta > 0 else float("inf")
+                    needed_batches = math.ceil(needed_tokens / tpb) if tpb > 0 else float("inf")
+                    targets[f"{int(target_cov*100)}%"] = {
+                        "needed_batches": int(needed_batches) if needed_batches < 1e9 else "inf",
+                        "needed_tokens": int(needed_tokens) if needed_tokens < 1e15 else "inf",
+                    }
+                stats["batches_for_target_coverage"] = targets
+
+        # --- Generate plots ---
+        out_dir = Path(dump_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        self._plot_coverage(count, stats, out_dir)
+
+        return stats
+
+    def _plot_coverage(self, count: torch.Tensor, stats: Dict, out_dir: Path):
+        """Generate four coverage diagnostic plots."""
+        V = self.vocab_size
+        active_mask = count > 0
+        active_counts = count[active_mask].numpy()
+        all_counts = count.numpy()
+
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle(
+            f"Vocabulary Coverage Analysis  |  {stats['num_batches_used']} batches, "
+            f"seq_len={stats['tokens_per_batch'] // 4 if stats['tokens_per_batch'] > 0 else '?'}, "
+            f"batch_size=4",
+            fontsize=14, fontweight="bold",
+        )
+
+        # --- Plot 1: Sorted token occurrence (Zipf curve) ---
+        ax = axes[0, 0]
+        sorted_counts = np.sort(all_counts)[::-1]
+        ranks = np.arange(1, len(sorted_counts) + 1)
+        ax.semilogy(ranks, sorted_counts + 1, linewidth=0.5, color="#2563EB")
+        ax.axhline(y=1, color="red", linestyle="--", linewidth=0.8, alpha=0.7, label="Zero occurrences (count=0)")
+        ax.axvline(x=stats["active_tokens"], color="orange", linestyle="--", linewidth=0.8,
+                   label=f"Coverage boundary: {stats['active_tokens']:,} / {V:,}")
+        ax.set_xlabel("Token rank (sorted by frequency)")
+        ax.set_ylabel("Occurrence count + 1 (log scale)")
+        ax.set_title("Token Occurrence Rank Distribution")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        # --- Plot 2: Occurrence histogram (active tokens only) ---
+        ax = axes[0, 1]
+        if len(active_counts) > 0:
+            log_counts = np.log10(active_counts.clip(min=1))
+            ax.hist(log_counts, bins=80, color="#2563EB", alpha=0.8, edgecolor="white", linewidth=0.3)
+            ax.axvline(x=np.log10(max(np.median(active_counts), 1)), color="orange", linestyle="--",
+                       linewidth=1.2, label=f"Median: {int(np.median(active_counts))}")
+            ax.axvline(x=np.log10(max(np.mean(active_counts), 1)), color="red", linestyle="--",
+                       linewidth=1.2, label=f"Mean: {np.mean(active_counts):.1f}")
+        ax.set_xlabel("log₁₀(occurrence count)")
+        ax.set_ylabel("Number of tokens")
+        ax.set_title(f"Occurrence Distribution ({stats['active_tokens']:,} active tokens)")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        # --- Plot 3: Cumulative coverage vs batch ---
+        ax = axes[1, 0]
+        if self.coverage_per_batch:
+            batches = [e["batch"] for e in self.coverage_per_batch]
+            coverages = [e["coverage_fraction"] * 100 for e in self.coverage_per_batch]
+            ax.plot(batches, coverages, color="#2563EB", linewidth=2, label="Observed")
+
+            # Add Heaps' law projection
+            if "heaps_law_K" in stats and "heaps_law_beta" in stats:
+                K = stats["heaps_law_K"]
+                beta = stats["heaps_law_beta"]
+                tpb = stats["tokens_per_batch"]
+                proj_batches = np.arange(1, max(batches[-1] * 5, 500) + 1)
+                proj_tokens = proj_batches * tpb
+                proj_unique = np.minimum(K * (proj_tokens ** beta), V)
+                proj_coverage = proj_unique / V * 100
+                ax.plot(proj_batches, proj_coverage, color="red", linestyle="--",
+                        linewidth=1.2, alpha=0.8, label=f"Heaps' law (β={beta:.3f})")
+
+            # Target lines
+            for target, color in [(50, "#94A3B8"), (75, "#F59E0B"), (90, "#EF4444"), (95, "#7C3AED")]:
+                ax.axhline(y=target, color=color, linestyle=":", linewidth=0.8, alpha=0.6)
+                ax.text(batches[-1] * 0.02, target + 0.8, f"{target}%", fontsize=7, color=color)
+
+        ax.set_xlabel("Number of batches")
+        ax.set_ylabel("Vocabulary coverage (%)")
+        ax.set_title("Cumulative Vocabulary Coverage")
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        # --- Plot 4: Coverage reliability assessment ---
+        ax = axes[1, 1]
+        if len(active_counts) > 0:
+            # Tokens with >= N occurrences (reliability threshold)
+            thresholds = [1, 2, 3, 5, 10, 20, 50, 100]
+            reliable_counts = []
+            for t in thresholds:
+                n_reliable = (active_counts >= t).sum()
+                reliable_counts.append(n_reliable)
+
+            bars = ax.bar(
+                range(len(thresholds)),
+                [r / V * 100 for r in reliable_counts],
+                color="#2563EB", alpha=0.8, edgecolor="white",
+            )
+            ax.set_xticks(range(len(thresholds)))
+            ax.set_xticklabels([f"≥{t}" for t in thresholds])
+            ax.set_xlabel("Minimum occurrence count threshold")
+            ax.set_ylabel("Vocabulary coverage (%)")
+            ax.set_title("Oracle Reliability: Coverage at Occurrence Thresholds")
+            ax.grid(True, alpha=0.3, axis="y")
+
+            # Annotate bars
+            for bar, cnt, total in zip(bars, reliable_counts, [V] * len(thresholds)):
+                pct = cnt / total * 100
+                if pct > 2:
+                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
+                            f"{cnt:,}\n({pct:.1f}%)", ha="center", va="bottom", fontsize=7)
+
+        plt.tight_layout()
+        plot_path = out_dir / "vocabulary_coverage.png"
+        fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        logger.info(f"Coverage plots saved to {plot_path}")
 
     def _ensure_w3_mean_gpu(self):
         """Transfer w3 means to GPU once for Phase 4b lookups."""
@@ -992,7 +1243,7 @@ def run_diagnostics(cfg: DiagnosticsArgs):
 
     # --- Initialize metrics ---
     loss_decomp = None; residual_analyzer = None; cka_analyzer = None
-    divergence_analyzer = None; ffn_analyzer = None
+    divergence_analyzer = None; ffn_analyzer = None; coverage_results = None
 
     if cfg.compute_loss_decomposition:
         vs = stem_model.lm_transformer.tok_embeddings.weight.shape[0]
@@ -1047,6 +1298,7 @@ def run_diagnostics(cfg: DiagnosticsArgs):
             if (bi + 1) % 10 == 0: logger.info(f"  Batch {bi+1}/{cfg.max_batches}")
         ffn_analyzer.remove_hooks()
         ffn_analyzer.finalize_phase_4a()
+        coverage_results = ffn_analyzer.compute_coverage_analysis(cfg.dump_dir)
         torch.cuda.empty_cache()
 
     # === Phase 4b: Joint FFN analysis (Metrics I/II/III) ===
@@ -1098,12 +1350,24 @@ def run_diagnostics(cfg: DiagnosticsArgs):
         logger.info(
             f"Metric III — hyp_A: {s.get('mean_hypothesis_a_fraction', 0):.4f}, "
             f"hyp_B: {s.get('mean_hypothesis_b_fraction', 0):.4f}")
+    if coverage_results:
+        results["vocabulary_coverage"] = coverage_results
+        logger.info(
+            f"Coverage — {coverage_results['active_tokens']:,}/{coverage_results['vocab_size']:,} "
+            f"({coverage_results['coverage_fraction']:.1%}) tokens seen in "
+            f"{coverage_results['num_batches_used']} batches")
+        if "batches_for_target_coverage" in coverage_results:
+            for tgt, info in coverage_results["batches_for_target_coverage"].items():
+                logger.info(f"  {tgt} coverage needs ~{info['needed_batches']} batches")
 
     # --- Save ---
     out_dir = Path(cfg.dump_dir); out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "diagnostics.json"
     def _ser(obj):
         if isinstance(obj, torch.Tensor): return obj.tolist()
+        if isinstance(obj, (np.integer,)): return int(obj)
+        if isinstance(obj, (np.floating,)): return float(obj)
+        if isinstance(obj, np.ndarray): return obj.tolist()
         if isinstance(obj, dict): return {k: _ser(v) for k, v in obj.items()}
         if isinstance(obj, list): return [_ser(v) for v in obj]
         if isinstance(obj, float) and (math.isinf(obj) or math.isnan(obj)): return str(obj)
