@@ -22,7 +22,12 @@ from apps.main.generate import (
 from apps.main.transformer import LMTransformer, LMTransformerArgs
 from apps.main.qwen3 import Qwen3LMTransformer, Qwen3LMTransformerArgs
 from apps.main.olmo3 import OLMo3LMTransformer, OLMo3LMTransformerArgs
-from apps.main.eval_utils import apply_mbpp_runtime_patches, harness_has_mbpp_task
+from apps.main.eval_utils import (
+    apply_humaneval_runtime_patches,
+    apply_mbpp_runtime_patches,
+    harness_has_humaneval_task,
+    harness_has_mbpp_task,
+)
 from lingua.args import dump_config
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
 from lingua.data import init_choice_state, setup_sources
@@ -265,6 +270,8 @@ def launch_eval(cfg: EvalArgs):
         setup_torch_distributed(dist_args)
     if harness_has_mbpp_task(cfg.harness):
         apply_mbpp_runtime_patches(logger=logger)
+    if harness_has_humaneval_task(cfg.harness):
+        apply_humaneval_runtime_patches(logger=logger)
     if (
         Path(cfg.ckpt_dir).exists()
         and (Path(cfg.ckpt_dir) / "params.json").exists()

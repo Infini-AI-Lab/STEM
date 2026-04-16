@@ -24,6 +24,25 @@ def harness_has_mbpp_task(harness: Optional[Any]) -> bool:
     return False
 
 
+def _is_humaneval_task_name(name: str) -> bool:
+    return name == "humaneval" or name.startswith("humaneval_")
+
+
+def harness_has_humaneval_task(harness: Optional[Any]) -> bool:
+    if harness is None or getattr(harness, "tasks", None) is None:
+        return False
+    for task in harness.tasks:
+        if isinstance(task, str):
+            if _is_humaneval_task_name(task):
+                return True
+            continue
+        if isinstance(task, dict):
+            t = task.get("task")
+            if isinstance(t, str) and _is_humaneval_task_name(t):
+                return True
+    return False
+
+
 def _unique_experiment_id(prefix: str = "mbpp-code-eval") -> str:
     rank = os.environ.get("RANK", "0")
     return f"{prefix}-{rank}-{os.getpid()}-{uuid.uuid4().hex}"
@@ -123,3 +142,54 @@ def apply_mbpp_runtime_patches(logger: logging.Logger) -> None:
     patched_pass_at_1._stem_runtime_patched = True
     mbpp_utils.pass_at_1 = patched_pass_at_1
     logger.info("Applied MBPP runtime pass_at_1 patch")
+
+
+def apply_humaneval_runtime_patches(logger: logging.Logger) -> None:
+    """
+    Runtime HumanEval patching (lm_eval.tasks.humaneval), mirroring MBPP/code_eval setup.
+    See https://github.com/EleutherAI/lm-evaluation-harness/tree/main/lm_eval/tasks/humaneval
+    - Per-process code_eval experiment_id to reduce lock contention.
+    - Fork-based check_correctness for sandboxed execution.
+    - pass_at_k uses HUMANEVAL_CODE_EVAL_TIMEOUT / HUMANEVAL_CODE_EVAL_NUM_WORKERS.
+    """
+    try:
+        from lm_eval.tasks.humaneval import utils as humaneval_utils
+    except Exception as e:
+        logger.warning("Unable to import HumanEval utils for runtime patching: %s", e)
+        return
+
+    try:
+        metric = hf_evaluate.load("code_eval", experiment_id=_unique_experiment_id("humaneval-code-eval"))
+    except Exception as e:
+        logger.warning("Unable to load code_eval metric for HumanEval runtime patch: %s", e)
+        return
+
+    _patch_metric_check_correctness_to_fork(metric, logger)
+    humaneval_utils.compute_ = metric
+
+    original_pass_at_k = getattr(humaneval_utils, "pass_at_k", None)
+    if original_pass_at_k is None:
+        logger.warning("HumanEval utils has no pass_at_k; skipping pass_at_k patch")
+        return
+    if getattr(original_pass_at_k, "_stem_runtime_patched", False):
+        return
+
+    @wraps(original_pass_at_k)
+    def patched_pass_at_k(references, predictions, k=None):
+        assert k is not None
+        if isinstance(k, int):
+            k = [k]
+        timeout = float(os.environ.get("HUMANEVAL_CODE_EVAL_TIMEOUT", "3.0"))
+        workers = int(os.environ.get("HUMANEVAL_CODE_EVAL_NUM_WORKERS", "8"))
+        res = metric.compute(
+            references=references,
+            predictions=predictions,
+            k=k,
+            timeout=timeout,
+            num_workers=workers,
+        )
+        return res[0]
+
+    patched_pass_at_k._stem_runtime_patched = True
+    humaneval_utils.pass_at_k = patched_pass_at_k
+    logger.info("Applied HumanEval runtime pass_at_k patch")

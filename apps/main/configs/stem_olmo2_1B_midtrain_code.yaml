@@ -1,0 +1,117 @@
+dump_dir: logs/stem_olmo2_1B
+name: stem_olmo2_1B_midtrain
+model_type: olmo3
+steps: 25_000
+probe_freq: 100
+seed: 777
+grad_acc_steps: 4
+
+optim:
+    scheduler: "linear"
+    lr: 7.44e-5
+    weight_decay: 0.1
+    warmup: 0
+    lr_min_ratio: 0.5
+    clip: 1.0
+
+stem_lr: 6e-4
+stem_weight_decay: 1e-4
+stem_lr_min_ratio: 0.1
+stem_warmup: 0
+
+distributed:
+    fsdp_type: full_shard
+    compile: true
+    model_dtype: bf16
+    matmul_allow_tf32: false
+    selective_activation_checkpointing: false
+    tp_size: 1
+    stem_parallel_size: 2
+
+model:
+    dim: 2048
+    ffn_dim_multiplier: 1.5
+    multiple_of: 256
+    n_layers: 16
+    n_heads: 16
+    n_kv_heads: 16
+    head_dim: 128
+    weight_tying: false
+    init_base_std: 0.02
+    init_std_factor: disabled
+    norm_eps: 1.0e-6
+    max_seqlen: 4096
+    vocab_size: 100352
+    rope_theta: 500000.0
+    rope_scaling: null
+    stem_layers: [1, 2, 3, 4]
+
+data:
+    root_dir: /dev/shm/dolmino-mix_shuffled
+    sources:
+        Code_Main: 20.0
+        Code_Reasoning: 10.0
+        Math_Main: 5.0
+    node_local: true
+    batch_size: 4
+    prefetch_size: 1024
+    seq_len: 4096
+    n_views: 2
+    load_async: true
+    add_bos: true
+    add_eos: true
+    tokenizer:
+        name: huggingface
+        path: checkpoints/olmo2-1b-stage1-token1T
+
+
+profiling:
+    run: true
+
+checkpoint:
+    init_ckpt_path: checkpoints/olmo2-1b-stem-init
+    dump:
+        every: 10000
+        keep: 1
+    eval:
+        every: 5000
+        keep: 1
+
+logging:
+    freq: 10
+    wandb:
+        project: "stem"
+        name: "stem-olmo2-1B-midtrain"
+
+eval:
+    generator:
+        max_tokens: 16384
+        dtype: bf16
+        temperature: 1.0
+        top_p: 0.95
+    harness:
+        tasks:
+            - task: hellaswag
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/hellaswag
+            - task: boolq
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/super_glue
+            - task: piqa
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/piqa
+            - task: winogrande
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/winogrande
+            - task: openbookqa
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/openbookqa
+            - task: arc_easy
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/ai2_arc
+            - task: arc_challenge
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/ai2_arc
+            - task: race
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/race
+            - task: mbpp
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/mbpp
+            - task: humaneval
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/humaneval
+        confirm_run_unsafe_code: true
+        batch_size: 64
+    validation:
+        max_steps: 2000

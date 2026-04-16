@@ -1,0 +1,22 @@
+groups:
+  - source: Code_Main
+    ratio: 20.0
+    prefixes:
+      - stack_edu_fim-
+      - cranecode
+
+  - source: Code_Reasoning
+    ratio: 10.0
+    prefixes:
+      - dolmino_1-flan
+      - tulu-3-sft
+      - code-meta-reasoning
+      - program_verifiable
+
+  - source: Math_Main
+    ratio: 5.0
+    prefixes:
+      - dolmino-math
+      - cranemath
+      - megamatt
+      

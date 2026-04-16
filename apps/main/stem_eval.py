@@ -20,7 +20,12 @@ from apps.main.stem_generate import (
 )
 from apps.main.stem import StemLMTransformer, StemLMTransformerArgs, STEM_MODEL_REGISTRY
 from apps.main.eval import LMHarnessArgs, ValidationArgs, all_dicts_same, _truncate_at_stop
-from apps.main.eval_utils import apply_mbpp_runtime_patches, harness_has_mbpp_task
+from apps.main.eval_utils import (
+    apply_humaneval_runtime_patches,
+    apply_mbpp_runtime_patches,
+    harness_has_humaneval_task,
+    harness_has_mbpp_task,
+)
 from lingua.args import dump_config
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
 from lingua.data import init_choice_state, setup_sources
@@ -387,6 +392,8 @@ def launch_stem_eval(cfg: StemEvalArgs):
 
     if harness_has_mbpp_task(cfg.harness):
         apply_mbpp_runtime_patches(logger=logger)
+    if harness_has_humaneval_task(cfg.harness):
+        apply_humaneval_runtime_patches(logger=logger)
 
     harness_kwargs = asdict(cfg.harness)
     if dp_ws > 1:
