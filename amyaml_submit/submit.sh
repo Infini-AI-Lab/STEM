@@ -1,2 +1,2 @@
-kubectl apply -f amyaml_submit/scripts/beidchen-om1b-midfine-stem-dag-code-133417.yaml
-kubectl apply -f amyaml_submit/scripts/beidchen-om1b-prefine-stemf-dag-133417.yaml
+kubectl apply -f amyaml_submit/scripts/beidchen-om1b-midfine-base-code-144410.yaml
+kubectl apply -f amyaml_submit/scripts/beidchen-om1b-midfine-stem-code-144410.yaml
