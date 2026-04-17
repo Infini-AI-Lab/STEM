@@ -27,7 +27,7 @@ echo "NODE_RANK: $NODE_RANK"
 echo "WANDB_MODE: $WANDB_MODE"
 
 aws s3 sync \
-  s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dolma3_dolmino_mix-100B-1025/ \
+  s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/dolma3_dolmino_mix-100B-1125/ \
   /dev/shm \
   --region us-east-2 \
   --exclude "*" \
