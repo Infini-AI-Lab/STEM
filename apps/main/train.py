@@ -80,6 +80,11 @@ from apps.main.olmo3 import (
     tp_parallelize as olmo3_tp_parallelize,
     get_no_recompute_ops as olmo3_get_no_recompute_ops,
 )
+from apps.main.longcat import (
+    LongcatLMTransformer,
+    LongcatLMTransformerArgs,
+    build_longcat_lm_fsdp_grouping_plan,
+)
 from lingua.probe import AutoProbeD
 from lingua.stool import StoolArgs, launch_job
 
@@ -108,6 +113,14 @@ MODEL_REGISTRY = {
         olmo3_build_fsdp_grouping_plan, olmo3_tp_parallelize,
         olmo3_get_no_recompute_ops, olmo3_get_num_flop_per_token,
     ),
+    "longcat": (
+        LongcatLMTransformer,
+        LongcatLMTransformerArgs,
+        build_longcat_lm_fsdp_grouping_plan,
+        None,
+        llama_get_no_recompute_ops,
+        llama_get_num_flop_per_token,
+    ),
 }
 
 
@@ -118,7 +131,7 @@ class TrainArgs:
 
     seed: int = 42
 
-    # Model type: "llama", "qwen3", or "olmo3"
+    # Model type: "llama", "qwen3", "olmo3", or "longcat"
     model_type: str = "llama"
 
     # Layer indices whose up-projection (w3) should remain randomly initialized
@@ -301,6 +314,14 @@ def train(args: TrainArgs):
         init_signal_handler(set_preemption_flag)  # For handling preemption signals.
         setup_env(args.env)
         setup_torch_distributed(args.distributed)
+        if args.model_type == "longcat":
+            from lingua.stem_dist_utils import initialize_stem_process_group
+
+            initialize_stem_process_group(args.distributed.stem_parallel_size)
+            logger.info(
+                "Initialized vocabulary-parallel process groups for Longcat "
+                f"(stem_parallel_size={args.distributed.stem_parallel_size})"
+            )
         world_mesh = get_device_mesh(args.distributed)
         logger.info(f"Starting job: {args.name}")
 

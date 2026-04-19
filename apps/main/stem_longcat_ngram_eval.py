@@ -1,6 +1,6 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
-# Validation CE / perplexity for :mod:`stem_longcat_ngram_train` checkpoints.
+# Validation CE / perplexity for :mod:`apps.main.longcat_ngram_train` toy checkpoints.
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ from lingua.distributed import (
 from lingua.logger import init_logger
 from lingua.longcat_ngram import LongcatNgramConfig
 
-from apps.main.stem_longcat_ngram_train import ToyLongcatNgramLM, _synthetic_batch
+from apps.main.longcat_ngram_toy import ToyLongcatNgramLM, _synthetic_batch
 
 logger = logging.getLogger()
 
