@@ -20,8 +20,9 @@ from typing import Dict
 
 # Make sure ParallelEmbedding and the STEM PG helpers are imported
 from lingua.stem_dist_utils import (
-    ParallelEmbedding, 
-    get_stem_model_parallel_rank, 
+    ParallelEmbedding,
+    VocabParallelEmbedding,
+    get_stem_model_parallel_rank,
     get_stem_data_parallel_rank,
     get_stem_model_parallel_world_size,
 )
@@ -30,6 +31,15 @@ from lingua.checkpoint import CheckpointManager, load_from_checkpoint as load_ba
 from omegaconf import OmegaConf
 
 logger = logging.getLogger("STEM_CHECKPOINT")
+
+
+def _parallel_embedding_side_optimizer(
+    optimizer: Optional[Union[torch.optim.Optimizer, Dict[str, torch.optim.Optimizer]]],
+) -> Optional[torch.optim.Optimizer]:
+    """STEM uses ``optimizer['stem']``; Longcat uses ``optimizer['ngram']``."""
+    if isinstance(optimizer, dict):
+        return optimizer.get("stem") or optimizer.get("ngram")
+    return None
 
 FOLDER_NAME = "{:010d}"
 RE_FOLDER = r"\d{10}"
@@ -54,10 +64,24 @@ def _get_key_step(name: str):
 
 def _iter_stem_params(model: nn.Module):
     for module_name, module in model.named_modules():
-        if isinstance(module, ParallelEmbedding):
+        if isinstance(module, (ParallelEmbedding, VocabParallelEmbedding)):
             for p_name, p in module.named_parameters(recurse=False):
                 fq_name = f"{module_name}.{p_name}" if module_name else p_name
                 yield fq_name, p
+
+
+def _stem_sharded_weight_cat_dim(model: nn.Module, fq_name: str) -> int:
+    """Concat dimension when merging STEM MP shards (dim 1: ParallelEmbedding, dim 0: VocabParallel)."""
+    if not fq_name.endswith(".weight"):
+        return 1
+    prefix = fq_name.rsplit(".", 1)[0]
+    try:
+        mod = model.get_submodule(prefix)
+    except (AttributeError, KeyError, ValueError):
+        return 1
+    if isinstance(mod, VocabParallelEmbedding):
+        return 0
+    return 1
                 
 def extract_stem_state_dict(model: nn.Module) -> Dict[str, torch.Tensor]:
     """
@@ -277,7 +301,7 @@ def load_stem_shards(
         # Copy tensors into actual ParallelEmbedding params
         with torch.no_grad():
             for module_name, module in model.named_modules():
-                if isinstance(module, ParallelEmbedding):
+                if isinstance(module, (ParallelEmbedding, VocabParallelEmbedding)):
                     for p_name, p in module.named_parameters(recurse=False):
                         fq_name = f"{module_name}.{p_name}" if module_name else p_name
                         if fq_name in loaded_model_sd:
@@ -401,14 +425,14 @@ def load_stem_shards_resharded(
         else:
             logger.warning(f"Source stem model shard not found at {shard_path}")
 
-    # Concatenate along embedding dim (dim=1 for weight shape [V, D/source_mp_size])
     for k in merged_model_sd:
-        merged_model_sd[k] = torch.cat(merged_model_sd[k], dim=1)
+        dim = _stem_sharded_weight_cat_dim(model, k)
+        merged_model_sd[k] = torch.cat(merged_model_sd[k], dim=dim)
 
-    # Copy merged weights into the model's ParallelEmbedding parameters
+    # Copy merged weights into ParallelEmbedding / VocabParallelEmbedding parameters
     with torch.no_grad():
         for module_name, module in model.named_modules():
-            if isinstance(module, ParallelEmbedding):
+            if isinstance(module, (ParallelEmbedding, VocabParallelEmbedding)):
                 for p_name, p in module.named_parameters(recurse=False):
                     fq_name = f"{module_name}.{p_name}" if module_name else p_name
                     if fq_name in merged_model_sd:
@@ -471,9 +495,10 @@ def load_stem_shards_resharded(
             first = values[0]
             if isinstance(first, torch.Tensor):
                 if first.dim() >= 2:
-                    # 2-D+ state (exp_avg, exp_avg_sq, …) — concat along
-                    # the embedding dimension (dim=1), mirroring the weight
-                    merged_state[state_key] = torch.cat(values, dim=1).to(load_loc)
+                    cat_dim = _stem_sharded_weight_cat_dim(model, param_name)
+                    merged_state[state_key] = torch.cat(values, dim=cat_dim).to(
+                        load_loc
+                    )
                 elif first.dim() == 1:
                     # 1-D state — unusual for embeddings but handle safely
                     merged_state[state_key] = torch.cat(values, dim=0).to(load_loc)
@@ -522,7 +547,7 @@ def load_from_checkpoint(
 
     if isinstance(optimizer, dict):
         backbone_optimizer = optimizer.get("lm")
-        stem_optimizer = optimizer.get("stem")
+        stem_optimizer = _parallel_embedding_side_optimizer(optimizer)
     else:
         backbone_optimizer = optimizer
         stem_optimizer = None
@@ -602,7 +627,7 @@ def merge_stem_backbone_dcp_seed_then_warmup(
 
     if isinstance(optimizer, dict):
         backbone_optimizer = optimizer.get("lm")
-        stem_optimizer = optimizer.get("stem")
+        stem_optimizer = _parallel_embedding_side_optimizer(optimizer)
     else:
         backbone_optimizer = optimizer
         stem_optimizer = None
@@ -684,7 +709,8 @@ def consolidate_stem_shards(ckpt_dir: str):
                 consolidate_state_dict[k] = [v]
     
     for k, v in consolidate_state_dict.items():
-        consolidate_state_dict[k] = torch.cat(v, dim=1)
+        dim = 0 if ("ngram_embeddings" in k or ".embedders." in k) else 1
+        consolidate_state_dict[k] = torch.cat(v, dim=dim)
     torch.save(consolidate_state_dict, consolidate_path / CONSOLIDATE_STEM_NAME)
     logger.info("Consolidated STEM shards !")
     return consolidate_path
@@ -783,10 +809,8 @@ class StemCheckpointManager(CheckpointManager):
 
         logger.info("Saving...")
         # Extract stem_optimizer from optimizer dict if present
-        stem_optimizer = None
-        if isinstance(optimizer, dict):
-            stem_optimizer = optimizer.get("stem")
-        
+        stem_optimizer = _parallel_embedding_side_optimizer(optimizer)
+
         fsdp_state_dict, stem_model_sd, stem_optim_sd = self.get_state_dict(
             model, optimizer, stem_optimizer=stem_optimizer
         )
@@ -862,10 +886,8 @@ class StemCheckpointManager(CheckpointManager):
         logger.info(f"Loading from: {str(path)}")
         # 1) Prepare containers for backbone state (FSDP/TP)
         # Extract stem_optimizer from optimizer dict if present
-        stem_optimizer = None
-        if isinstance(optimizer, dict):
-            stem_optimizer = optimizer.get("stem")
-        
+        stem_optimizer = _parallel_embedding_side_optimizer(optimizer)
+
         if self.train_stage is not None and self.train_stage > 0:
             fsdp_state_dict, _, _ = self.get_state_dict(
                 model=model,

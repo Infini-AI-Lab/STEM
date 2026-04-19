@@ -11,7 +11,6 @@ from typing import Dict, List, Optional, Tuple, Union
 import torch
 from torch import nn
 
-from lingua.stem_dist_utils import VocabParallelEmbedding
 
 @dataclass
 class LongcatNgramConfig:
@@ -42,40 +41,42 @@ class LongcatNgramConfig:
 
 class NgramEmbedding(nn.Module):
     """
-    Hashed n-gram shard embeddings only (no token table, no per-shard up-projections).
+    Stateless embedding: base token vectors plus a sum of hashed n-gram features.
 
-    Forward returns the concatenation of all shard vectors along the last axis
-    (shape ``(..., hidden_size)`` with ``hidden_size = emb_dim * k * (n-1)``).
-    Base token embeddings and :class:`torch.nn.Linear` projections into model
-    width are composed outside this module (see :class:`apps.main.longcat.NgramLMTransformer`).
+    ``ngram_context`` (optional) is up to ``n-1`` prior token ids per row, used
+    when decoding step-by-step; for standard teacher-forced LM training, pass
+    ``ngram_context=None`` so context is taken from ``input_ids`` only.
     """
 
-    def __init__(self, config: Union[LongcatNgramConfig, object], device: Optional[torch.device] = None):
+    def __init__(self, config: Union[LongcatNgramConfig, object], base_embeddings: nn.Embedding):
         super().__init__()
         self.config = config
+        self.word_embeddings = base_embeddings
 
         self.m = float(config.ngram_vocab_size_ratio) * int(config.vocab_size)
         self.k = int(config.emb_split_num)
         self.n = int(config.emb_neighbor_num)
-        self.num_embedders = self.k * (self.n - 1)
-        self.emb_dim = int(self.config.hidden_size) // self.num_embedders
 
-        self._init_ngram_embeddings(device=device)
+        self._init_ngram_embeddings()
         self._vocab_mods_cache: Optional[Dict[Tuple[int, int], List[int]]] = None
 
-    def _init_ngram_embeddings(self, device: Optional[torch.device] = None) -> None:
+    def _init_ngram_embeddings(self) -> None:
+        num_embedders = self.k * (self.n - 1)
+        emb_dim = int(self.config.hidden_size) // num_embedders
         pad_id = int(self.config.pad_token_id)
 
         embedders = []
-        for i in range(self.num_embedders):
+        post_projs = []
+        for i in range(num_embedders):
             vs = int(self.m + i * 2 + 1)
             pidx = pad_id if pad_id < vs else None
-            emb = VocabParallelEmbedding(
-                vs, self.emb_dim, padding_idx=pidx, device=device
-            )
+            emb = nn.Embedding(vs, emb_dim, padding_idx=pidx)
+            proj = nn.Linear(emb_dim, int(self.config.hidden_size), bias=False)
             embedders.append(emb)
+            post_projs.append(proj)
 
         self.embedders = nn.ModuleList(embedders)
+        self.post_projs = nn.ModuleList(post_projs)
 
     def _shift_right_ignore_eos(
         self, tensor: torch.Tensor, n: int, eos_token_id: int
@@ -149,6 +150,9 @@ class NgramEmbedding(nn.Module):
         else:
             context = input_ids
 
+        device = self.word_embeddings.weight.device
+        x = self.word_embeddings(input_ids.to(device)).clone()
+
         vocab_mods = self._precompute_vocab_mods()
         eos_id = int(self.config.eos_token_id)
 
@@ -156,7 +160,6 @@ class NgramEmbedding(nn.Module):
         for i in range(2, self.n + 1):
             shifted_ids[i] = self._shift_right_ignore_eos(context, i - 1, eos_id)
 
-        out = []
         for i in range(2, self.n + 1):
             for j in range(self.k):
                 index = (i - 2) * self.k + j
@@ -168,9 +171,11 @@ class NgramEmbedding(nn.Module):
                 new_ids = (ngram_ids % emb_vocab_dim)[..., -seq_len:]
 
                 x_ngram = self.embedders[index](new_ids)
-                out.append(x_ngram)
+                x_proj = self.post_projs[index](x_ngram)
+                x = x + x_proj
 
-        return torch.cat(out, dim=-1)
+        x = x / (1 + self.k * (self.n - 1))
+        return x
 
 
 __all__ = ["LongcatNgramConfig", "NgramEmbedding"]
