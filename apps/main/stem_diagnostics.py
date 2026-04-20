@@ -74,8 +74,8 @@ class DiagnosticsArgs:
     data_sources: Optional[List[str]] = None
     tokenizer_name: str = "tiktoken"
     tokenizer_path: str = ""
-    seq_len: int = 4096
-    max_batches: int = 2000
+    seq_len: int = 2048
+    max_batches: int = 50
     batch_size: int = 4
 
     compute_loss_decomposition: bool = True
@@ -1146,6 +1146,78 @@ def _resolve_checkpoint(ckpt_dir: str) -> Path:
     return consolidate_path
 
 
+def _ensure_sorted_stem_consolidation(ckpt_path: Path) -> None:
+    """Ensure consolidated_stem.pth exists with correctly SORTED shard ordering.
+
+    The upstream consolidate_stem_shards() uses Path.glob() which returns
+    files in inode order on Linux, NOT alphabetical. This causes
+    stem_model_mp0..mp7 to be concatenated in random column order,
+    producing embeddings with plausible norms but scrambled features —
+    manifesting as PPL 5-10x higher than expected.
+
+    This function:
+    1. Locates the consolidated dir and stem_shards/ dir
+    2. If consolidated_stem.pth already exists, verifies shard count matches
+    3. If it doesn't exist or needs rebuild, creates it with explicit
+       sorted-by-rank-index ordering
+    """
+    # Find the step dir (parent of consolidated/) and consolidated dir
+    if ckpt_path.name == CONSOLIDATE_FOLDER:
+        step_dir = ckpt_path.parent
+        consolidate_dir = ckpt_path
+    elif (ckpt_path / CONSOLIDATE_FOLDER).exists():
+        step_dir = ckpt_path
+        consolidate_dir = ckpt_path / CONSOLIDATE_FOLDER
+    else:
+        step_dir = ckpt_path
+        consolidate_dir = ckpt_path  # might be the consolidated dir itself
+
+    stem_shards_dir = step_dir / "stem_shards"
+    if not stem_shards_dir.exists():
+        # No shards at all — either not a STEM checkpoint or shards are elsewhere
+        logger.debug(f"No stem_shards/ at {stem_shards_dir}, skipping sorted consolidation")
+        return
+
+    shard_files = list(stem_shards_dir.glob("stem_model_mp*.pt"))
+    if not shard_files:
+        return
+
+    output_path = consolidate_dir / CONSOLIDATE_STEM_NAME
+
+    # Always rebuild to guarantee correct ordering
+    def _extract_rank(p: Path) -> int:
+        return int(p.stem.split("mp")[-1])
+
+    shard_files.sort(key=_extract_rank)
+    n_shards = len(shard_files)
+    logger.info(
+        f"Consolidating {n_shards} STEM shards (sorted) from {stem_shards_dir}: "
+        f"{[f.name for f in shard_files]}"
+    )
+
+    consolidated = {}
+    for sf in shard_files:
+        rank = _extract_rank(sf)
+        sd = torch.load(sf, map_location="cpu", weights_only=True)
+        for k, v in sd.items():
+            consolidated.setdefault(k, []).append((rank, v))
+
+    result = {}
+    for k, rank_tensor_pairs in consolidated.items():
+        rank_tensor_pairs.sort(key=lambda x: x[0])
+        ranks = [r for r, _ in rank_tensor_pairs]
+        expected = list(range(len(ranks)))
+        if ranks != expected:
+            raise ValueError(
+                f"Shard rank gap for '{k}': found {ranks}, expected {expected}"
+            )
+        result[k] = torch.cat([t for _, t in rank_tensor_pairs], dim=1)
+
+    consolidate_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(result, output_path)
+    logger.info(f"Sorted STEM consolidation saved to {output_path}")
+
+
 def _validate_stem_embeddings(model: StemLMTransformer, ckpt_path: Path) -> None:
     stem_layer_indices = list(model.stem_layers)
     if not stem_layer_indices: return
@@ -1178,6 +1250,7 @@ def run_diagnostics(cfg: DiagnosticsArgs):
 
     # --- Load STEM model ---
     stem_ckpt = _resolve_checkpoint(cfg.stem_ckpt_dir)
+    _ensure_sorted_stem_consolidation(stem_ckpt)
     if cfg.model_type not in STEM_MODEL_REGISTRY:
         raise ValueError(f"Unknown model_type '{cfg.model_type}'")
     stem_model_cls, stem_args_cls = STEM_MODEL_REGISTRY[cfg.model_type][:2]
