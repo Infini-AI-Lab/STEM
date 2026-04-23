@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from omegaconf import OmegaConf
 import torch
 import wandb
@@ -19,10 +19,19 @@ from apps.main.stem_generate import (
     load_consolidated_model_and_tokenizer,
 )
 from apps.main.stem import StemLMTransformer, StemLMTransformerArgs, STEM_MODEL_REGISTRY
+from apps.main.stem_dag import DAG_STEM_MODEL_REGISTRY
+STEM_MODEL_REGISTRY.update(DAG_STEM_MODEL_REGISTRY)
 from apps.main.eval import LMHarnessArgs, ValidationArgs, all_dicts_same
 from lingua.args import dump_config
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
 from lingua.data import init_choice_state, setup_sources
+from lingua.diagnostics import (
+    DiagnosticsArgs,
+    analyze_eval_samples,
+    diagnostics_output_dir,
+    run_prompt_interventions,
+    write_intervention_rows,
+)
 from lingua.distributed import (
     DistributedArgs,
     dist_mean_dict,
@@ -57,10 +66,44 @@ class StemEvalArgs:
     )
     harness: Optional[LMHarnessArgs] = field(default_factory=LMHarnessArgs)
     validation: Optional[ValidationArgs] = field(default_factory=ValidationArgs)
+    diagnostics: DiagnosticsArgs = field(default_factory=DiagnosticsArgs)
 
     wandb: Optional[Any] = None
 
     global_step: Optional[int] = None  # for in-training evaluation
+
+
+def _collect_diagnostic_prompts(
+    val_args: Optional[ValidationArgs],
+    train_cfg,
+    limit: int,
+    dp_rank: int,
+    dp_ws: int,
+) -> List[str]:
+    if val_args is None or limit <= 0:
+        return ["def add(a, b):\n    return a + b\n"]
+    srcs = {}
+    for src in val_args.sources:
+        path = os.path.join(val_args.root_dir, src)
+        srcs[path] = 1.0
+    # if hasattr(train_cfg, "data") and hasattr(train_cfg.data, "sources"):
+    #     for src in train_cfg.data.sources:
+    #         path = os.path.join(train_cfg.data.root_dir, src)
+    #         srcs[path] = 1.0
+    if not srcs:
+        return ["def add(a, b):\n    return a + b\n"]
+    multi_state = init_choice_state("", srcs, 0, dp_rank, dp_ws, "*.val.jsonl")
+    path_to_iter = setup_sources(multi_state)
+    prompts: List[str] = []
+    for src in path_to_iter:
+        for _step, (content, state) in enumerate(path_to_iter[src]):
+            if state["current_iter"] > 0:
+                break
+            content_key = "text" if "text" in content else "content"
+            prompts.append(content[content_key])
+            if len(prompts) >= limit:
+                return prompts
+    return prompts or ["def add(a, b):\n    return a + b\n"]
 
 
 class StemMockAccelerator:
@@ -170,11 +213,6 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
     for src in val_args.sources:
         path = os.path.join(val_args.root_dir, src)
         srcs[path] = 1.0
-    if hasattr(train_cfg, 'data') and hasattr(train_cfg.data, 'sources'):
-        for src in train_cfg.data.sources:
-            path = os.path.join(train_cfg.data.root_dir, src)
-            srcs[path] = 1.0
-
     # Shard validation data across STEM DP groups so each group processes a
     # different slice.  Within each MP group, all ranks share the same
     # dp_rank and therefore process the same data (required for
@@ -208,16 +246,47 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
         
         _, loglikelihood, _ = generator.generate(texts)
 
-        metrics = defaultdict(list)
+        # DEBUG
+        logger.info(
+            f"DEBUG: texts={len(texts)} lls={len(loglikelihood)} "
+            f"ll_lens(min/med/max)={(min(len(l) for l in loglikelihood) if loglikelihood else 'NA')}/"
+            f"{(sorted(len(l) for l in loglikelihood)[len(loglikelihood)//2] if loglikelihood else 'NA')}/"
+            f"{(max(len(l) for l in loglikelihood) if loglikelihood else 'NA')} "
+            f"text_lens(min/med/max)={min(len(t) for t in texts)}/"
+            f"{sorted(len(t) for t in texts)[len(texts)//2]}/{max(len(t) for t in texts)}"
+        )
+
+        # Use a fixed, ordered set of metric keys so that all distributed
+        # ranks agree on the keys even if a given rank's shard happens to
+        # contain only empty samples.  Using defaultdict(list) alone would
+        # leave the dict empty in that case and cause a collective mismatch
+        # in _stem_dp_mean_dict / dist_mean_dict below.
+        metric_keys = ('nll', 'nll_per_token', 'nll_per_char', 'avg_seqlen')
+        metrics = {k: [] for k in metric_keys}
+        num_skipped = 0
         for i, ll in enumerate(loglikelihood):
+            # A prompt that encodes to just the BOS token (e.g. an empty or
+            # whitespace-only document) yields an empty loglikelihood tensor,
+            # which would make `tmp / len(ll)` divide by zero.  Likewise skip
+            # samples whose raw text is empty to protect `tmp / len(texts[i])`.
+            if len(ll) == 0 or len(texts[i]) == 0:
+                num_skipped += 1
+                continue
             tmp = ll.sum().item()
             metrics['nll'].append(tmp)
             metrics['nll_per_token'].append(tmp / len(ll))
             metrics['nll_per_char'].append(tmp / len(texts[i]))
             metrics['avg_seqlen'].append(len(ll))
-        
-        for m in metrics:
-            metrics[m] = sum(metrics[m]) / len(metrics[m])
+
+        if num_skipped > 0:
+            logger.warning(
+                f"Skipped {num_skipped}/{len(loglikelihood)} validation samples "
+                f"from {src} with empty tokenization or empty text."
+            )
+
+        for m in metric_keys:
+            vals = metrics[m]
+            metrics[m] = (sum(vals) / len(vals)) if len(vals) > 0 else float('nan')
 
         if dp_degree > 1 and torch.distributed.is_initialized():
             if is_stem_initialized():
@@ -342,6 +411,20 @@ def launch_stem_eval(cfg: StemEvalArgs):
         torch.distributed.barrier()
 
     # -- ALL ranks load the model and create the generator --
+    # Prefer the checkpoint's own model_type (written to params.json at training
+    # time) over the CLI value, so DAG checkpoints are loaded with the DAG
+    # class and plain-STEM checkpoints with the plain class even if the user
+    # passes a bare "olmo3" / "llama" / "qwen3" on the CLI.
+    ckpt_params_path = Path(consolidate_path) / "params.json"
+    if ckpt_params_path.exists():
+        ckpt_params = OmegaConf.load(ckpt_params_path)
+        ckpt_model_type = getattr(ckpt_params, "model_type", None)
+        if ckpt_model_type and ckpt_model_type in STEM_MODEL_REGISTRY and ckpt_model_type != cfg.model_type:
+            logger.info(
+                f"Overriding cfg.model_type='{cfg.model_type}' with checkpoint "
+                f"model_type='{ckpt_model_type}' from {ckpt_params_path}"
+            )
+            cfg.model_type = ckpt_model_type
     if cfg.model_type not in STEM_MODEL_REGISTRY:
         raise ValueError(
             f"Unknown model_type '{cfg.model_type}'. "
@@ -357,6 +440,27 @@ def launch_stem_eval(cfg: StemEvalArgs):
     logger.info("STEM model loaded")
     model.eval()
     generator = PackedCausalTransformerGenerator(cfg.generator, model, tokenizer)
+
+    rank = get_global_rank() if torch.distributed.is_initialized() else 0
+    diag_dir = diagnostics_output_dir(cfg.dump_dir, cfg.diagnostics)
+    eval_diag_metrics: Dict[str, float] = {}
+    if cfg.diagnostics.enabled and cfg.diagnostics.collect_interventions:
+        prompts = _collect_diagnostic_prompts(
+            cfg.validation,
+            train_cfg,
+            max(1, cfg.diagnostics.path_ablation_num_batches),
+            dp_rank,
+            dp_ws,
+        )
+        eval_diag_metrics, int_rows = run_prompt_interventions(
+            model,
+            tokenizer,
+            prompts,
+            cfg.diagnostics,
+            prefix="diag/eval",
+        )
+        if rank == 0:
+            write_intervention_rows(diag_dir, int_rows)
 
     # -- lm_eval harness (data-parallel across DP groups) --
     # EvalHarnessLM has _rank=0, _world_size=1 so lm_eval never does any
@@ -412,6 +516,14 @@ def launch_stem_eval(cfg: StemEvalArgs):
             serializable_results = {k: v for k, v in results.items() if k in safe_keys}
             f.write(json.dumps(serializable_results))
         logger.info(f"All evaluation results: {results['results']}")
+        code_summary = analyze_eval_samples(results, cfg.diagnostics, diag_dir)
+        if cfg.diagnostics.enabled:
+            diag_dir.mkdir(parents=True, exist_ok=True)
+            with open(diag_dir / "summary_eval.json", "w") as f:
+                f.write(json.dumps({
+                    "metrics": eval_diag_metrics,
+                    "code_failure_analysis": code_summary,
+                }, indent=2))
         if val_results is not None:
             with open(Path(cfg.dump_dir) / "validation.json", "w") as f:
                 f.write(json.dumps(val_results))
@@ -426,7 +538,7 @@ def launch_stem_eval(cfg: StemEvalArgs):
         if cfg.global_step is not None:
             timestamp["global_step"] = cfg.global_step
         print(
-            json.dumps(timestamp | results["results"]),
+            json.dumps(timestamp | results["results"] | eval_diag_metrics),
             file=open(metric_log_path, mode="a"),
             flush=True,
         )
@@ -525,4 +637,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

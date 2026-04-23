@@ -1,0 +1,29 @@
+# Small diagnostics overlay.  Merge with a normal STEM/STEM-DAG train or eval
+# config via OmegaConf command-line overrides.
+
+diagnostics:
+  enabled: true
+  log_every_n_steps: 100
+  sample_every_n_steps: 500
+  max_batches_per_collection: 1
+  max_token_positions: 1024
+  max_tokens_per_layer_geometry: 2048
+  collect_train_stats: true
+  collect_eval_stats: true
+  collect_token_stats: true
+  collect_geometry: false
+  collect_optimizer_stats: false
+  collect_interventions: false
+  collect_code_error_taxonomy: false
+  save_raw_samples: false
+  output_dir: null
+  layers: null
+  track_frequency_buckets: true
+  frequency_bucket_boundaries: [10, 100, 1000]
+  path_ablation_eval_every_n_steps: 0
+  path_ablation_num_batches: 1
+  token_topk: 50
+  geometry_var_frac: 0.9
+  enable_backward_hooks: false
+  enable_optimizer_moment_logging: false
+  code_tasks: [mbpp, humaneval]

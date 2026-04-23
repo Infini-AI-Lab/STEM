@@ -89,6 +89,11 @@ from lingua.metrics import (
     MetricLogger,
     get_num_params,
 )
+from lingua.diagnostics import (
+    DiagnosticsArgs,
+    StemDiagnosticsCollector,
+    diagnostics_output_dir,
+)
 from lingua.optim import OptimArgs, build_lr_fn
 from lingua.logger import init_logger
 from lingua.tokenizer import build_tokenizer
@@ -209,6 +214,7 @@ class ProjectionFinetuneArgs:
     checkpoint: CheckpointArgs = field(default_factory=CheckpointArgs)
     profiling: ProfilerArgs = field(default_factory=ProfilerArgs)
     logging: LoggingArgs = field(default_factory=LoggingArgs)
+    diagnostics: DiagnosticsArgs = field(default_factory=DiagnosticsArgs)
 
 
 # ---------------------------------------------------------------------------
@@ -767,6 +773,8 @@ def train(args: ProjectionFinetuneArgs):
         )
         logger.info(f"STEM layers: {stem_layers}")
         logger.info(f"Loss type: {args.loss_type}")
+        if args.diagnostics.enabled and args.diagnostics.layers is None:
+            args.diagnostics.layers = list(stem_layers)
 
         # ---- Compute projection dimensions ----
         hidden_dim = compute_ffn_hidden_dim(
@@ -892,6 +900,14 @@ def train(args: ProjectionFinetuneArgs):
         torch_profiler = context_stack.enter_context(
             maybe_run_profiler(args.dump_dir, model, args.profiling)
         )
+        diagnostics = context_stack.enter_context(
+            StemDiagnosticsCollector(
+                model,
+                args.diagnostics,
+                output_dir=diagnostics_output_dir(args.dump_dir, args.diagnostics),
+                prefix="diag/train",
+            )
+        )
 
         nwords_since_last_log = 0
         time_last_log = timer()
@@ -900,6 +916,7 @@ def train(args: ProjectionFinetuneArgs):
         logger.info(f"Starting training from step {train_state.step}")
 
         saved = False
+        diag_step_metrics: Dict[str, float] = {}
         while train_state.step < args.steps:
             train_state.acc_step += 1
             train_state.acc_step = train_state.acc_step % args.grad_acc_steps
@@ -925,17 +942,28 @@ def train(args: ProjectionFinetuneArgs):
             start_timer = torch.cuda.Event(enable_timing=True)
             end_timer = torch.cuda.Event(enable_timing=True)
             start_timer.record()
+            collect_diag_batch = (
+                args.diagnostics.enabled
+                and args.diagnostics.collect_train_stats
+                and args.diagnostics.sample_every_n_steps > 0
+                and train_state.acc_step == 0
+                and train_state.step % args.diagnostics.sample_every_n_steps == 0
+            )
 
             if args.loss_type == "mse":
                 # ===========================================================
                 # MSE mode: layerwise distillation
                 # ===========================================================
                 # 1. Collect intermediates from frozen model
+                if collect_diag_batch:
+                    diagnostics.start_batch(input_ids, task="projection_mse")
                 intermediates, tok_emb, original_nll = (
                     collect_intermediates_and_tok_emb(
                         model, input_ids, stem_layers, target=target,
                     )
                 )
+                if collect_diag_batch:
+                    diagnostics.end_batch()
 
                 # 2. Compute projection NLL (for logging, no grad)
                 proj_nll = compute_projection_nll(
@@ -982,8 +1010,12 @@ def train(args: ProjectionFinetuneArgs):
                 # NLL mode: end-to-end with projection replacing w3
                 # ===========================================================
                 # 1. Compute original NLL (for logging, no grad)
+                if collect_diag_batch:
+                    diagnostics.start_batch(input_ids, task="projection_nll_original")
                 with torch.no_grad():
                     original_nll = model(input_ids, target=target).detach()
+                if collect_diag_batch:
+                    diagnostics.end_batch()
 
                 # 2. Forward with projections replacing w3 (WITH gradients
                 #    flowing through the frozen model to the projections)
@@ -1053,6 +1085,19 @@ def train(args: ProjectionFinetuneArgs):
                     grad_norm = torch.nn.utils.clip_grad_norm_(
                         proj_params, max_norm=args.proj_clip, foreach=False,
                     ).item()
+                if args.diagnostics.enabled:
+                    proj_param_norm = 0.0
+                    proj_grad_param_ratio = 0.0
+                    for param in projections.parameters():
+                        proj_param_norm += param.detach().float().norm().item()
+                        if param.grad is not None:
+                            proj_grad_param_ratio += (
+                                param.grad.detach().float().norm().item()
+                                / (param.detach().float().norm().item() + 1e-12)
+                            )
+                    diag_step_metrics["diag/train/projection/grad_norm"] = grad_norm
+                    diag_step_metrics["diag/train/projection/param_norm_sum"] = proj_param_norm
+                    diag_step_metrics["diag/train/projection/grad_param_ratio_sum"] = proj_grad_param_ratio
 
                 optimizer.step()
                 scheduler.step()
@@ -1117,6 +1162,9 @@ def train(args: ProjectionFinetuneArgs):
                 for layer_idx, ll in per_layer_losses.items():
                     to_sync[f"loss/mse_layer_{layer_idx}"] = ll
                 metrics.update(dist_mean_dict(to_sync))
+                if args.diagnostics.enabled:
+                    metrics.update(diagnostics.scalar_metrics())
+                    metrics.update(diag_step_metrics)
 
                 if get_is_master():
                     metric_logger.log(metrics)
@@ -1150,6 +1198,8 @@ def train(args: ProjectionFinetuneArgs):
                 if layer_losses_str:
                     log_msg += f"  [{layer_losses_str}]"
                 logger.info(log_msg)
+                diagnostics.reset_window()
+                diag_step_metrics = {}
 
             # ---- Checkpointing ----
             saved = False
@@ -1180,6 +1230,8 @@ def train(args: ProjectionFinetuneArgs):
                 projections, optimizer, train_state, args,
                 ckpt_dir, model=model,
             )
+        if args.diagnostics.enabled and get_is_master():
+            diagnostics.write_artifacts({"global_step": train_state.step})
 
     gc.collect()
     logger.info("Projection finetuning complete!")
@@ -1199,4 +1251,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -10,7 +10,7 @@ import wandb
 from pathlib import Path
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from lm_eval import simple_evaluate
 from omegaconf import OmegaConf
 import torch
@@ -26,6 +26,13 @@ from apps.main.olmo3 import OLMo3LMTransformer, OLMo3LMTransformerArgs
 from lingua.args import dump_config
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
 from lingua.data import init_choice_state, setup_sources
+from lingua.diagnostics import (
+    DiagnosticsArgs,
+    analyze_eval_samples,
+    diagnostics_output_dir,
+    run_prompt_interventions,
+    write_intervention_rows,
+)
 from lingua.distributed import (
     DistributedArgs,
     dist_mean_dict,
@@ -91,10 +98,38 @@ class EvalArgs:
     )
     harness: Optional[LMHarnessArgs] = field(default_factory=LMHarnessArgs)
     validation: Optional[ValidationArgs] = field(default_factory=ValidationArgs)
+    diagnostics: DiagnosticsArgs = field(default_factory=DiagnosticsArgs)
 
     wandb: Optional[Any] = None
 
     global_step: Optional[int] = None  # for in-training evaluation
+
+
+def _collect_diagnostic_prompts(val_args: Optional[ValidationArgs], train_cfg, limit: int) -> List[str]:
+    if val_args is None or limit <= 0:
+        return ["def add(a, b):\n    return a + b\n"]
+    srcs = {}
+    for src in val_args.sources:
+        path = os.path.join(val_args.root_dir, src)
+        srcs[path] = 1.0
+    if hasattr(train_cfg, "data") and hasattr(train_cfg.data, "sources"):
+        for src in train_cfg.data.sources:
+            path = os.path.join(train_cfg.data.root_dir, src)
+            srcs[path] = 1.0
+    if not srcs:
+        return ["def add(a, b):\n    return a + b\n"]
+    multi_state = init_choice_state("", srcs, 0, get_global_rank(), get_world_size(), "*.val.jsonl")
+    path_to_iter = setup_sources(multi_state)
+    prompts: List[str] = []
+    for src in path_to_iter:
+        for _step, (content, state) in enumerate(path_to_iter[src]):
+            if state["current_iter"] > 0:
+                break
+            content_key = "text" if "text" in content else "content"
+            prompts.append(content[content_key])
+            if len(prompts) >= limit:
+                return prompts
+    return prompts or ["def add(a, b):\n    return a + b\n"]
 
 
 def all_dicts_same(dict_list):
@@ -281,6 +316,24 @@ def launch_eval(cfg: EvalArgs):
     model.eval()
     generator = PackedCausalTransformerGenerator(cfg.generator, model, tokenizer)
 
+    diag_dir = diagnostics_output_dir(cfg.dump_dir, cfg.diagnostics)
+    eval_diag_metrics: Dict[str, float] = {}
+    if cfg.diagnostics.enabled and cfg.diagnostics.collect_interventions:
+        prompts = _collect_diagnostic_prompts(
+            cfg.validation,
+            train_cfg,
+            max(1, cfg.diagnostics.path_ablation_num_batches),
+        )
+        eval_diag_metrics, int_rows = run_prompt_interventions(
+            model,
+            tokenizer,
+            prompts,
+            cfg.diagnostics,
+            prefix="diag/eval",
+        )
+        if get_global_rank() == 0:
+            write_intervention_rows(diag_dir, int_rows)
+
     wrap = EvalHarnessLM(generator)
     results = simple_evaluate(wrap, **asdict(cfg.harness))
     val_results =  None
@@ -295,6 +348,14 @@ def launch_eval(cfg: EvalArgs):
             serializable_results = {k: v for k, v in results.items() if k in safe_keys}
             f.write(json.dumps(serializable_results))
         logger.info(f"All evaluation results: {results['results']}")
+        code_summary = analyze_eval_samples(results, cfg.diagnostics, diag_dir)
+        if cfg.diagnostics.enabled:
+            diag_dir.mkdir(parents=True, exist_ok=True)
+            with open(diag_dir / "summary_eval.json", "w") as f:
+                f.write(json.dumps({
+                    "metrics": eval_diag_metrics,
+                    "code_failure_analysis": code_summary,
+                }, indent=2))
         if val_results is not None:
             with open(Path(cfg.dump_dir) / "validation.json", "w") as f:
                 f.write(json.dumps(val_results))
@@ -309,7 +370,7 @@ def launch_eval(cfg: EvalArgs):
         if cfg.global_step is not None:
             timestamp["global_step"] = cfg.global_step
         print(
-            json.dumps(timestamp | results["results"]),
+            json.dumps(timestamp | results["results"] | eval_diag_metrics),
             file=open(metric_log_path, mode="a"),
             flush=True,
         )

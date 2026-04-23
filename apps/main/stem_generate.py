@@ -81,9 +81,35 @@ def load_consolidated_model_and_tokenizer(
         backbone_dict = backbone_dict["model"]
     if next(iter(backbone_dict.keys())).startswith("model"):
         backbone_dict = {k.replace("model.", "lm_transformer."): v for k, v in backbone_dict.items()}
-    # relax strict loading only for stem_embeddings
+    # Relax strict loading for keys that are either (a) loaded from a separate
+    # consolidation (stem_embeddings, loaded below) or (b) structurally
+    # reconstructed at model construction from params.json (DAG `alpha` scalar,
+    # which some DCP save paths drop for 1-element params; `alpha_init` from
+    # params.json fully determines its value).
     missing_keys, unexpected_keys = model.load_state_dict(backbone_dict, strict=False)
-    assert len(missing_keys) == len(model.lm_transformer.stem_layers) and all(key.startswith("stem_embeddings.") for key in missing_keys), f"Missing keys: {missing_keys}"
+
+    stem_layer_indices = list(model.lm_transformer.stem_layers)
+    expected_stem_emb_missing = {
+        f"stem_embeddings.{i}.weight" for i in range(len(stem_layer_indices))
+    }
+    expected_alpha_missing = {
+        f"lm_transformer.layers.{i}.feed_forward.alpha" for i in stem_layer_indices
+    }
+    missing_set = set(missing_keys)
+    unaccounted_missing = missing_set - expected_stem_emb_missing - expected_alpha_missing
+    assert not unaccounted_missing, f"Missing keys: {sorted(unaccounted_missing)}"
+    # Every stem_embedding key must be missing here (loaded from stem shards below).
+    assert expected_stem_emb_missing.issubset(missing_set), (
+        f"Unexpected stem_embeddings layout; got missing={sorted(missing_set)}"
+    )
+    alpha_absent = expected_alpha_missing & missing_set
+    if alpha_absent:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "DAG `alpha` parameters absent from backbone checkpoint; using "
+            "`alpha_init` from params.json (module default init). Affected: "
+            f"{sorted(alpha_absent)}"
+        )
     assert len(unexpected_keys) == 0, f"Unexpected keys: {unexpected_keys}"
     
     if is_stem_initialized():

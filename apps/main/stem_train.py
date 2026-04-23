@@ -53,6 +53,13 @@ from lingua.metrics import (
     MetricLogger,
     get_num_params,
 )
+from lingua.diagnostics import (
+    DiagnosticsArgs,
+    StemDiagnosticsCollector,
+    diagnostics_output_dir,
+    run_intervention_suite,
+    write_intervention_rows,
+)
 from lingua.optim import build_optimizer
 from lingua.logger import init_logger
 from lingua.tokenizer import build_tokenizer
@@ -119,6 +126,7 @@ class StemTrainArgs(TrainArgs):
     # Freeze backbone (lm_transformer) parameters during training.
     train_stage: Optional[int] = None
     resume_stage: bool = False
+    diagnostics: DiagnosticsArgs = field(default_factory=DiagnosticsArgs)
     
     
 preemption_flag = dict(flag=False)
@@ -408,10 +416,19 @@ def train(args: StemTrainArgs):
         torch_profiler = context_stack.enter_context(
             maybe_run_profiler(args.dump_dir, model, args.profiling)
         )
+        diagnostics = context_stack.enter_context(
+            StemDiagnosticsCollector(
+                model,
+                args.diagnostics,
+                output_dir=diagnostics_output_dir(args.dump_dir, args.diagnostics),
+                prefix="diag/train",
+            )
+        )
 
         nwords_since_last_log = 0
         time_last_log = timer()
         gc.collect()
+        diag_step_metrics: Dict[str, float] = {}
         while train_state.step < args.steps:
             # We constrain train_state.acc_step to be in range 0 to args.grad_acc_steps - 1
             train_state.acc_step += 1
@@ -482,7 +499,39 @@ def train(args: StemTrainArgs):
                     next(model.parameters()).grad is None
                 ), "Probe model shouldn't have grads at this point"
 
+            collect_diag_batch = (
+                args.diagnostics.enabled
+                and args.diagnostics.collect_train_stats
+                and args.diagnostics.sample_every_n_steps > 0
+                and train_state.acc_step == 0
+                and train_state.step % args.diagnostics.sample_every_n_steps == 0
+            )
+            if collect_diag_batch:
+                diagnostics.start_batch(input_ids, task="train")
             loss = model(input_ids, labels)
+            if collect_diag_batch:
+                diagnostics.end_batch()
+
+            if (
+                args.diagnostics.enabled
+                and args.diagnostics.collect_interventions
+                and args.diagnostics.path_ablation_eval_every_n_steps > 0
+                and train_state.acc_step == 0
+                and train_state.step % args.diagnostics.path_ablation_eval_every_n_steps == 0
+            ):
+                int_metrics, int_rows = run_intervention_suite(
+                    model,
+                    input_ids[: args.diagnostics.path_ablation_num_batches],
+                    labels[: args.diagnostics.path_ablation_num_batches],
+                    args.diagnostics,
+                    prefix="diag/train",
+                )
+                diag_step_metrics.update(int_metrics)
+                if get_is_master():
+                    write_intervention_rows(
+                        diagnostics_output_dir(args.dump_dir, args.diagnostics),
+                        int_rows,
+                    )
 
             if args.grad_acc_steps > 1:
                 model.set_requires_gradient_sync(train_state.acc_step == 0)
@@ -535,6 +584,11 @@ def train(args: StemTrainArgs):
                                 f"Warning: {len(zero_grads)}/{len(params_with_grad)} stem_embeddings parameters "
                                 f"have zero gradients."
                             )
+
+                if args.diagnostics.enabled:
+                    diag_step_metrics.update(
+                        diagnostics.collect_param_metrics(optimizer)
+                    )
 
                 # Sync stem_embeddings gradients across STEM data-parallel ranks.
                 # FSDP handles gradient sync for lm_transformer, but stem_embeddings
@@ -642,6 +696,9 @@ def train(args: StemTrainArgs):
 
                 metrics.update(dist_mean_dict(to_sync))
                 metrics.update(alpha_dict)
+                if args.diagnostics.enabled:
+                    metrics.update(diagnostics.scalar_metrics())
+                    metrics.update(diag_step_metrics)
 
                 if get_is_master():
                     metric_logger.log(metrics)
@@ -671,6 +728,8 @@ def train(args: StemTrainArgs):
                     alpha_strs = [f"L{k.split('_')[1]}={v:.4f}" for k, v in alpha_dict.items()]
                     log_msg += f"  gates: [{', '.join(alpha_strs)}]"
                 logger.info(log_msg)
+                diagnostics.reset_window()
+                diag_step_metrics = {}
 
             saved = False
             if every_n_steps(
@@ -746,6 +805,8 @@ def train(args: StemTrainArgs):
             args,
             device_mesh=world_mesh,
         )
+    if args.diagnostics.enabled and get_is_master():
+        diagnostics.write_artifacts({"global_step": train_state.step})
     gc.collect()
     
     
