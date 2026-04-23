@@ -5,13 +5,47 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
 
 from lingua.stem_dist_utils import VocabParallelEmbedding
+
+
+def segment_ids_from_packed_lengths(
+    lengths: torch.Tensor, *, device: torch.device, dtype: torch.dtype = torch.long
+) -> torch.Tensor:
+    """
+    Per-position document index for a single concatenation of run lengths, shape ``(sum(lengths),)``.
+    Used to align n-gram segments with :func:`pack_prompts` / block attention in packed prefill.
+    """
+    if lengths.dim() != 1:
+        raise ValueError("lengths must be 1-D")
+    parts: List[torch.Tensor] = []
+    for i, ell in enumerate(lengths.tolist()):
+        parts.append(torch.full((int(ell),), int(i), device=device, dtype=dtype))
+    if not parts:
+        return torch.zeros(0, device=device, dtype=dtype)
+    return torch.cat(parts, dim=0)
+
+
+def _as_reset_token_ids(value: object, eos_id: int) -> Tuple[int, ...]:
+    """If None, return (eos_id,). Empty means no id-based n-gram segment breaks (only ``ngram_segment_ids``).
+
+    Accepts a scalar, ``list``/``tuple``/``range``, or a :class:`collections.abc.Sequence`
+    (e.g. OmegaConf ``ListConfig``) of ints.
+    """
+    if value is None:
+        return (int(eos_id),)
+    if isinstance(value, (str, bytes)):
+        raise TypeError("ngram_reset_token_ids must be a sequence of ints, not a string/bytes")
+    if isinstance(value, Sequence):
+        return tuple(int(x) for x in value)
+    return (int(value),)  # type: ignore[arg-type]
+
 
 @dataclass
 class LongcatNgramConfig:
@@ -27,6 +61,15 @@ class LongcatNgramConfig:
     """Splits per order (k in the reference)."""
     ngram_vocab_size_ratio: float
     """Base multiplier m = ratio * vocab_size for n-gram table sizes."""
+    ngram_reset_token_ids: Optional[Union[Tuple[int, ...], List[int]]] = field(
+        default=None
+    )
+    """
+    N-gram context resets after these token ids: the next position starts a new
+    n-gram segment. If None, it defaults to ``(eos_token_id,)`` (unchanged
+    from the original EOS-only shift). If empty, only ``ngram_segment_ids`` in
+    :meth:`NgramEmbedding.forward` and position 0 set boundaries.
+    """
 
     def __post_init__(self) -> None:
         n = self.emb_neighbor_num
@@ -62,6 +105,9 @@ class NgramEmbedding(nn.Module):
 
         self._init_ngram_embeddings(device=device)
         self._vocab_mods_cache: Optional[Dict[Tuple[int, int], List[int]]] = None
+        self._ngram_reset_ids: Tuple[int, ...] = _as_reset_token_ids(
+            getattr(config, "ngram_reset_token_ids", None), int(config.eos_token_id)
+        )
 
     def _init_ngram_embeddings(self, device: Optional[torch.device] = None) -> None:
         pad_id = int(self.config.pad_token_id)
@@ -77,27 +123,43 @@ class NgramEmbedding(nn.Module):
 
         self.embedders = nn.ModuleList(embedders)
 
-    def _shift_right_ignore_eos(
-        self, tensor: torch.Tensor, n: int, eos_token_id: int
+    def _build_segment_starts(
+        self,
+        context: torch.Tensor,
+        ngram_segment_ids: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        """Shift tensor right by n positions, resetting at EOS tokens."""
+        """
+        For each (batch, t), true means position t is the first token of an
+        n-gram segment. Boundaries: position 0; a change in ``ngram_segment_ids``;
+        or the position after a token in ``_ngram_reset_ids``.
+        """
+        batch_size, seq_len = context.shape
+        device = context.device
+        st = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
+        st[:, 0] = True
+        if ngram_segment_ids is not None:
+            if ngram_segment_ids.shape != (batch_size, seq_len):
+                raise ValueError(
+                    f"ngram_segment_ids {ngram_segment_ids.shape} != context {context.shape}"
+                )
+            st[:, 1:] = ngram_segment_ids[:, 1:] != ngram_segment_ids[:, :-1]
+        for rid in self._ngram_reset_ids:
+            st[:, 1:] |= context[:, :-1] == int(rid)
+        return st
+
+    def _shift_right_at_starts(
+        self, tensor: torch.Tensor, n: int, segment_starts: torch.Tensor
+    ) -> torch.Tensor:
+        """Right-shift by n within each segment delimited by ``segment_starts`` (zeros elsewhere)."""
         batch_size, seq_len = tensor.shape
         result = torch.zeros_like(tensor)
-        eos_mask = tensor == eos_token_id
-
         for i in range(batch_size):
-            eos_positions = eos_mask[i].nonzero(as_tuple=True)[0]
-            prev_idx = 0
-
-            for eos_idx in eos_positions:
-                end_idx = eos_idx.item() + 1
-                if end_idx - prev_idx > n:
-                    result[i, prev_idx + n : end_idx] = tensor[i, prev_idx : end_idx - n]
-                prev_idx = end_idx
-
-            if prev_idx < seq_len and seq_len - prev_idx > n:
-                result[i, prev_idx + n : seq_len] = tensor[i, prev_idx : seq_len - n]
-
+            starts = segment_starts[i].nonzero(as_tuple=True)[0]
+            for j in range(len(starts)):
+                start = int(starts[j].item())
+                end = int(starts[j + 1].item()) if j + 1 < len(starts) else seq_len
+                if end - start > n:
+                    result[i, start + n : end] = tensor[i, start : end - n]
         return result
 
     def _precompute_vocab_mods(self) -> Dict[Tuple[int, int], List[int]]:
@@ -139,6 +201,7 @@ class NgramEmbedding(nn.Module):
         self,
         input_ids: torch.Tensor,
         ngram_context: Optional[torch.Tensor] = None,
+        ngram_segment_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         seq_len = input_ids.size(-1)
 
@@ -149,12 +212,26 @@ class NgramEmbedding(nn.Module):
         else:
             context = input_ids
 
+        seg_for_context: Optional[torch.Tensor] = None
+        if ngram_segment_ids is not None:
+            if ngram_context is not None:
+                p = ngram_segment_ids[:, 0:1].expand(-1, self.n - 1)
+                seg_for_context = torch.cat([p, ngram_segment_ids], dim=-1)
+            else:
+                seg_for_context = ngram_segment_ids
+            if seg_for_context.shape != context.shape:
+                raise ValueError(
+                    f"ngram_segment_ids (extended) shape {seg_for_context.shape} != context {context.shape}"
+                )
+        # when ngram_segment_ids is None, use only _ngram_reset_ids (default eos) — training default
+
+        seg_starts = self._build_segment_starts(context, seg_for_context)
+
         vocab_mods = self._precompute_vocab_mods()
-        eos_id = int(self.config.eos_token_id)
 
         shifted_ids: Dict[int, torch.Tensor] = {}
         for i in range(2, self.n + 1):
-            shifted_ids[i] = self._shift_right_ignore_eos(context, i - 1, eos_id)
+            shifted_ids[i] = self._shift_right_at_starts(context, i - 1, seg_starts)
 
         out = []
         for i in range(2, self.n + 1):
@@ -173,4 +250,4 @@ class NgramEmbedding(nn.Module):
         return torch.cat(out, dim=-1)
 
 
-__all__ = ["LongcatNgramConfig", "NgramEmbedding"]
+__all__ = ["LongcatNgramConfig", "NgramEmbedding", "segment_ids_from_packed_lengths"]

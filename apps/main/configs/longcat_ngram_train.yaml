@@ -1,0 +1,62 @@
+# Longcat n-gram LM: set dump_dir, data.root_dir, data.tokenizer.path before running.
+# Vocab-parallel tables use distributed.stem_parallel_size (must divide each n-gram table size).
+
+name: longcat_ngram_train
+dump_dir: logs/longcat_ngram_train
+model_type: longcat
+steps: 200
+seed: 42
+
+optim:
+  lr: 3e-4
+  warmup: 2000
+  lr_min_ratio: 0.000001
+  clip: 10.0
+
+distributed:
+  fsdp_type: full_shard
+  compile: false
+  model_dtype: bf16
+  matmul_allow_tf32: false
+  selective_activation_checkpointing: false
+  tp_size: 1
+  stem_parallel_size: 1
+
+model:
+  dim: 512
+  hidden_size: 512
+  n_layers: 8
+  n_heads: 8
+  n_kv_heads: 8
+  pad_token_id: 0
+  eos_token_id: 1
+  emb_neighbor_num: 3
+  emb_split_num: 2
+  ngram_vocab_size_ratio: 0.25
+
+data:
+  root_dir: data/dolmino-mix-subset_shuffled
+  sources:
+    ingredient1-common_crawl-high-quality_20_science_math_and_technology: 1.0
+  batch_size: 4
+  prefetch_size: 64
+  seq_len: 2048
+  n_views: 2
+  load_async: true
+  tokenizer:
+    name: bytes
+    path: tokenizer/original/tokenizer.model
+
+checkpoint:
+  dump:
+    every: 100
+    keep: 1
+  eval:
+    every: 1000000
+    keep: 1
+
+logging:
+  freq: 10
+
+profiling:
+  run: false

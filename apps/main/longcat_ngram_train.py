@@ -67,7 +67,21 @@ from apps.main.train import TrainArgs, TrainState, validate_train_args, every_n_
 from apps.main.longcat import (
     LongcatLMTransformerArgs,
     LongcatLMTransformer,
+    LongcatOLMo3LMTransformer,
+    LongcatOLMo3LMTransformerArgs,
+    LongcatQwen3LMTransformer,
+    LongcatQwen3LMTransformerArgs,
     build_longcat_lm_fsdp_grouping_plan,
+    build_longcat_olmo3_lm_fsdp_grouping_plan,
+    build_longcat_qwen3_lm_fsdp_grouping_plan,
+)
+from apps.main.olmo3 import (
+    get_no_recompute_ops as olmo3_get_no_recompute_ops,
+    get_num_flop_per_token as olmo3_get_num_flop_per_token,
+)
+from apps.main.qwen3 import (
+    get_no_recompute_ops as qwen3_get_no_recompute_ops,
+    get_num_flop_per_token as qwen3_get_num_flop_per_token,
 )
 from apps.main.transformer import (
     get_no_recompute_ops as llama_get_no_recompute_ops,
@@ -80,7 +94,13 @@ from lingua.stem_dist_utils import (
 )
 
 
-def sync_ngram_embeddings_across_dp(model: LongcatLMTransformer):
+def sync_ngram_embeddings_across_dp(
+    model: Union[
+        LongcatLMTransformer,
+        LongcatQwen3LMTransformer,
+        LongcatOLMo3LMTransformer,
+    ],
+):
     """Broadcast n-gram embedding weights from DP rank 0 (same rationale as STEM)."""
     if get_stem_data_parallel_world_size() <= 1:
         return
@@ -101,6 +121,20 @@ LONGCAT_MODEL_REGISTRY = {
         build_longcat_lm_fsdp_grouping_plan,
         llama_get_no_recompute_ops,
         llama_get_num_flop_per_token,
+    ),
+    "qwen3": (
+        LongcatQwen3LMTransformer,
+        LongcatQwen3LMTransformerArgs,
+        build_longcat_qwen3_lm_fsdp_grouping_plan,
+        qwen3_get_no_recompute_ops,
+        qwen3_get_num_flop_per_token,
+    ),
+    "olmo3": (
+        LongcatOLMo3LMTransformer,
+        LongcatOLMo3LMTransformerArgs,
+        build_longcat_olmo3_lm_fsdp_grouping_plan,
+        olmo3_get_no_recompute_ops,
+        olmo3_get_num_flop_per_token,
     ),
 }
 
@@ -141,7 +175,11 @@ def _tensor_to_log_scalar(t: Optional[torch.Tensor]) -> Optional[float]:
 @dataclass
 class LongcatTrainArgs(TrainArgs):
     model_type: str = "longcat"
-    model: LongcatLMTransformerArgs = field(default_factory=LongcatLMTransformerArgs)
+    model: Union[
+        LongcatLMTransformerArgs,
+        LongcatQwen3LMTransformerArgs,
+        LongcatOLMo3LMTransformerArgs,
+    ] = field(default_factory=LongcatLMTransformerArgs)
 
     # Separate learning rate / schedule for ``ngram_embeddings`` (outside FSDP).
     ngram_lr: Optional[float] = None
