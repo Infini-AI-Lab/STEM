@@ -17,7 +17,11 @@ import xformers
 from apps.main.stem import StemLMTransformer, StemLMTransformerArgs, STEM_MODEL_REGISTRY
 from lingua.args import dataclass_from_dict
 from lingua.checkpoint import CONSOLIDATE_NAME, consolidate_checkpoints
-from lingua.stem_checkpoint import CONSOLIDATE_STEM_NAME, consolidate_stem_shards, load_stem_shards_resharded
+from lingua.stem_checkpoint import (
+    CONSOLIDATE_STEM_NAME,
+    consolidate_stem_shards,
+    load_stem_shards_resharded,
+)
 from lingua.stem_dist_utils import ParallelEmbedding, is_stem_initialized
 from lingua.tokenizer import Tokenizer, build_tokenizer
 from lingua.transformer import (
@@ -46,6 +50,7 @@ def load_consolidated_model_and_tokenizer(
     model_args_cls=None,
     tokenizer_name: Optional[str] = None,
     tokenizer_path: Optional[str] = None,
+    model_overrides: Optional[dict] = None,
 ):
     ckpt_path = Path(consolidated_path)
     config = ckpt_path / "params.json"
@@ -66,7 +71,8 @@ def load_consolidated_model_and_tokenizer(
     param_dtype = dict(fp32=torch.float32, fp16=torch.float16, bf16=torch.bfloat16)[
         config.distributed.model_dtype
     ]
-    model_args = dataclass_from_dict(model_args_cls, config.model, strict=False)
+    model_cfg = OmegaConf.merge(config.model, OmegaConf.create(model_overrides)) if model_overrides else config.model
+    model_args = dataclass_from_dict(model_args_cls, model_cfg, strict=False)
     tok_name = config.data.tokenizer.name
     tok_path = config.data.tokenizer.path
     if tokenizer_path:
@@ -118,10 +124,17 @@ def load_consolidated_model_and_tokenizer(
         ckpt_parent = Path(os.path.dirname(ckpt_path))
         load_stem_shards_resharded(model, ckpt_parent)
     else:
-        # Non-distributed: load consolidated (full) stem weights
-        if not (ckpt_path / CONSOLIDATE_STEM_NAME).exists():
-            consolidate_stem_shards(os.path.dirname(ckpt_path))
-        
+        # Non-distributed: load consolidated (full) stem weights.
+        #
+        # We call ``consolidate_stem_shards`` unconditionally (rather than
+        # gating it on the existence of ``consolidated_stem.pth``) so that a
+        # stale, column-scrambled consolidation produced by a pre-fix
+        # version of this function is detected via the missing sorted-order
+        # marker and rebuilt in rank-sorted order.  When the marker is
+        # already present, the call short-circuits without re-reading the
+        # shards, so the hot path is effectively free.
+        consolidate_stem_shards(os.path.dirname(ckpt_path))
+
         stem_dict = torch.load(ckpt_path / CONSOLIDATE_STEM_NAME, weights_only=True)
         with torch.no_grad():
             for module_name, module in model.named_modules():

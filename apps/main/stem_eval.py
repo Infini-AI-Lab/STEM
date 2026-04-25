@@ -61,6 +61,18 @@ class StemEvalArgs:
     metric_log_dir: Optional[str] = None
     ckpt_dir: str = ""
     stem_parallel_size: int = 1  # STEM model parallel size (>1 enables distributed ParallelEmbedding)
+    # Optional overrides for the tokenizer — by default the tokenizer recorded
+    # in the checkpoint's params.json is used, but if that path is not usable
+    # at eval time (e.g. the training-time tmpfs dir no longer exists or has
+    # been rehydrated without the tokenizer files) these let the caller point
+    # at a valid HF / SentencePiece / tiktoken tokenizer directory instead.
+    tokenizer_path: Optional[str] = None
+    tokenizer_name: Optional[str] = None
+    # Optional override for model-architecture fields that are not stored in
+    # the checkpoint's params.json (or that you want to change at eval time).
+    # Currently supports: alpha_mode ("sigmoid_gated" | "sum").
+    # Example CLI usage: model_alpha_mode=sum
+    model_alpha_mode: Optional[str] = None
     generator: PackedCausalTransformerGeneratorArgs = field(
         default_factory=PackedCausalTransformerGeneratorArgs
     )
@@ -246,16 +258,6 @@ def eval_on_val(generator, val_args: ValidationArgs, train_cfg):
         
         _, loglikelihood, _ = generator.generate(texts)
 
-        # DEBUG
-        logger.info(
-            f"DEBUG: texts={len(texts)} lls={len(loglikelihood)} "
-            f"ll_lens(min/med/max)={(min(len(l) for l in loglikelihood) if loglikelihood else 'NA')}/"
-            f"{(sorted(len(l) for l in loglikelihood)[len(loglikelihood)//2] if loglikelihood else 'NA')}/"
-            f"{(max(len(l) for l in loglikelihood) if loglikelihood else 'NA')} "
-            f"text_lens(min/med/max)={min(len(t) for t in texts)}/"
-            f"{sorted(len(t) for t in texts)[len(texts)//2]}/{max(len(t) for t in texts)}"
-        )
-
         # Use a fixed, ordered set of metric keys so that all distributed
         # ranks agree on the keys even if a given rank's shard happens to
         # contain only empty samples.  Using defaultdict(list) alone would
@@ -432,10 +434,16 @@ def launch_stem_eval(cfg: StemEvalArgs):
         )
     stem_model_cls, stem_args_cls = STEM_MODEL_REGISTRY[cfg.model_type][:2]
     logger.info(f"Loading STEM model (type={cfg.model_type}, cls={stem_model_cls.__name__})")
+    model_overrides = {}
+    if cfg.model_alpha_mode is not None:
+        model_overrides["alpha_mode"] = cfg.model_alpha_mode
     model, tokenizer, train_cfg = load_consolidated_model_and_tokenizer(
         consolidate_path,
         model_cls=stem_model_cls,
         model_args_cls=stem_args_cls,
+        tokenizer_name=cfg.tokenizer_name,
+        tokenizer_path=cfg.tokenizer_path,
+        model_overrides=model_overrides if model_overrides else None,
     )
     logger.info("STEM model loaded")
     model.eval()

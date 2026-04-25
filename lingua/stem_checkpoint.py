@@ -40,6 +40,12 @@ RE_CKPT = r"__\d_\d\.distcp"
 CONSOLIDATE_FOLDER = "consolidated"
 CONSOLIDATE_NAME = "consolidated.pth"
 CONSOLIDATE_STEM_NAME = "consolidated_stem.pth"
+# Sentinel written next to `consolidated_stem.pth` whenever it was built with
+# explicit rank-sorted shard ordering (see ``consolidate_stem_shards`` below).
+# Single-GPU loaders treat an output file without this marker as potentially
+# stale (may have been produced by an older, unsorted ``Path.glob`` version
+# of this function that silently scrambled the column order).
+STEM_SORTED_MARKER_NAME = "consolidated_stem.pth.sorted_v1"
 
 CONFIG_NAME = "params.json"
 TRAIN_STATE_NAME = "train_state_{:05d}.json"
@@ -534,31 +540,121 @@ def load_from_checkpoint(
     load_stem_shards_resharded(model, ckpt_path, stem_optimizer=stem_optimizer)
   
 
-def consolidate_stem_shards(ckpt_dir: str):
+def consolidate_stem_shards(ckpt_dir: str, force: bool = False):
     """
-    Consolidates all STEM shards in a directory to a single file
-    Consolidate checkpoint is saved in a subdirectory of ckpt_dir
+    Consolidate all STEM ``stem_model_mp*.pt`` shards in ``ckpt_dir`` into a
+    single ``consolidated/consolidated_stem.pth`` file with **rank-sorted**
+    shard ordering along the embedding dimension.
+
+    Historically this function used ``Path.glob("stem_model_mp*.pt")`` and
+    concatenated shards in whatever order Linux happened to return them
+    (inode order, not lexicographic / rank order).  That produced
+    ``consolidated_stem.pth`` files with scrambled columns: plausible norms
+    and means but rank-``i`` features written into rank-``j`` slots of the
+    stem embedding table.  In single-GPU eval / generate, this manifests as
+    5-10x higher perplexity and ``ablate_stem_delta_loss < 0`` (zeroing STEM
+    improves the model) relative to a correctly-loaded checkpoint — because
+    the non-distributed load path uses this consolidated file directly
+    (the distributed ``load_stem_shards_resharded`` path is unaffected
+    because it iterates ``source_shard_indices = list(range(...))``).
+
+    The current implementation:
+      1. Sorts shard files by their mp-rank integer (``stem_model_mp3.pt`` → 3).
+      2. Verifies the discovered rank set is contiguous ``0..N-1``.
+      3. Concatenates along the embedding dim in rank order.
+      4. Writes a sentinel marker (``STEM_SORTED_MARKER_NAME``) next to the
+         output so downstream loaders can tell a correct file apart from
+         a legacy scrambled one.
+
+    Idempotency:
+      - If the output file exists AND the sorted-order marker is present
+        AND ``force=False``, this function is a no-op — stem_eval /
+        stem_generate call sites can invoke it unconditionally without
+        paying the rebuild cost on every load.
+      - Any consolidated file without the marker (legacy, potentially
+        scrambled) is rebuilt and the marker is written.
+      - ``force=True`` always rebuilds regardless of marker state.
 
     Parameters:
-        ckpt_dir: str - path to the directory containing the checkpoints
+        ckpt_dir: Path to the step directory (the one containing
+                  ``stem_shards/`` and ``consolidated/``, not the
+                  ``consolidated/`` sub-dir itself).
+        force:    If True, always rebuild even if a valid marker is present.
 
-    Returns the path to the consolidated checkpoint
+    Returns the path to the ``consolidated/`` sub-directory.
     """
     consolidate_path = Path(ckpt_dir) / CONSOLIDATE_FOLDER
     stem_dir = Path(ckpt_dir) / STEM_SUBDIR_NAME
-    consolidate_state_dict = {}
-    for shard_file in stem_dir.glob("stem_model_mp*.pt"):
-        state_dict = torch.load(shard_file, map_location="cpu")
+    output_file = consolidate_path / CONSOLIDATE_STEM_NAME
+    marker_file = consolidate_path / STEM_SORTED_MARKER_NAME
+
+    if output_file.exists() and marker_file.exists() and not force:
+        logger.info(
+            f"Consolidated STEM file at {output_file} has sorted-order marker; "
+            f"skipping rebuild (use force=True to override)"
+        )
+        return consolidate_path
+
+    if not stem_dir.exists():
+        raise FileNotFoundError(
+            f"Cannot consolidate STEM shards: {stem_dir} does not exist. "
+            f"Expected per-rank shards under {stem_dir}/stem_model_mp*.pt"
+        )
+
+    shard_files = list(stem_dir.glob("stem_model_mp*.pt"))
+    if not shard_files:
+        raise FileNotFoundError(
+            f"No stem_model_mp*.pt shards found in {stem_dir}"
+        )
+
+    def _extract_rank(p: Path) -> int:
+        return int(p.stem.split("mp")[-1])
+
+    shard_files.sort(key=_extract_rank)
+    ranks = [_extract_rank(p) for p in shard_files]
+    expected_ranks = list(range(len(ranks)))
+    if ranks != expected_ranks:
+        raise ValueError(
+            f"STEM shards in {stem_dir} are not a contiguous rank sequence: "
+            f"found ranks={ranks}, expected={expected_ranks}. Shards appear "
+            f"to be missing or duplicated; refusing to build a partial "
+            f"consolidation that would silently shift embedding columns."
+        )
+
+    if output_file.exists() and not marker_file.exists():
+        logger.warning(
+            f"Rebuilding {output_file}: the existing file lacks the "
+            f"{STEM_SORTED_MARKER_NAME} marker and may have been produced by "
+            f"an older glob-order (unsorted) version of this function with "
+            f"scrambled embedding columns."
+        )
+    logger.info(
+        f"Consolidating {len(shard_files)} STEM shards from {stem_dir} "
+        f"in rank-sorted order: {[f.name for f in shard_files]}"
+    )
+
+    accum: Dict[str, list] = {}
+    for shard_file in shard_files:
+        state_dict = torch.load(shard_file, map_location="cpu", weights_only=True)
         for k, v in state_dict.items():
-            if k in consolidate_state_dict:
-                consolidate_state_dict[k].append(v)
-            else:
-                consolidate_state_dict[k] = [v]
-    
-    for k, v in consolidate_state_dict.items():
-        consolidate_state_dict[k] = torch.cat(v, dim=1)
-    torch.save(consolidate_state_dict, consolidate_path / CONSOLIDATE_STEM_NAME)
-    logger.info("Consolidated STEM shards !")
+            accum.setdefault(k, []).append(v)
+
+    consolidated: Dict[str, torch.Tensor] = {
+        k: torch.cat(v, dim=1) for k, v in accum.items()
+    }
+
+    consolidate_path.mkdir(parents=True, exist_ok=True)
+    torch.save(consolidated, output_file)
+    marker_file.write_text(
+        f"consolidated_stem.pth was built by "
+        f"lingua.stem_checkpoint.consolidate_stem_shards from "
+        f"{len(shard_files)} rank-sorted shards "
+        f"({[f.name for f in shard_files]}).\n"
+    )
+    logger.info(
+        f"Consolidated STEM shards -> {output_file} "
+        f"(marker: {marker_file.name})"
+    )
     return consolidate_path
                         
 class StemCheckpointManager(CheckpointManager):

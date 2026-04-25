@@ -89,6 +89,7 @@ class Qwen3STEMDagTransformerBlock(Qwen3StemTransformerBlock):
                 multiple_of=args.multiple_of,
                 ffn_dim_multiplier=args.ffn_dim_multiplier,
                 alpha_init=args.alpha_init,
+                alpha_mode=args.alpha_mode,
             )
 
 
@@ -103,6 +104,7 @@ class OLMo3STEMDagTransformerBlock(OLMo3StemTransformerBlock):
                 multiple_of=args.multiple_of,
                 ffn_dim_multiplier=args.ffn_dim_multiplier,
                 alpha_init=args.alpha_init,
+                alpha_mode=args.alpha_mode,
             )
 
 

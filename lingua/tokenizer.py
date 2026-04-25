@@ -198,10 +198,40 @@ class HuggingFaceTokenizer(Tokenizer):
     or any HuggingFace model identifier.
     """
 
+    # If an HF tokenizer reports a vocab this small after loading, we
+    # almost certainly got a degenerate shell tokenizer (e.g. AutoTokenizer
+    # silently constructing a bare GPTNeoXTokenizer when a directory lacks
+    # tokenizer.json / vocab.json / merges.txt).  Such a tokenizer encodes
+    # every input to the empty list, which silently corrupts training data
+    # and evaluation.  We refuse to return it and fail loudly instead.
+    _MIN_REASONABLE_VOCAB: int = 1024
+
     def __init__(self, model_path: str) -> None:
         from transformers import AutoTokenizer
 
         self.hf_tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+
+        hf_vocab_len = len(self.hf_tok)
+        if hf_vocab_len < self._MIN_REASONABLE_VOCAB:
+            # Double-check by actually encoding a non-trivial probe string.  A
+            # well-formed tokenizer must produce at least one content token.
+            probe_ids = self.hf_tok.encode(
+                "The quick brown fox jumps over the lazy dog.",
+                add_special_tokens=False,
+            )
+            if len(probe_ids) == 0:
+                raise RuntimeError(
+                    f"HuggingFaceTokenizer loaded from {model_path!r} is "
+                    f"degenerate: len(tokenizer)={hf_vocab_len}, class="
+                    f"{type(self.hf_tok).__name__}, and a probe string "
+                    f"encodes to an empty token list.  This usually means "
+                    f"the directory lacks the tokenizer files "
+                    f"(tokenizer.json / tokenizer_config.json / vocab.json / "
+                    f"merges.txt).  Populate the directory with the real "
+                    f"tokenizer, or pass an explicit tokenizer_path override "
+                    f"(e.g. cfg.tokenizer_path=...) pointing at a valid "
+                    f"tokenizer directory."
+                )
 
         # n_words should match the model's embedding-table size, which may be
         # larger than the number of tokens the tokenizer actually uses (e.g.

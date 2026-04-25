@@ -1147,75 +1147,38 @@ def _resolve_checkpoint(ckpt_dir: str) -> Path:
 
 
 def _ensure_sorted_stem_consolidation(ckpt_path: Path) -> None:
-    """Ensure consolidated_stem.pth exists with correctly SORTED shard ordering.
+    """Ensure ``consolidated_stem.pth`` exists with rank-sorted shard order.
 
-    The upstream consolidate_stem_shards() uses Path.glob() which returns
-    files in inode order on Linux, NOT alphabetical. This causes
-    stem_model_mp0..mp7 to be concatenated in random column order,
-    producing embeddings with plausible norms but scrambled features —
-    manifesting as PPL 5-10x higher than expected.
+    Thin wrapper around ``lingua.stem_checkpoint.consolidate_stem_shards``
+    (single source of truth for sorted STEM consolidation).  It is called
+    before :func:`load_stem_model` so that even legacy checkpoints whose
+    consolidated file was produced by an older unsorted ``glob`` get
+    rebuilt with deterministic rank-sorted column order.
 
-    This function:
-    1. Locates the consolidated dir and stem_shards/ dir
-    2. If consolidated_stem.pth already exists, verifies shard count matches
-    3. If it doesn't exist or needs rebuild, creates it with explicit
-       sorted-by-rank-index ordering
+    Accepts ``ckpt_path`` as either the step directory (containing
+    ``stem_shards/`` and ``consolidated/``) or the ``consolidated/``
+    sub-directory itself.  A missing ``stem_shards/`` is treated as
+    "not a STEM checkpoint" and the call is silently skipped.
     """
-    # Find the step dir (parent of consolidated/) and consolidated dir
+    from lingua.stem_checkpoint import consolidate_stem_shards as _consolidate
+
     if ckpt_path.name == CONSOLIDATE_FOLDER:
         step_dir = ckpt_path.parent
-        consolidate_dir = ckpt_path
-    elif (ckpt_path / CONSOLIDATE_FOLDER).exists():
-        step_dir = ckpt_path
-        consolidate_dir = ckpt_path / CONSOLIDATE_FOLDER
     else:
         step_dir = ckpt_path
-        consolidate_dir = ckpt_path  # might be the consolidated dir itself
 
     stem_shards_dir = step_dir / "stem_shards"
     if not stem_shards_dir.exists():
-        # No shards at all — either not a STEM checkpoint or shards are elsewhere
-        logger.debug(f"No stem_shards/ at {stem_shards_dir}, skipping sorted consolidation")
+        logger.debug(
+            f"No stem_shards/ at {stem_shards_dir}, skipping sorted consolidation"
+        )
         return
 
-    shard_files = list(stem_shards_dir.glob("stem_model_mp*.pt"))
-    if not shard_files:
-        return
-
-    output_path = consolidate_dir / CONSOLIDATE_STEM_NAME
-
-    # Always rebuild to guarantee correct ordering
-    def _extract_rank(p: Path) -> int:
-        return int(p.stem.split("mp")[-1])
-
-    shard_files.sort(key=_extract_rank)
-    n_shards = len(shard_files)
-    logger.info(
-        f"Consolidating {n_shards} STEM shards (sorted) from {stem_shards_dir}: "
-        f"{[f.name for f in shard_files]}"
-    )
-
-    consolidated = {}
-    for sf in shard_files:
-        rank = _extract_rank(sf)
-        sd = torch.load(sf, map_location="cpu", weights_only=True)
-        for k, v in sd.items():
-            consolidated.setdefault(k, []).append((rank, v))
-
-    result = {}
-    for k, rank_tensor_pairs in consolidated.items():
-        rank_tensor_pairs.sort(key=lambda x: x[0])
-        ranks = [r for r, _ in rank_tensor_pairs]
-        expected = list(range(len(ranks)))
-        if ranks != expected:
-            raise ValueError(
-                f"Shard rank gap for '{k}': found {ranks}, expected {expected}"
-            )
-        result[k] = torch.cat([t for _, t in rank_tensor_pairs], dim=1)
-
-    consolidate_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(result, output_path)
-    logger.info(f"Sorted STEM consolidation saved to {output_path}")
+    # Force=True matches this helper's historical behavior ("always rebuild
+    # to guarantee correct ordering"), which is the right thing to do at
+    # the top of the diagnostics pipeline where correctness trumps a
+    # one-time rebuild cost.
+    _consolidate(str(step_dir), force=True)
 
 
 def _validate_stem_embeddings(model: StemLMTransformer, ckpt_path: Path) -> None:

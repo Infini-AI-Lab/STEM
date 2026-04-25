@@ -752,12 +752,25 @@ def stem_intervention(
                 elif kind == "replace_dense_mean" and dense is not None:
                     rep = replacement.to(device=dense.device, dtype=dense.dtype) if replacement is not None else dense.mean(dim=(0, 1), keepdim=True)
                     dense = rep.expand_as(dense)
-                if hasattr(self, "alpha") and dense is not None and stem is not None:
+                # Reproduce the module's real combination rule so that
+                # ablations/replacements measure deltas against the actual
+                # forward, not a mismatched one.  DAG blocks expose
+                # ``alpha_mode`` which selects between the sigmoid-gated and
+                # pure-sum variants; plain STEM blocks have neither.
+                ff_alpha_mode = getattr(self, "alpha_mode", None)
+                if (
+                    ff_alpha_mode == "sigmoid_gated"
+                    and hasattr(self, "alpha")
+                    and dense is not None
+                    and stem is not None
+                ):
                     if kind == "force_gate" and gate_value is not None:
                         alpha_sig = torch.tensor(gate_value, device=x.device, dtype=x.dtype)
                     else:
                         alpha_sig = torch.sigmoid(_as_local_tensor(self.alpha)).to(device=x.device, dtype=x.dtype)
                     up = (1.0 - alpha_sig) * dense + alpha_sig * stem
+                elif ff_alpha_mode == "sum" and dense is not None and stem is not None:
+                    up = dense + stem
                 elif stem is not None:
                     up = stem
                 elif dense is not None:

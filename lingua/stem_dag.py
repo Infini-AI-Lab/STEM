@@ -3,13 +3,29 @@
 """
 Core DAG (Directed Acyclic Graph) FFN and transformer block components.
 
-In the DAG variant, stem layers use a learnable alpha gate that blends
-between a local projection (w3(x)) and the stem embedding (y):
+In the DAG variant, stem layers combine a local projection ``w3(x)`` and the
+stem embedding ``y`` in the gate position of the SwiGLU FFN.  Two combination
+modes are supported, selected by ``alpha_mode`` on
+:class:`STEMDagTransformerArgs`:
 
-    up = sigmoid(alpha) * w3(x) + (1 - sigmoid(alpha)) * y
+* ``"sigmoid_gated"`` (default) — the original formulation with a learnable
+  per-layer scalar ``alpha``::
 
-This allows the model to smoothly interpolate between using the
-hidden state context (via w3) and the stem embedding signal.
+      up = (1 - sigmoid(alpha)) * w3(x) + sigmoid(alpha) * y
+
+  This smoothly interpolates between the SwiGLU gate ``w3(x)`` and the stem
+  signal ``y``.
+
+* ``"sum"`` — no gate, no learnable scalar; the two paths are simply added::
+
+      up = w3(x) + y
+
+  This matches the behaviour of DAG checkpoints that were trained to add the
+  two paths directly and therefore never saved an ``alpha`` parameter.  When
+  this mode is selected the ``alpha`` parameter is *not* constructed, so the
+  backbone checkpoint load path does not look for a missing key and no stale
+  ``alpha_init`` scalar silently suppresses the stem contribution at eval
+  time.
 
 This module lives at the library level and does **not** import from
 ``apps.main``.  Application-level wrappers (LM head, FSDP plans,
@@ -35,9 +51,19 @@ from lingua.stem import (
 # Args
 # =========================================================================
 
+_DAG_ALPHA_MODES = ("sigmoid_gated", "sum")
+
+
 @dataclass
 class STEMDagTransformerArgs(StemTransformerArgs):
     alpha_init: float = -5.0  # sigmoid(-5.0) ≈ 0.0067 (almost pure y to start)
+    # How to combine w3(x) and y in the SwiGLU gate slot for stem layers.
+    # "sigmoid_gated": up = (1 - sigmoid(alpha)) * w3(x) + sigmoid(alpha) * y
+    #                  with a learnable per-layer scalar alpha initialised to alpha_init.
+    # "sum":           up = w3(x) + y, no learnable gate (no alpha parameter).
+    #                  Use this to evaluate checkpoints trained with the
+    #                  simple-sum variant (no saved alpha).
+    alpha_mode: str = "sigmoid_gated"
 
 
 # =========================================================================
@@ -53,17 +79,32 @@ class STEMDagFeedForward(StemFeedForward):
         ffn_dim_multiplier: Optional[float],
         mp_size: int = 1,
         alpha_init: float = -5.0,
+        alpha_mode: str = "sigmoid_gated",
     ):
         super().__init__(dim, hidden_dim, multiple_of, ffn_dim_multiplier, mp_size)
+        if alpha_mode not in _DAG_ALPHA_MODES:
+            raise ValueError(
+                f"Unknown alpha_mode={alpha_mode!r}; expected one of {_DAG_ALPHA_MODES}"
+            )
         self.w3 = nn.Linear(dim, self.hidden_dim, bias=False)
+        self.alpha_mode = alpha_mode
         self.alpha_init = alpha_init
-        self.alpha = nn.Parameter(torch.tensor([alpha_init]))
+        if alpha_mode == "sigmoid_gated":
+            # Learnable blending scalar only exists in the gated variant.  In
+            # "sum" mode we deliberately do not register an ``alpha`` parameter
+            # so that (a) checkpoint loading does not flag it as missing and
+            # (b) no stale ``alpha_init`` can silently suppress the stem
+            # contribution through sigmoid(alpha_init).
+            self.alpha = nn.Parameter(torch.tensor([alpha_init]))
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         x1 = self.w1(x.view_as(x))
         x3 = self.w3(x.view_as(x))
-        sigmoid_alpha = torch.sigmoid(self.alpha)
-        up = (1.0 - sigmoid_alpha) * x3 + sigmoid_alpha * y
+        if self.alpha_mode == "sum":
+            up = x3 + y
+        else:
+            sigmoid_alpha = torch.sigmoid(self.alpha)
+            up = (1.0 - sigmoid_alpha) * x3 + sigmoid_alpha * y
         output = self.w2(F.silu(x1) * up)
         return output
 
@@ -77,7 +118,8 @@ class STEMDagFeedForward(StemFeedForward):
             a=-3 * in_init_std,
             b=3 * in_init_std,
         )
-        self.alpha.data.fill_(self.alpha_init)
+        if self.alpha_mode == "sigmoid_gated":
+            self.alpha.data.fill_(self.alpha_init)
 
 
 # =========================================================================
@@ -94,6 +136,7 @@ class STEMDagTransformerBlock(StemTransformerBlock):
                 multiple_of=args.multiple_of,
                 ffn_dim_multiplier=args.ffn_dim_multiplier,
                 alpha_init=args.alpha_init,
+                alpha_mode=args.alpha_mode,
             )
 
 
