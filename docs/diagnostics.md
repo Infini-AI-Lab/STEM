@@ -208,7 +208,7 @@ Richer than the flat dicts currently written by `write_intervention_rows()`.
 | `loss_intervened` | `float` | Loss after intervention |
 | `delta_loss` | `float` | `loss_intervened - loss_original` |
 | `delta_per_token_nll` | `Optional[List[float]]` | Per-token NLL delta |
-| `path_relation` | `Optional[str]` | `cooperative`, `redundant`, `destructive`, `dominant`, `unknown` |
+| `path_relation` | `Optional[str]` | `cooperative`, `redundant`, `destructive_stem`, `destructive_up`, `stem_dominant`, `up_dominant`, `inconclusive` |
 
 #### `TokenEffectRecord`
 
@@ -220,12 +220,16 @@ Aggregated per-token-id statistics.  Produced offline from
 | `token_id` | `int` | Vocabulary token id |
 | `token` | `str` | Decoded string |
 | `token_role` | `str` | Role category |
+| `task_group` | `Optional[str]` | Coarse group such as `code`, `math`, or `knowledge_reasoning` |
 | `frequency_bucket` | `Optional[str]` | `rare`, `mid`, `frequent`, `very_frequent` |
 | `count` | `int` | Occurrence count |
 | `stem_activation_norm_mean` | `Optional[float]` | Mean STEM activation norm for this token |
 | `stem_ablation_delta_loss` | `Optional[float]` | Mean loss delta when STEM is ablated |
+| `up_ablation_delta_loss` | `Optional[float]` | Mean loss delta when the up path is ablated |
+| `combined_ablation_delta_loss` | `Optional[float]` | Mean loss delta when STEM and up are ablated together |
 | `benefit_score` | `Optional[float]` | Positive = STEM helps this token |
-| `ineffective_score` | `Optional[float]` | Positive = STEM has no effect |
+| `harm_score` | `Optional[float]` | Positive = STEM hurts this token |
+| `ineffective_score` | `Optional[float]` | High-count token has no positive STEM benefit |
 
 #### `CodeFailureRecord`
 
@@ -392,6 +396,67 @@ Interventions currently include STEM ablation, dense-path ablation when `w3`
 exists, layerwise ablations, replacing paths with their running batch mean, and
 DAG gate forcing.
 
+### Task-Aligned Eval Interventions
+
+The older `diagnostics.collect_interventions` path above runs on validation
+prompts.  For causal answers about the exact MBPP, HumanEval, MMLU, GSM8K, or
+other lm-eval sample, enable the task-aligned path:
+
+```yaml
+diagnostics:
+  enabled: true
+  collect_eval_interventions: true
+  intervention_max_samples_per_task: 4
+  intervention_layers: [1, 3, 5, 7]  # optional; defaults to eval_layers/layers/all STEM layers
+  compute_per_token_delta: true
+  update_token_effectiveness: true
+  intervention_types:
+    - ablate_stem
+    - ablate_up
+    - ablate_combined
+    - ablate_layer_stem
+    - ablate_layer_up
+    - force_gate_0
+    - force_gate_0_25
+    - force_gate_0_5
+    - force_gate_0_75
+    - force_gate_1
+    - replace_stem_mean
+    - replace_up_mean
+```
+
+This reruns bounded extra forwards on the same prompt plus generation/target
+tokens recovered from `results["samples"]`.  The default sample cap is small
+(`intervention_max_samples_per_task: 8`) and the feature is off unless
+`collect_eval_interventions` is true.
+
+Sign convention:
+
+- `delta_loss = intervened_loss - original_loss`
+- `delta_per_token_nll = intervened_token_nll - original_token_nll`
+- Positive STEM/up ablation delta means the ablated path was beneficial because
+  removing it increased loss.
+- Negative ablation delta means the path was harmful for that sample/token
+  because removing it decreased loss.
+
+Token-effect scores are intentionally simple:
+
+- `benefit_score = max(mean_stem_ablation_delta_loss, 0)`
+- `harm_score = max(-mean_stem_ablation_delta_loss, 0)`
+- `ineffective_score = log1p(count) / (1 + abs(mean_stem_ablation_delta_loss))`
+  when the mean STEM benefit is zero or negative, otherwise `0`
+
+Path relations are classified per task/sample/layer from layerwise STEM and
+up-path ablations:
+
+- `cooperative`: ablating STEM hurts and ablating up hurts
+- `destructive_stem`: ablating STEM helps
+- `destructive_up`: ablating up helps
+- `stem_dominant`: STEM ablation hurts much more than up ablation
+- `up_dominant`: up ablation hurts much more than STEM ablation
+- `redundant`: both deltas are close to zero
+- `inconclusive`: one of the required metrics is missing
+
 ## MBPP / HumanEval Failure Analysis
 
 Enable lm-eval sample logging and code taxonomy:
@@ -420,9 +485,28 @@ Common outputs:
 - `diagnostics/summary_eval.json`
 - `diagnostics/token_stats.jsonl`
 - `diagnostics/interventions.jsonl`
+- `diagnostics/interventions_task_aligned.jsonl`
+- `diagnostics/token_effects.jsonl`
+- `diagnostics/token_effects_by_task.json`
+- `diagnostics/token_effects_by_role.json`
+- `diagnostics/path_relations_by_task_layer.json`
 - `diagnostics/geometry_layer_{L}.npz`
 - `diagnostics/code_failure_analysis.json`
 - `diagnostics/README.md`
+
+Task-aligned artifact interpretation:
+
+- `interventions_task_aligned.jsonl` has one row per sample and intervention,
+  including original loss, intervened loss, signed loss delta, optional
+  per-token NLL deltas, token ids, token roles, and `metadata.path_relation`.
+- `token_effects.jsonl` aggregates signed per-token deltas by task, task group,
+  layer, token id, token string, role, and frequency bucket.
+- `token_effects_by_task.json` contains global and per-task rankings for
+  beneficial, harmful, and ineffective STEM tokens/roles, plus STEM/up layers
+  with the largest signed effects.
+- `path_relations_by_task_layer.json` counts cooperative, destructive,
+  dominant, redundant, and inconclusive sample/layer cases and stores the mean
+  STEM/up ablation deltas behind each count.
 
 ## Caveats
 
@@ -431,4 +515,3 @@ Geometry and interventions add extra computation only when enabled.  Keep
 `max_tokens_per_layer_geometry` small for routine runs.  Baseline-checkpoint CKA
 and dense-path swapping are reserved behind config fields and not run unless
 explicitly implemented for a specific comparison checkpoint.
-

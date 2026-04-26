@@ -154,6 +154,7 @@ class TokenEffectRecord:
     token_id: int
     token: str
     token_role: str
+    task_group: Optional[str] = None
 
     sample_id: Optional[str] = None
     layer_idx: Optional[int] = None
@@ -170,6 +171,7 @@ class TokenEffectRecord:
     combined_ablation_delta_loss: Optional[float] = None
 
     benefit_score: Optional[float] = None
+    harm_score: Optional[float] = None
     ineffective_score: Optional[float] = None
 
     metadata: Dict[str, Any] = field(default_factory=dict)

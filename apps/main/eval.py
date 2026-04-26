@@ -31,6 +31,7 @@ from lingua.diagnostics import (
     analyze_eval_samples,
     diagnostics_output_dir,
     run_prompt_interventions,
+    run_task_aligned_interventions,
     write_intervention_rows,
 )
 from lingua.eval_sample_capture import capture_eval_samples
@@ -358,6 +359,35 @@ def launch_eval(cfg: EvalArgs):
         except Exception as e:
             logger.warning(f"Eval sample capture failed (non-fatal): {e}")
 
+    eval_intervention_summary: Dict[str, Any] = {}
+    if (
+        cfg.diagnostics.enabled
+        and cfg.diagnostics.collect_eval_interventions
+        and results is not None
+    ):
+        run_id = cfg.diagnostics.run_id or cfg.name
+        try:
+            eval_intervention_summary = run_task_aligned_interventions(
+                model=model,
+                tokenizer=tokenizer,
+                results=results,
+                args=cfg.diagnostics,
+                output_dir=diag_dir,
+                run_id=run_id,
+                rank=get_global_rank(),
+                model_id=cfg.model_type,
+                checkpoint_path=cfg.ckpt_dir,
+            ) or {}
+            scalar_metrics = (
+                eval_intervention_summary.get("scalar_metrics", {})
+                if isinstance(eval_intervention_summary, dict)
+                else {}
+            )
+            if isinstance(scalar_metrics, dict):
+                eval_diag_metrics.update(scalar_metrics)
+        except Exception as e:
+            logger.warning(f"Eval task-aligned interventions failed (non-fatal): {e}")
+
     eval_activation_summary: Dict[str, Any] = {}
     if (
         cfg.diagnostics.enabled
@@ -401,6 +431,7 @@ def launch_eval(cfg: EvalArgs):
                 f.write(json.dumps({
                     "metrics": eval_diag_metrics,
                     "code_failure_analysis": code_summary,
+                    "eval_intervention_summary": eval_intervention_summary,
                     "eval_activation_summary": eval_activation_summary,
                 }, indent=2, default=str))
         if val_results is not None:

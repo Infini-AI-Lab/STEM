@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import math
 import re
 import types
@@ -21,6 +22,23 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch.distributed._tensor import DTensor
+
+from lingua.diagnostic_records import (
+    InterventionRecord,
+    TokenEffectRecord,
+    append_jsonl,
+    classify_task_group,
+    classify_token_role,
+    write_json_atomic,
+)
+
+logger = logging.getLogger(__name__)
+
+TASK_ALIGNED_INTERVENTIONS_JSONL = "interventions_task_aligned.jsonl"
+TOKEN_EFFECTS_JSONL = "token_effects.jsonl"
+TOKEN_EFFECTS_BY_TASK_JSON = "token_effects_by_task.json"
+TOKEN_EFFECTS_BY_ROLE_JSON = "token_effects_by_role.json"
+PATH_RELATIONS_BY_TASK_LAYER_JSON = "path_relations_by_task_layer.json"
 
 
 @dataclass
@@ -86,6 +104,34 @@ class DiagnosticsArgs:
     eval_activation_max_layer_path_records_per_sample: int = 64
     eval_geometry_max_tokens_per_layer: int = 4096
     eval_geometry_save_npz: bool = False
+
+    # ------------------------------------------------------------------
+    # Task-aligned eval interventions (Round 4: causal loss deltas on the
+    # actual lm-eval samples).  The master switch is separate from the older
+    # validation-prompt ``collect_interventions`` path so existing eval runs
+    # are unchanged unless this is explicitly enabled.
+    # ------------------------------------------------------------------
+    collect_eval_interventions: bool = False
+    intervention_max_samples_per_task: Optional[int] = 8
+    intervention_layers: Optional[List[int]] = None
+    intervention_types: List[str] = field(
+        default_factory=lambda: [
+            "ablate_stem",
+            "ablate_up",
+            "ablate_combined",
+            "ablate_layer_stem",
+            "ablate_layer_up",
+            "force_gate_0",
+            "force_gate_0_25",
+            "force_gate_0_5",
+            "force_gate_0_75",
+            "force_gate_1",
+            "replace_stem_mean",
+            "replace_up_mean",
+        ]
+    )
+    compute_per_token_delta: bool = True
+    update_token_effectiveness: bool = True
 
 
 def _as_local_tensor(x: Any) -> Optional[torch.Tensor]:
@@ -354,6 +400,13 @@ class TokenStatsAggregator:
         )
         self.loss_deltas: Dict[int, Dict[str, OnlineStats]] = defaultdict(lambda: defaultdict(OnlineStats))
         self.roles: Dict[str, Dict[str, OnlineStats]] = defaultdict(lambda: defaultdict(OnlineStats))
+        self.loss_delta_effects: Dict[Tuple[str, str, int, int, str, str], Dict[str, OnlineStats]] = defaultdict(
+            lambda: defaultdict(OnlineStats)
+        )
+        self.layer_loss_deltas: Dict[Tuple[str, int, str], OnlineStats] = defaultdict(OnlineStats)
+        self.role_loss_deltas: Dict[Tuple[str, str, str], OnlineStats] = defaultdict(OnlineStats)
+        self.token_strings: Dict[int, str] = {}
+        self.token_roles: Dict[int, str] = {}
 
     def bucket(self, token_id: int) -> str:
         f = self.freq[token_id]
@@ -390,11 +443,64 @@ class TokenStatsAggregator:
             for tok, val in zip(ids, flat.tolist()):
                 self.by_layer[layer_idx][int(tok)][name].update(val)
 
-    def update_loss_delta(self, token_ids: torch.Tensor, name: str, deltas: torch.Tensor) -> None:
+    @staticmethod
+    def _normalized_delta_name(name: str) -> str:
+        aliases = {
+            "stem_ablation_loss_delta": "stem_ablation_delta_loss",
+            "up_ablation_loss_delta": "up_ablation_delta_loss",
+            "dense_ablation_loss_delta": "up_ablation_delta_loss",
+            "combined_ablation_loss_delta": "combined_ablation_delta_loss",
+        }
+        return aliases.get(name, name)
+
+    def update_loss_delta(
+        self,
+        token_ids: torch.Tensor,
+        name: str,
+        deltas: torch.Tensor,
+        *,
+        task: Optional[str] = None,
+        task_group: Optional[str] = None,
+        layer_idx: Optional[int] = None,
+        tokens: Optional[Iterable[str]] = None,
+        token_roles: Optional[Iterable[str]] = None,
+    ) -> None:
+        """Merge per-token intervention loss deltas.
+
+        Sign convention: ``delta = intervened_nll - original_nll``.  A
+        positive STEM ablation delta means STEM made that token easier to
+        predict; a negative delta means STEM was harmful for that token.
+        """
         ids = token_ids.detach().reshape(-1).cpu().tolist()
         flat = deltas.detach().float().reshape(-1).cpu().tolist()
-        for tok, val in zip(ids, flat):
-            self.loss_deltas[int(tok)][name].update(val)
+        token_list = list(tokens) if tokens is not None else []
+        role_list = list(token_roles) if token_roles is not None else []
+        norm_name = self._normalized_delta_name(name)
+        layer_key = -1 if layer_idx is None else int(layer_idx)
+        task_key = task or "global"
+        group_key = task_group or "unknown"
+        # Training/activation collection calls ``update`` first, which already
+        # counts token frequency.  Task-aligned interventions may only call
+        # ``update_loss_delta``, so count exposure here only for those
+        # intervention-only aggregators.
+        if not self.by_layer:
+            self.freq.update(int(i) for i in ids)
+        for pos, (tok, val) in enumerate(zip(ids, flat)):
+            tok_i = int(tok)
+            token_text = token_list[pos] if pos < len(token_list) else str(tok_i)
+            role = role_list[pos] if pos < len(role_list) else "unknown"
+            self.token_strings.setdefault(tok_i, token_text)
+            self.token_roles.setdefault(tok_i, role)
+            self.loss_deltas[tok_i][name].update(val)
+            if norm_name != name:
+                self.loss_deltas[tok_i][norm_name].update(val)
+            if task is not None:
+                key = (task_key, group_key, layer_key, tok_i, token_text, role)
+                self.loss_delta_effects[key][norm_name].update(val)
+                self.loss_delta_effects[key]["abs_delta_loss"].update(abs(float(val)))
+                self.layer_loss_deltas[(task_key, layer_key, norm_name)].update(val)
+                self.role_loss_deltas[(task_key, role, norm_name)].update(val)
+                self.roles[role][norm_name].update(val)
 
     def update_role_delta(self, role: str, name: str, value: float) -> None:
         self.roles[role][name].update(value)
@@ -416,13 +522,94 @@ class TokenStatsAggregator:
                 rows.append(row)
         return rows
 
+    @staticmethod
+    def _score_from_stem_delta(delta: Optional[float], count: int) -> Tuple[float, float, float]:
+        """Return ``(benefit, harm, ineffective)`` for a STEM-token row.
+
+        Formula is deliberately transparent:
+        ``benefit_score = max(mean_stem_ablation_delta, 0)`` and
+        ``harm_score = max(-mean_stem_ablation_delta, 0)``.  For ineffective
+        exposure, ``exposure = log1p(count)`` and
+        ``ineffective_score = exposure / (1 + abs(mean_delta))`` only when the
+        mean STEM benefit is zero or negative; otherwise it is ``0``.  This
+        makes high-count tokens with no positive causal benefit easy to spot.
+        """
+        if delta is None:
+            return 0.0, 0.0, 0.0
+        benefit = max(float(delta), 0.0)
+        harm = max(-float(delta), 0.0)
+        exposure = math.log1p(max(int(count), 0))
+        ineffective = exposure / (1.0 + abs(float(delta))) if delta <= 0.0 else 0.0
+        return benefit, harm, ineffective
+
+    def token_effect_records(self, *, run_id: str) -> List[TokenEffectRecord]:
+        records: List[TokenEffectRecord] = []
+        for (task, task_group, layer_key, token_id, token, role), stats in sorted(
+            self.loss_delta_effects.items(),
+            key=lambda item: (item[0][0], item[0][2], item[0][3], item[0][4], item[0][5]),
+        ):
+            count = max((stat.count for stat in stats.values()), default=0)
+            stem_stat = stats.get("stem_ablation_delta_loss")
+            up_stat = stats.get("up_ablation_delta_loss")
+            combined_stat = stats.get("combined_ablation_delta_loss")
+            stem_delta = stem_stat.mean if stem_stat and stem_stat.count else None
+            up_delta = up_stat.mean if up_stat and up_stat.count else None
+            combined_delta = combined_stat.mean if combined_stat and combined_stat.count else None
+            benefit, harm, ineffective = self._score_from_stem_delta(stem_delta, count)
+            extra_metrics = {
+                name: stat.as_dict(name)
+                for name, stat in stats.items()
+                if name
+                not in {
+                    "stem_ablation_delta_loss",
+                    "up_ablation_delta_loss",
+                    "combined_ablation_delta_loss",
+                }
+            }
+            records.append(
+                TokenEffectRecord(
+                    run_id=run_id,
+                    task=task,
+                    task_group=task_group,
+                    token_id=int(token_id),
+                    token=token,
+                    token_role=role,
+                    layer_idx=None if layer_key < 0 else int(layer_key),
+                    frequency_bucket=self.bucket(int(token_id)),
+                    count=int(count),
+                    stem_ablation_delta_loss=stem_delta,
+                    up_ablation_delta_loss=up_delta,
+                    combined_ablation_delta_loss=combined_delta,
+                    benefit_score=benefit,
+                    harm_score=harm,
+                    ineffective_score=ineffective,
+                    metadata={
+                        "score_formula": (
+                            "delta = intervened_nll - original_nll; "
+                            "benefit=max(stem_delta,0); harm=max(-stem_delta,0); "
+                            "ineffective=log1p(count)/(1+abs(stem_delta)) when stem_delta<=0 else 0"
+                        ),
+                        "extra_delta_metrics": extra_metrics,
+                    },
+                )
+            )
+        return records
+
     def rankings(self) -> Dict[str, List[Dict[str, Any]]]:
         token_scores = []
         for token_id, stats in self.loss_deltas.items():
-            stem = stats.get("stem_ablation_loss_delta")
+            stem = stats.get("stem_ablation_delta_loss") or stats.get("stem_ablation_loss_delta")
             benefit = stem.mean if stem and stem.count else 0.0
             token_scores.append(
-                {"token_id": token_id, "frequency": self.freq[token_id], "score": benefit}
+                {
+                    "token_id": token_id,
+                    "token": self.token_strings.get(token_id, str(token_id)),
+                    "token_role": self.token_roles.get(token_id, "unknown"),
+                    "frequency": self.freq[token_id],
+                    "score": benefit,
+                    "benefit_score": max(benefit, 0.0),
+                    "harm_score": max(-benefit, 0.0),
+                }
             )
         return {
             "top_beneficial_tokens": sorted(token_scores, key=lambda r: r["score"], reverse=True)[: self.topk],
@@ -1366,15 +1553,24 @@ def stem_intervention(
     *,
     kind: str,
     layer_idx: Optional[int] = None,
+    layers: Optional[List[int]] = None,
     gate_value: Optional[float] = None,
     replacement: Optional[torch.Tensor] = None,
 ):
     """Temporarily patch STEM FFNs for causal path analysis."""
 
+    _missing = object()
+    kind_aliases = {
+        "ablate_up": "ablate_dense",
+        "replace_up_mean": "replace_dense_mean",
+    }
+    kind = kind_aliases.get(kind, kind)
     patches: List[Tuple[torch.nn.Module, Any]] = []
-    for idx, layer in _iter_stem_layers(model, [layer_idx] if layer_idx is not None else None):
+    target_layers = [layer_idx] if layer_idx is not None else layers
+    for idx, layer in _iter_stem_layers(model, target_layers):
         ff = layer.feed_forward
         old_forward = ff.forward
+        old_instance_forward = getattr(ff, "__dict__", {}).get("forward", _missing)
 
         def make_forward(module, original_forward):
             def forward(self, x, y=None):
@@ -1383,12 +1579,12 @@ def stem_intervention(
                 x1 = self.w1(x.view_as(x))
                 stem = y
                 dense = self.w3(x.view_as(x)) if hasattr(self, "w3") else None
-                if kind == "ablate_stem" and stem is not None:
+                if kind in {"ablate_stem", "ablate_combined"} and stem is not None:
                     stem = torch.zeros_like(stem)
                 elif kind == "replace_stem_mean" and stem is not None:
                     rep = replacement.to(device=stem.device, dtype=stem.dtype) if replacement is not None else stem.mean(dim=(0, 1), keepdim=True)
                     stem = rep.expand_as(stem)
-                if kind == "ablate_dense" and dense is not None:
+                if kind in {"ablate_dense", "ablate_combined"} and dense is not None:
                     dense = torch.zeros_like(dense)
                 elif kind == "replace_dense_mean" and dense is not None:
                     rep = replacement.to(device=dense.device, dtype=dense.dtype) if replacement is not None else dense.mean(dim=(0, 1), keepdim=True)
@@ -1423,12 +1619,20 @@ def stem_intervention(
             return types.MethodType(forward, module)
 
         ff.forward = make_forward(ff, old_forward)
-        patches.append((ff, old_forward))
+        patches.append((ff, old_instance_forward))
     try:
         yield
     finally:
-        for module, old_forward in patches:
-            module.forward = old_forward
+        for module, old_instance_forward in patches:
+            if old_instance_forward is _missing:
+                try:
+                    delattr(module, "forward")
+                except AttributeError:
+                    pass
+            else:
+                module.forward = old_instance_forward
+            restored = getattr(module, "__dict__", {}).get("forward", _missing)
+            assert restored is old_instance_forward
 
 
 @torch.no_grad()
@@ -1509,6 +1713,726 @@ def write_intervention_rows(output_dir: Path, rows: List[Dict[str, Any]]) -> Non
     with open(output_dir / "interventions.jsonl", "a") as f:
         for row in rows:
             print(json.dumps(row), file=f)
+
+
+def _model_max_seqlen(model: torch.nn.Module, fallback: int = 2048) -> int:
+    max_len = getattr(model, "max_seqlen", None)
+    if max_len is None:
+        lm = getattr(model, "lm_transformer", None)
+        max_len = getattr(lm, "max_seqlen", None) if lm is not None else None
+    try:
+        return int(max_len) if max_len is not None else int(fallback)
+    except Exception:
+        return int(fallback)
+
+
+def _selected_intervention_layers(model: torch.nn.Module, args: DiagnosticsArgs) -> List[int]:
+    requested = args.intervention_layers
+    if requested is None:
+        requested = args.eval_layers if args.eval_layers is not None else args.layers
+    return [idx for idx, _layer in _iter_stem_layers(model, requested)]
+
+
+def _layer_has_up_path(layer: torch.nn.Module) -> bool:
+    return hasattr(getattr(layer, "feed_forward", None), "w3")
+
+
+def _layer_has_gate(layer: torch.nn.Module) -> bool:
+    return hasattr(getattr(layer, "feed_forward", None), "alpha")
+
+
+def _force_gate_value(intervention_type: str) -> Optional[float]:
+    if not intervention_type.startswith("force_gate_"):
+        return None
+    suffix = intervention_type[len("force_gate_") :]
+    try:
+        return float(suffix.replace("_", "."))
+    except ValueError:
+        return None
+
+
+def _build_intervention_specs(
+    model: torch.nn.Module,
+    args: DiagnosticsArgs,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    layers = _selected_intervention_layers(model, args)
+    by_idx = {idx: layer for idx, layer in _iter_stem_layers(model, layers)}
+    requested = list(args.intervention_types or [])
+    specs: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+
+    def add_global(intervention_type: str, kind: str, target_path: str) -> None:
+        if not layers:
+            skipped.append({"intervention_type": intervention_type, "reason": "no_target_layers"})
+            return
+        if target_path == "up" and not any(_layer_has_up_path(by_idx[idx]) for idx in layers):
+            skipped.append({"intervention_type": intervention_type, "reason": "missing_up_path"})
+            return
+        specs.append(
+            {
+                "intervention_name": f"{intervention_type}_all_layers",
+                "intervention_type": intervention_type,
+                "target_path": target_path,
+                "kind": kind,
+                "layer_idx": None,
+                "layers": layers,
+                "gate_value": None,
+            }
+        )
+
+    for intervention_type in requested:
+        if intervention_type == "ablate_stem":
+            add_global(intervention_type, "ablate_stem", "stem")
+        elif intervention_type == "ablate_up":
+            add_global(intervention_type, "ablate_up", "up")
+        elif intervention_type == "ablate_combined":
+            add_global(intervention_type, "ablate_combined", "combined")
+        elif intervention_type == "replace_stem_mean":
+            add_global(intervention_type, "replace_stem_mean", "stem")
+        elif intervention_type == "replace_up_mean":
+            add_global(intervention_type, "replace_up_mean", "up")
+        elif intervention_type == "ablate_layer_stem":
+            if not layers:
+                skipped.append({"intervention_type": intervention_type, "reason": "no_target_layers"})
+            for layer_idx in layers:
+                specs.append(
+                    {
+                        "intervention_name": f"{intervention_type}_layer_{layer_idx}",
+                        "intervention_type": intervention_type,
+                        "target_path": "stem",
+                        "kind": "ablate_stem",
+                        "layer_idx": int(layer_idx),
+                        "layers": [int(layer_idx)],
+                        "gate_value": None,
+                    }
+                )
+        elif intervention_type == "ablate_layer_up":
+            emitted = False
+            for layer_idx in layers:
+                if not _layer_has_up_path(by_idx[layer_idx]):
+                    continue
+                emitted = True
+                specs.append(
+                    {
+                        "intervention_name": f"{intervention_type}_layer_{layer_idx}",
+                        "intervention_type": intervention_type,
+                        "target_path": "up",
+                        "kind": "ablate_up",
+                        "layer_idx": int(layer_idx),
+                        "layers": [int(layer_idx)],
+                        "gate_value": None,
+                    }
+                )
+            if not emitted:
+                skipped.append({"intervention_type": intervention_type, "reason": "missing_up_path"})
+        elif intervention_type.startswith("force_gate_"):
+            gate_value = _force_gate_value(intervention_type)
+            if gate_value is None:
+                skipped.append({"intervention_type": intervention_type, "reason": "invalid_gate_value"})
+                continue
+            emitted = False
+            for layer_idx in layers:
+                if not _layer_has_gate(by_idx[layer_idx]):
+                    continue
+                emitted = True
+                specs.append(
+                    {
+                        "intervention_name": f"{intervention_type}_layer_{layer_idx}",
+                        "intervention_type": intervention_type,
+                        "target_path": "gate",
+                        "kind": "force_gate",
+                        "layer_idx": int(layer_idx),
+                        "layers": [int(layer_idx)],
+                        "gate_value": float(gate_value),
+                    }
+                )
+            if not emitted:
+                skipped.append({"intervention_type": intervention_type, "reason": "missing_gate"})
+        else:
+            skipped.append({"intervention_type": intervention_type, "reason": "unknown_intervention_type"})
+    return specs, skipped
+
+
+def _delta_metric_name(intervention_type: str) -> str:
+    if intervention_type in {"ablate_stem", "ablate_layer_stem"}:
+        return "stem_ablation_delta_loss"
+    if intervention_type in {"ablate_up", "ablate_layer_up"}:
+        return "up_ablation_delta_loss"
+    if intervention_type == "ablate_combined":
+        return "combined_ablation_delta_loss"
+    return f"{intervention_type}_delta_loss"
+
+
+def _classify_path_relation(
+    stem_delta: Optional[float],
+    up_delta: Optional[float],
+    *,
+    eps: float = 1e-4,
+    dominance_ratio: float = 2.0,
+) -> str:
+    if stem_delta is None or up_delta is None:
+        return "inconclusive"
+    stem = float(stem_delta)
+    up = float(up_delta)
+    if abs(stem) <= eps and abs(up) <= eps:
+        return "redundant"
+    if stem < -eps and up < -eps:
+        return "destructive_stem" if abs(stem) >= abs(up) else "destructive_up"
+    if stem < -eps:
+        return "destructive_stem"
+    if up < -eps:
+        return "destructive_up"
+    if stem > eps and up > eps:
+        if stem >= max(up * dominance_ratio, up + eps):
+            return "stem_dominant"
+        if up >= max(stem * dominance_ratio, stem + eps):
+            return "up_dominant"
+        return "cooperative"
+    return "inconclusive"
+
+
+@torch.no_grad()
+def compute_loss_and_per_token_nll(
+    model: torch.nn.Module,
+    input_ids: torch.Tensor,
+    labels: torch.Tensor,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Compute mean NLL and per-token NLL from the model's logits path."""
+    try:
+        logits = model(input_ids)
+    except Exception:
+        return compute_loss(model, input_ids, labels), None
+    if isinstance(logits, (tuple, list)):
+        logits = logits[0] if logits else None
+    if not isinstance(logits, torch.Tensor) or logits.ndim < 3:
+        return compute_loss(model, input_ids, labels), None
+    steps = min(int(logits.shape[-2]), int(labels.shape[-1]))
+    if steps <= 0:
+        return compute_loss(model, input_ids, labels), None
+    logits = logits[..., :steps, :]
+    labels = labels[..., :steps]
+    vocab = int(logits.shape[-1])
+    per_token = F.cross_entropy(
+        logits.float().reshape(-1, vocab),
+        labels.reshape(-1),
+        reduction="none",
+    ).view(labels.shape)
+    return per_token.mean().detach(), per_token.detach()
+
+
+def _safe_tensor(values: List[int], *, device: torch.device) -> torch.Tensor:
+    return torch.tensor(values, dtype=torch.long, device=device).unsqueeze(0)
+
+
+def _mean_or_none(stat: Optional[OnlineStats]) -> Optional[float]:
+    return stat.mean if stat is not None and stat.count else None
+
+
+def _compact_ranked(items: List[Dict[str, Any]], key: str, *, reverse: bool, topk: int) -> List[Dict[str, Any]]:
+    return sorted(items, key=lambda row: row.get(key, 0.0), reverse=reverse)[:topk]
+
+
+def _summarize_token_effect_records(
+    records: List[TokenEffectRecord],
+    *,
+    topk: int,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    rows = [asdict(r) for r in records]
+
+    def summarize(scope_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        token_map: Dict[Tuple[int, str, str], Dict[str, Any]] = {}
+        role_map: Dict[str, OnlineStats] = defaultdict(OnlineStats)
+        layer_stem: Dict[int, OnlineStats] = defaultdict(OnlineStats)
+        layer_up: Dict[int, OnlineStats] = defaultdict(OnlineStats)
+        ineffective: Dict[Tuple[int, str, str], float] = defaultdict(float)
+        counts: Counter[Tuple[int, str, str]] = Counter()
+        for row in scope_rows:
+            token_key = (int(row["token_id"]), row.get("token") or "", row.get("token_role") or "unknown")
+            counts[token_key] += int(row.get("count") or 0)
+            stem_delta = row.get("stem_ablation_delta_loss")
+            up_delta = row.get("up_ablation_delta_loss")
+            if stem_delta is not None:
+                token_map.setdefault(token_key, {"stem": OnlineStats(), "up": OnlineStats()})["stem"].update(stem_delta)
+                role_map[token_key[2]].update(stem_delta)
+                if row.get("layer_idx") is not None:
+                    layer_stem[int(row["layer_idx"])].update(stem_delta)
+            if up_delta is not None:
+                token_map.setdefault(token_key, {"stem": OnlineStats(), "up": OnlineStats()})["up"].update(up_delta)
+                if row.get("layer_idx") is not None:
+                    layer_up[int(row["layer_idx"])].update(up_delta)
+            ineffective[token_key] = max(ineffective[token_key], float(row.get("ineffective_score") or 0.0))
+        token_items: List[Dict[str, Any]] = []
+        for (token_id, token, role), stats in token_map.items():
+            stem_delta = _mean_or_none(stats.get("stem"))
+            benefit, harm, _ineff = TokenStatsAggregator._score_from_stem_delta(
+                stem_delta,
+                counts[(token_id, token, role)],
+            )
+            token_items.append(
+                {
+                    "token_id": token_id,
+                    "token": token,
+                    "token_role": role,
+                    "count": counts[(token_id, token, role)],
+                    "stem_ablation_delta_loss": stem_delta,
+                    "benefit_score": benefit,
+                    "harm_score": harm,
+                    "ineffective_score": ineffective[(token_id, token, role)],
+                }
+            )
+        role_items = [
+            {
+                "token_role": role,
+                "stem_ablation_delta_loss": stat.mean,
+                "count": stat.count,
+                "benefit_score": max(stat.mean, 0.0),
+                "harm_score": max(-stat.mean, 0.0),
+            }
+            for role, stat in role_map.items()
+            if stat.count
+        ]
+        stem_layer_items = [
+            {
+                "layer_idx": layer,
+                "stem_ablation_delta_loss": stat.mean,
+                "count": stat.count,
+                "benefit_score": max(stat.mean, 0.0),
+                "harm_score": max(-stat.mean, 0.0),
+            }
+            for layer, stat in layer_stem.items()
+            if stat.count
+        ]
+        up_layer_items = [
+            {
+                "layer_idx": layer,
+                "up_ablation_delta_loss": stat.mean,
+                "count": stat.count,
+                "benefit_score": max(stat.mean, 0.0),
+                "harm_score": max(-stat.mean, 0.0),
+            }
+            for layer, stat in layer_up.items()
+            if stat.count
+        ]
+        return {
+            "top_beneficial_stem_tokens": [
+                row for row in _compact_ranked(token_items, "benefit_score", reverse=True, topk=topk)
+                if row["benefit_score"] > 0
+            ],
+            "top_harmful_stem_tokens": [
+                row for row in _compact_ranked(token_items, "harm_score", reverse=True, topk=topk)
+                if row["harm_score"] > 0
+            ],
+            "top_ineffective_stem_tokens": [
+                row for row in _compact_ranked(token_items, "ineffective_score", reverse=True, topk=topk)
+                if row["ineffective_score"] > 0
+            ],
+            "top_beneficial_token_roles": [
+                row for row in _compact_ranked(role_items, "benefit_score", reverse=True, topk=topk)
+                if row["benefit_score"] > 0
+            ],
+            "top_harmful_token_roles": [
+                row for row in _compact_ranked(role_items, "harm_score", reverse=True, topk=topk)
+                if row["harm_score"] > 0
+            ],
+            "stem_layers_most_beneficial": _compact_ranked(stem_layer_items, "benefit_score", reverse=True, topk=topk),
+            "stem_layers_most_harmful": _compact_ranked(stem_layer_items, "harm_score", reverse=True, topk=topk),
+            "up_layers_most_beneficial": _compact_ranked(up_layer_items, "benefit_score", reverse=True, topk=topk),
+            "up_layers_most_harmful": _compact_ranked(up_layer_items, "harm_score", reverse=True, topk=topk),
+        }
+
+    by_task: Dict[str, Any] = {"global": summarize(rows)}
+    for task in sorted({row.get("task") for row in rows if row.get("task")}):
+        by_task[str(task)] = summarize([row for row in rows if row.get("task") == task])
+    by_role: Dict[str, Any] = {
+        "global": {
+            role: summarize([row for row in rows if row.get("token_role") == role])
+            for role in sorted({row.get("token_role") or "unknown" for row in rows})
+        },
+        "by_task": {},
+    }
+    for task in sorted({row.get("task") for row in rows if row.get("task")}):
+        task_rows = [row for row in rows if row.get("task") == task]
+        by_role["by_task"][str(task)] = {
+            role: summarize([row for row in task_rows if row.get("token_role") == role])
+            for role in sorted({row.get("token_role") or "unknown" for row in task_rows})
+        }
+    return by_task, by_role
+
+
+def _update_relation_summary(
+    summary: Dict[str, Any],
+    *,
+    task: str,
+    layer_idx: int,
+    sample_id: str,
+    relation: str,
+    stem_delta: Optional[float],
+    up_delta: Optional[float],
+) -> None:
+    task_cell = summary.setdefault(task, {})
+    layer_cell = task_cell.setdefault(
+        str(int(layer_idx)),
+        {
+            "counts": {},
+            "samples": [],
+            "_stem": OnlineStats(),
+            "_up": OnlineStats(),
+        },
+    )
+    layer_cell["counts"][relation] = layer_cell["counts"].get(relation, 0) + 1
+    if stem_delta is not None:
+        layer_cell["_stem"].update(stem_delta)
+    if up_delta is not None:
+        layer_cell["_up"].update(up_delta)
+    layer_cell["samples"].append(
+        {
+            "sample_id": sample_id,
+            "relation": relation,
+            "stem_delta_loss": stem_delta,
+            "up_delta_loss": up_delta,
+        }
+    )
+
+
+def _finalize_relation_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for task, layers in summary.items():
+        out[task] = {}
+        for layer, cell in layers.items():
+            stem_stat = cell.get("_stem")
+            up_stat = cell.get("_up")
+            out[task][layer] = {
+                "counts": cell.get("counts", {}),
+                "mean_stem_delta_loss": _mean_or_none(stem_stat),
+                "mean_up_delta_loss": _mean_or_none(up_stat),
+                "samples": cell.get("samples", []),
+            }
+    return out
+
+
+@torch.no_grad()
+def run_task_aligned_interventions(
+    *,
+    model: torch.nn.Module,
+    tokenizer: Any,
+    args: DiagnosticsArgs,
+    output_dir: Path,
+    run_id: str,
+    results: Optional[Dict[str, Any]] = None,
+    sample_records: Optional[Iterable[Any]] = None,
+    prefix: str = "diag/eval",
+    rank: Optional[int] = None,
+    model_id: Optional[str] = None,
+    checkpoint_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Run causal interventions on actual lm-eval samples.
+
+    This is the task-aligned counterpart to ``run_prompt_interventions``.  It
+    computes the original per-token NLL, reruns each configured intervention,
+    writes ``interventions_task_aligned.jsonl``, and optionally feeds signed
+    token deltas into :class:`TokenStatsAggregator`.
+    """
+    if not args.enabled or not args.collect_eval_interventions:
+        return {}
+    rank0_only = bool(getattr(args, "rank0_only", True))
+    if rank0_only and rank is not None and rank != 0:
+        return {}
+    if tokenizer is None:
+        return {"missing_fields": ["no_tokenizer_available"]}
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    specs, skipped_specs = _build_intervention_specs(model, args)
+    if not specs:
+        summary = {
+            "run_id": run_id,
+            "samples_processed": 0,
+            "skipped_interventions": skipped_specs,
+            "scalar_metrics": {},
+        }
+        write_json_atomic(output_dir / "eval_intervention_summary.json", summary)
+        return summary
+
+    try:
+        device = next(model.parameters()).device
+    except StopIteration:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    max_seqlen = _model_max_seqlen(model)
+    max_tokens_per_sample = int(getattr(args, "eval_activation_max_tokens_per_sample", 256))
+    max_per_task = getattr(args, "intervention_max_samples_per_task", None)
+    tasks_filter = getattr(args, "tasks", None)
+
+    from lingua.eval_activations import _build_input_ids, disable_kv_cache
+    from lingua.eval_sample_capture import (
+        iter_lm_eval_samples,
+        lm_eval_sample_to_record,
+    )
+
+    def iter_records() -> Iterator[Any]:
+        if sample_records is not None:
+            counts: Counter[str] = Counter()
+            filt = set(t.lower() for t in tasks_filter) if tasks_filter else None
+            for rec in sample_records:
+                task = getattr(rec, "task", None)
+                if task is None:
+                    continue
+                if filt is not None and task.lower() not in filt:
+                    continue
+                if max_per_task is not None and counts[task] >= max_per_task:
+                    continue
+                counts[task] += 1
+                yield rec
+            return
+        if results is None:
+            return
+        for task_name, sample in iter_lm_eval_samples(
+            results,
+            tasks_filter=tasks_filter,
+            max_per_task=max_per_task,
+        ):
+            yield lm_eval_sample_to_record(
+                task_name,
+                sample,
+                run_id=run_id,
+                model_id=model_id,
+                checkpoint_path=checkpoint_path,
+                capture_prompts=True,
+                capture_generations=True,
+                capture_token_ids=False,
+                tokenizer=tokenizer,
+                max_text_chars=getattr(args, "max_text_chars", 4096),
+                max_tokens=max_tokens_per_sample,
+            )
+
+    metrics_acc: Dict[str, OnlineStats] = defaultdict(OnlineStats)
+    intervention_records: List[InterventionRecord] = []
+    token_agg = TokenStatsAggregator(args.frequency_bucket_boundaries, args.token_topk)
+    relation_summary_raw: Dict[str, Any] = {}
+    largest_changes: List[Dict[str, Any]] = []
+    samples_processed = 0
+    samples_skipped = 0
+    samples_failed = 0
+    samples_per_task: Counter[str] = Counter()
+
+    was_training = model.training
+    model.eval()
+
+    try:
+        with disable_kv_cache(model):
+            for rec in iter_records():
+                task = getattr(rec, "task", None) or "unknown"
+                prompt = getattr(rec, "prompt", None)
+                completion = getattr(rec, "generation", None) or getattr(rec, "target", None)
+                if not prompt and results is not None:
+                    # Defensive fallback for records built elsewhere with only
+                    # metadata; keep this best-effort and non-fatal.
+                    completion = completion
+                if not prompt and not completion:
+                    samples_skipped += 1
+                    continue
+                _input_full, tok_ids, tok_strs, tok_roles, prompt_len = _build_input_ids(
+                    tokenizer,
+                    prompt,
+                    completion,
+                    max_seqlen=max_seqlen,
+                    max_tokens_per_sample=max_tokens_per_sample,
+                )
+                if tok_ids is None or len(tok_ids) < 2:
+                    samples_skipped += 1
+                    continue
+                label_ids = list(tok_ids[1:])
+                label_tokens = list(tok_strs[1:]) if tok_strs is not None and len(tok_strs) >= len(tok_ids) else [
+                    str(t) for t in label_ids
+                ]
+                label_roles = list(tok_roles[1:]) if tok_roles is not None and len(tok_roles) >= len(tok_ids) else [
+                    classify_token_role(t) for t in label_tokens
+                ]
+                input_ids = _safe_tensor(tok_ids[:-1], device=device)
+                labels = _safe_tensor(label_ids, device=device)
+                try:
+                    base_loss, base_nll = compute_loss_and_per_token_nll(model, input_ids, labels)
+                except Exception as exc:
+                    logger.warning(
+                        "diagnostics: task-aligned base loss failed for task=%s sample=%s: %s",
+                        task,
+                        getattr(rec, "sample_id", "unknown"),
+                        exc,
+                    )
+                    samples_failed += 1
+                    continue
+
+                task_group = getattr(rec, "task_group", None) or classify_task_group(task)
+                sample_id = getattr(rec, "sample_id", None) or f"{task}:{samples_per_task[task]}"
+                layer_deltas: Dict[int, Dict[str, float]] = defaultdict(dict)
+                sample_rows: List[InterventionRecord] = []
+
+                for spec in specs:
+                    try:
+                        with stem_intervention(
+                            model,
+                            kind=spec["kind"],
+                            layer_idx=spec.get("layer_idx"),
+                            layers=spec.get("layers"),
+                            gate_value=spec.get("gate_value"),
+                        ):
+                            int_loss, int_nll = compute_loss_and_per_token_nll(model, input_ids, labels)
+                    except Exception as exc:
+                        logger.warning(
+                            "diagnostics: intervention failed task=%s sample=%s intervention=%s: %s",
+                            task,
+                            sample_id,
+                            spec["intervention_name"],
+                            exc,
+                        )
+                        samples_failed += 1
+                        continue
+
+                    delta_loss = float((int_loss - base_loss).detach().float().item())
+                    delta_per_token: Optional[List[float]] = None
+                    delta_tensor: Optional[torch.Tensor] = None
+                    if args.compute_per_token_delta and base_nll is not None and int_nll is not None:
+                        steps = min(int(base_nll.numel()), int(int_nll.numel()), len(label_ids))
+                        if steps > 0:
+                            delta_tensor = (int_nll.reshape(-1)[:steps] - base_nll.reshape(-1)[:steps]).detach()
+                            delta_per_token = [float(v) for v in delta_tensor.cpu().tolist()]
+                    metadata = {
+                        "task_group": task_group,
+                        "prompt_token_count": int(prompt_len or 0),
+                        "label_token_count": len(label_ids),
+                        "intervention_layers": spec.get("layers"),
+                    }
+                    if spec.get("gate_value") is not None:
+                        metadata["gate_value"] = spec["gate_value"]
+                    row = InterventionRecord(
+                        run_id=run_id,
+                        task=task,
+                        sample_id=sample_id,
+                        intervention_name=spec["intervention_name"],
+                        intervention_type=spec["intervention_type"],
+                        target_path=spec["target_path"],
+                        loss_original=float(base_loss.detach().float().item()),
+                        loss_intervened=float(int_loss.detach().float().item()),
+                        delta_loss=delta_loss,
+                        layer_idx=spec.get("layer_idx"),
+                        delta_per_token_nll=delta_per_token,
+                        token_ids=label_ids[: len(delta_per_token)] if delta_per_token is not None else label_ids,
+                        token_roles=label_roles[: len(delta_per_token)] if delta_per_token is not None else label_roles,
+                        metadata=metadata,
+                    )
+                    sample_rows.append(row)
+                    metric_key = (
+                        f"{prefix}/intervention_task_aligned/{task}/"
+                        f"{spec['intervention_name']}_delta_loss"
+                    )
+                    metrics_acc[metric_key].update(delta_loss)
+                    largest_changes.append(
+                        {
+                            "task": task,
+                            "sample_id": sample_id,
+                            "layer_idx": spec.get("layer_idx"),
+                            "intervention_type": spec["intervention_type"],
+                            "delta_loss": delta_loss,
+                            "abs_delta_loss": abs(delta_loss),
+                        }
+                    )
+                    layer_idx = spec.get("layer_idx")
+                    if layer_idx is not None and spec["intervention_type"] == "ablate_layer_stem":
+                        layer_deltas[int(layer_idx)]["stem"] = delta_loss
+                    if layer_idx is not None and spec["intervention_type"] == "ablate_layer_up":
+                        layer_deltas[int(layer_idx)]["up"] = delta_loss
+                    if args.update_token_effectiveness and delta_tensor is not None:
+                        steps = int(delta_tensor.numel())
+                        token_agg.update_loss_delta(
+                            torch.tensor(label_ids[:steps], dtype=torch.long),
+                            _delta_metric_name(spec["intervention_type"]),
+                            delta_tensor[:steps].cpu(),
+                            task=task,
+                            task_group=task_group,
+                            layer_idx=spec.get("layer_idx"),
+                            tokens=label_tokens[:steps],
+                            token_roles=label_roles[:steps],
+                        )
+
+                for layer_idx in _selected_intervention_layers(model, args):
+                    stem_delta = layer_deltas.get(int(layer_idx), {}).get("stem")
+                    up_delta = layer_deltas.get(int(layer_idx), {}).get("up")
+                    relation = _classify_path_relation(stem_delta, up_delta)
+                    if stem_delta is not None or up_delta is not None:
+                        _update_relation_summary(
+                            relation_summary_raw,
+                            task=task,
+                            layer_idx=int(layer_idx),
+                            sample_id=sample_id,
+                            relation=relation,
+                            stem_delta=stem_delta,
+                            up_delta=up_delta,
+                        )
+                    for row in sample_rows:
+                        if row.layer_idx == int(layer_idx):
+                            row.path_relation = relation
+                            row.metadata["path_relation"] = relation
+                            row.metadata["path_relation_stem_delta_loss"] = stem_delta
+                            row.metadata["path_relation_up_delta_loss"] = up_delta
+
+                intervention_records.extend(sample_rows)
+                samples_processed += 1
+                samples_per_task[task] += 1
+    finally:
+        if was_training:
+            model.train()
+
+    append_jsonl(
+        output_dir / TASK_ALIGNED_INTERVENTIONS_JSONL,
+        intervention_records,
+        rank0_only=True,
+        max_prompt_chars=getattr(args, "max_text_chars", 4096),
+        max_generation_chars=getattr(args, "max_text_chars", 4096),
+    )
+    if not intervention_records:
+        (output_dir / TASK_ALIGNED_INTERVENTIONS_JSONL).touch(exist_ok=True)
+
+    token_effect_records = token_agg.token_effect_records(run_id=run_id) if args.update_token_effectiveness else []
+    if token_effect_records:
+        append_jsonl(output_dir / TOKEN_EFFECTS_JSONL, token_effect_records, rank0_only=True)
+        by_task, by_role = _summarize_token_effect_records(token_effect_records, topk=args.token_topk)
+    else:
+        (output_dir / TOKEN_EFFECTS_JSONL).touch(exist_ok=True)
+        by_task, by_role = {}, {}
+    write_json_atomic(output_dir / TOKEN_EFFECTS_BY_TASK_JSON, by_task)
+    write_json_atomic(output_dir / TOKEN_EFFECTS_BY_ROLE_JSON, by_role)
+
+    relation_summary = _finalize_relation_summary(relation_summary_raw)
+    write_json_atomic(output_dir / PATH_RELATIONS_BY_TASK_LAYER_JSON, relation_summary)
+
+    scalar_metrics = {f"{key}_mean": stat.mean for key, stat in metrics_acc.items() if stat.count}
+    largest_changes = sorted(largest_changes, key=lambda row: row["abs_delta_loss"], reverse=True)[: args.token_topk]
+    summary = {
+        "run_id": run_id,
+        "samples_processed": samples_processed,
+        "samples_per_task": dict(samples_per_task),
+        "samples_skipped": samples_skipped,
+        "samples_failed": samples_failed,
+        "intervention_types_requested": list(args.intervention_types or []),
+        "intervention_types_implemented": sorted({spec["intervention_type"] for spec in specs}),
+        "skipped_interventions": skipped_specs,
+        "compute_per_token_delta": bool(args.compute_per_token_delta),
+        "update_token_effectiveness": bool(args.update_token_effectiveness),
+        "scalar_metrics": scalar_metrics,
+        "largest_loss_changes": largest_changes,
+        "token_effects_by_task": by_task,
+        "token_effects_by_role": by_role,
+        "path_relations_by_task_layer": relation_summary,
+        "artifacts": {
+            "interventions": TASK_ALIGNED_INTERVENTIONS_JSONL,
+            "token_effects": TOKEN_EFFECTS_JSONL,
+            "token_effects_by_task": TOKEN_EFFECTS_BY_TASK_JSON,
+            "token_effects_by_role": TOKEN_EFFECTS_BY_ROLE_JSON,
+            "path_relations_by_task_layer": PATH_RELATIONS_BY_TASK_LAYER_JSON,
+        },
+    }
+    write_json_atomic(output_dir / "eval_intervention_summary.json", summary)
+    return summary
 
 
 @torch.no_grad()

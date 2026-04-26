@@ -19,7 +19,9 @@ from lingua.diagnostics import (
     TokenStatsAggregator,
     geometry_summary,
     run_intervention_suite,
+    run_task_aligned_interventions,
 )
+from lingua.diagnostic_records import read_jsonl
 from lingua.stem import StemFeedForward
 from lingua.stem_dag import STEMDagFeedForward
 
@@ -36,7 +38,7 @@ class _Layer(nn.Module):
 class _LM(nn.Module):
     def __init__(self, parent, ff):
         super().__init__()
-        self._stem_parent = parent
+        object.__setattr__(self, "_stem_parent", parent)
         self.stem_layers = [0]
         self.layers = nn.ModuleList([_Layer(ff)])
         self.tok_embeddings = nn.Embedding(17, 8)
@@ -137,6 +139,65 @@ def _assert_token_stats_aggregator_merges_batches():
     assert agg.rankings()["top_beneficial_tokens"][0]["score"] == 0.5
 
 
+class _SmokeTokenizer:
+    def encode(self, text, add_bos=False, add_eos=False):
+        ids = [int(tok) % 17 for tok in text.split()] if text else []
+        if add_bos:
+            ids = [0] + ids
+        if add_eos:
+            ids.append(1)
+        return ids
+
+    def decode(self, ids):
+        return " ".join(str(i) for i in ids)
+
+    def get_token_offsets(self, text, tokens=None):
+        toks = self.decode(tokens or []).split()
+        return toks, list(range(len(toks)))
+
+
+def _assert_task_aligned_interventions_write_artifacts(tmp_path: Path):
+    torch.manual_seed(0)
+    model = _StemToy(dag=True)
+    args = DiagnosticsArgs(
+        enabled=True,
+        collect_eval_interventions=True,
+        intervention_max_samples_per_task=1,
+        intervention_layers=[0],
+        intervention_types=["ablate_layer_stem", "ablate_layer_up", "ablate_combined"],
+        compute_per_token_delta=True,
+        update_token_effectiveness=True,
+        output_dir=str(tmp_path),
+    )
+    results = {
+        "samples": {
+            "mbpp": [
+                {
+                    "doc_id": 0,
+                    "doc": {"prompt": "2 3"},
+                    "target": "4 5",
+                    "arguments": [["2 3", {}]],
+                    "filtered_resps": ["4 5"],
+                    "metrics": ["pass@1"],
+                    "pass@1": 1.0,
+                }
+            ]
+        }
+    }
+    summary = run_task_aligned_interventions(
+        model=model,
+        tokenizer=_SmokeTokenizer(),
+        results=results,
+        args=args,
+        output_dir=tmp_path,
+        run_id="smoke",
+        rank=0,
+    )
+    assert summary["samples_processed"] == 1
+    assert read_jsonl(tmp_path / "interventions_task_aligned.jsonl")
+    assert read_jsonl(tmp_path / "token_effects.jsonl")
+
+
 def _assert_geometry_utilities_are_finite():
     torch.manual_seed(0)
     summary = geometry_summary(torch.randn(32, 8))
@@ -151,10 +212,11 @@ def main():
     _assert_dag_gate_metric_logged()
     _assert_intervention_engine_changes_loss_on_toy_batch()
     _assert_token_stats_aggregator_merges_batches()
+    with TemporaryDirectory() as tmp:
+        _assert_task_aligned_interventions_write_artifacts(Path(tmp))
     _assert_geometry_utilities_are_finite()
     print("diagnostics smoke checks passed")
 
 
 if __name__ == "__main__":
     main()
-
