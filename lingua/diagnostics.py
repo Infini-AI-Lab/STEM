@@ -57,6 +57,21 @@ class DiagnosticsArgs:
         default_factory=lambda: [0.0, 0.25, 0.5, 0.75, 1.0]
     )
 
+    # ------------------------------------------------------------------
+    # Eval-time sample capture (Round 2: task-aligned lm-eval sample logging).
+    # All defaults are conservative; nothing is captured unless ``enabled``
+    # AND ``collect_eval_samples`` are both True.
+    # ------------------------------------------------------------------
+    collect_eval_samples: bool = False
+    max_eval_samples_per_task: Optional[int] = None
+    capture_prompts: bool = True
+    capture_generations: bool = True
+    capture_token_ids: bool = False
+    max_text_chars: int = 4096
+    tasks: Optional[List[str]] = None  # subset of task names; None = all
+    rank0_only: bool = True
+    run_id: Optional[str] = None  # propagated into DiagnosticSampleRecord.run_id
+
 
 def _as_local_tensor(x: Any) -> Optional[torch.Tensor]:
     if x is None:

@@ -33,6 +33,7 @@ from lingua.diagnostics import (
     run_prompt_interventions,
     write_intervention_rows,
 )
+from lingua.eval_sample_capture import capture_eval_samples
 from lingua.distributed import (
     DistributedArgs,
     dist_mean_dict,
@@ -339,6 +340,23 @@ def launch_eval(cfg: EvalArgs):
     val_results =  None
     if cfg.validation:
         val_results = eval_on_val(generator, cfg.validation, train_cfg)
+
+    if cfg.diagnostics.enabled and cfg.diagnostics.collect_eval_samples and results is not None:
+        run_id = cfg.diagnostics.run_id or cfg.name
+        try:
+            capture_eval_samples(
+                results=results,
+                args=cfg.diagnostics,
+                output_dir=diag_dir,
+                run_id=run_id,
+                checkpoint_path=cfg.ckpt_dir,
+                model_id=cfg.model_type,
+                tokenizer=tokenizer,
+                rank=get_global_rank(),
+            )
+        except Exception as e:
+            logger.warning(f"Eval sample capture failed (non-fatal): {e}")
+
     if get_global_rank() == 0:
         with open(Path(cfg.dump_dir) / "results.json", "w") as f:
             # Filter out non-serializable keys (configs contains function objects)

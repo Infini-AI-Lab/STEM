@@ -32,6 +32,7 @@ from lingua.diagnostics import (
     run_prompt_interventions,
     write_intervention_rows,
 )
+from lingua.eval_sample_capture import capture_eval_samples
 from lingua.distributed import (
     DistributedArgs,
     dist_mean_dict,
@@ -494,6 +495,29 @@ def launch_stem_eval(cfg: StemEvalArgs):
         )
     else:
         results = dp_simple_evaluate(wrap, **harness_kwargs)
+
+    # -- Capture per-task lm-eval samples BEFORE the DP merge strips them --
+    # Each DP group has its own slice; we write per-DP-rank JSONL shards from
+    # the MP rank 0 of each DP group (other MP ranks would produce identical
+    # data because they processed the same requests in lock-step).
+    if cfg.diagnostics.enabled and cfg.diagnostics.collect_eval_samples and results is not None:
+        from lingua.stem_dist_utils import get_stem_model_parallel_rank
+        mp_rank = get_stem_model_parallel_rank() if is_stem_initialized() else 0
+        if mp_rank == 0:
+            run_id = cfg.diagnostics.run_id or cfg.name
+            try:
+                capture_eval_samples(
+                    results=results,
+                    args=cfg.diagnostics,
+                    output_dir=diag_dir,
+                    run_id=run_id,
+                    checkpoint_path=cfg.ckpt_dir,
+                    model_id=cfg.model_type,
+                    tokenizer=tokenizer,
+                    rank=dp_rank,
+                )
+            except Exception as e:
+                logger.warning(f"Eval sample capture failed (non-fatal): {e}")
 
     # -- Gather and merge harness results across DP groups --
     if _has_dp_peers and results is not None:
