@@ -76,6 +76,18 @@ class DiagnosticsArgs:
     )
 
     # ------------------------------------------------------------------
+    # Train-time task/source labelling.
+    # When ``train_task_label`` is set it is passed verbatim to
+    # ``StemDiagnosticsCollector.start_batch(task=...)``.
+    # When ``infer_task_from_data_path`` is True *and* a single data source
+    # is configured, the base directory name of that source is used as the
+    # label (e.g. ``"math_data"`` from ``"/datasets/math_data/"``).
+    # If neither applies the label falls back to ``"train"``.
+    # ------------------------------------------------------------------
+    train_task_label: Optional[str] = None
+    infer_task_from_data_path: bool = False
+
+    # ------------------------------------------------------------------
     # Eval-time sample capture (Round 2: task-aligned lm-eval sample logging).
     # All defaults are conservative; nothing is captured unless ``enabled``
     # AND ``collect_eval_samples`` are both True.
@@ -1524,6 +1536,36 @@ class StemDiagnosticsCollector:
             with open(self.output_dir / "token_stats.jsonl", "w") as f:
                 for row in self.token_stats.rows():
                     print(json.dumps(row), file=f)
+
+        # ------------------------------------------------------------------
+        # Canonical train-prefixed artifact files.  These are schema-
+        # compatible with eval diagnostics so that offline tools can join
+        # train and eval outputs by file name prefix without special-casing.
+        # ------------------------------------------------------------------
+        task_label: str = getattr(self.args, "train_task_label", None) or "train"
+
+        # train_layer_path_summary.json — per-layer streaming stats, keyed as
+        # {"task_label": ..., "per_layer": {"0": {"metric_mean": ...}, ...}}.
+        per_layer_summary: Dict[str, Any] = {}
+        for stat_key, stat in self.stats.items():
+            m = re.match(r"layer_(\d+)/(.*)", stat_key)
+            if m:
+                layer_k, metric_k = m.group(1), m.group(2)
+                per_layer_summary.setdefault(layer_k, {}).update(
+                    stat.as_dict(metric_k)
+                )
+        write_json_atomic(
+            self.output_dir / "train_layer_path_summary.json",
+            {"task_label": task_label, "per_layer": per_layer_summary},
+        )
+
+        # train_token_effects.jsonl — token stats rows tagged with task_label.
+        if self.args.collect_token_stats:
+            with open(self.output_dir / "train_token_effects.jsonl", "w") as f:
+                for row in self.token_stats.rows():
+                    row.setdefault("task", task_label)
+                    print(json.dumps(row), file=f)
+
         if self.args.collect_geometry:
             for layer_idx, reservoirs in self.geometry.items():
                 arrays = {}
@@ -1712,6 +1754,30 @@ def write_intervention_rows(output_dir: Path, rows: List[Dict[str, Any]]) -> Non
     output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_dir / "interventions.jsonl", "a") as f:
         for row in rows:
+            print(json.dumps(row), file=f)
+
+
+def write_train_intervention_rows(
+    output_dir: Path,
+    rows: List[Dict[str, Any]],
+    *,
+    task_label: str = "train",
+) -> None:
+    """Write train-time intervention rows to the canonical train artifacts.
+
+    Writes to both ``interventions.jsonl`` (backward-compatible) and to the
+    schema-stable ``train_interventions.jsonl`` file.  Rows are augmented with
+    a ``task`` field set to *task_label* when not already present.
+    """
+    if not rows:
+        return
+    augmented = [
+        ({**r, "task": task_label} if "task" not in r else r) for r in rows
+    ]
+    write_intervention_rows(output_dir, augmented)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_dir / "train_interventions.jsonl", "a") as f:
+        for row in augmented:
             print(json.dumps(row), file=f)
 
 
@@ -2611,3 +2677,84 @@ def analyze_eval_samples(results: Dict[str, Any], args: DiagnosticsArgs, output_
 
 def diagnostics_output_dir(base_dump_dir: Optional[str], args: DiagnosticsArgs) -> Path:
     return Path(args.output_dir) if args.output_dir else Path(base_dump_dir or ".") / "diagnostics"
+
+
+def resolve_train_task_label(
+    diagnostics_args: DiagnosticsArgs,
+    data_sources: Optional[Dict[str, float]] = None,
+) -> str:
+    """Determine the task label for train-time ``start_batch`` calls.
+
+    Priority order:
+
+    1. ``diagnostics_args.train_task_label`` if explicitly set (non-empty).
+    2. If ``diagnostics_args.infer_task_from_data_path`` is ``True`` *and*
+       exactly one data source is configured in *data_sources*, the base
+       directory name of that source path is used
+       (e.g. ``"math_data"`` from ``"/datasets/math_data/"``).
+    3. Falls back to ``"train"``.
+
+    This function is side-effect-free; nothing is written to disk.
+    """
+    explicit = getattr(diagnostics_args, "train_task_label", None)
+    if explicit:
+        return explicit
+    infer = getattr(diagnostics_args, "infer_task_from_data_path", False)
+    if infer and data_sources and len(data_sources) == 1:
+        source_path = next(iter(data_sources.keys()))
+        label = Path(source_path).name
+        if label:
+            return label
+    return "train"
+
+
+def build_train_diagnostics_collector(
+    model: torch.nn.Module,
+    args: DiagnosticsArgs,
+    *,
+    output_dir: Optional[Path] = None,
+    prefix: str = "diag/train",
+    mode: str = "train",
+) -> StemDiagnosticsCollector:
+    """Build a :class:`StemDiagnosticsCollector` for training scripts.
+
+    This is the shared factory used by all training entry-points
+    (``stem_train``, ``stem_dag_train``, ``stem_distill_train``, and
+    ``stem_projection_finetune``) so that collector setup is not duplicated.
+
+    Parameters
+    ----------
+    model:
+        The model being trained (before or after FSDP wrapping).
+    args:
+        ``DiagnosticsArgs`` from the training config.
+    output_dir:
+        Directory for diagnostics artifacts.  When ``None`` the collector
+        creates a ``diagnostics/`` sub-directory relative to its own
+        ``args.output_dir`` or defaults gracefully.
+    prefix:
+        Metric key prefix used in ``scalar_metrics()`` output (default
+        ``"diag/train"``).
+    mode:
+        Collector mode; must be ``"train"`` for training scripts.  Do not
+        pass ``"eval"`` here.
+
+    Returns
+    -------
+    StemDiagnosticsCollector
+        Ready to use as a context manager::
+
+            collector = build_train_diagnostics_collector(model, args.diagnostics,
+                                                          output_dir=output_dir)
+            with collector:
+                ...  # training loop
+            if args.diagnostics.enabled and get_is_master():
+                collector.write_artifacts({"global_step": step})
+    """
+    return StemDiagnosticsCollector(
+        model,
+        args,
+        output_dir=output_dir,
+        prefix=prefix,
+        mode=mode,
+    )

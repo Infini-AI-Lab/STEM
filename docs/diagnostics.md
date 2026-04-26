@@ -760,11 +760,86 @@ the return value and printed by `--print-summary`.
 
 ---
 
+## Train Diagnostics
+
+Train-time diagnostics are supported in all three training entry-points:
+
+| Script | How diagnostics are wired |
+|--------|--------------------------|
+| `stem_train.py` | Native — full diagnostics loop, optimizer stats, interventions |
+| `stem_dag_train.py` | Delegates to `stem_train.train()` — identical wiring, no extra code |
+| `stem_distill_train.py` | Delegates to `stem_train.train()` — identical wiring |
+| `stem_projection_finetune.py` | Own training loop — uses `build_train_diagnostics_collector`; forward stats and param metrics supported; train-time interventions not wired (see limitations) |
+
+### Enabling train diagnostics
+
+```yaml
+diagnostics:
+  enabled: true
+  collect_train_stats: true         # forward-pass hook metrics each sample step
+  sample_every_n_steps: 500         # how often to collect (default 1000)
+  collect_interventions: true       # path ablation suite (expensive; default false)
+  path_ablation_eval_every_n_steps: 2000
+  collect_optimizer_stats: true     # optimizer moment norms (default false)
+  enable_backward_hooks: false      # gradient norm hooks (default false)
+  layers: [0, 4, 8, 12]            # restrict to specific layers; null = all STEM layers
+  train_task_label: null            # explicit label; overrides infer logic
+  infer_task_from_data_path: false  # infer label from single-source data path
+```
+
+For DAG training add the same block under `diagnostics:` in your
+`stem_dag_*.yaml` config — nothing else is needed.
+
+### Task / source label
+
+The `task` field in train-time records and artifacts is determined in this order:
+
+1. `diagnostics.train_task_label` — explicit string, highest priority.
+2. If `diagnostics.infer_task_from_data_path: true` and the data config has
+   exactly **one** source, the base directory name of that source path is used
+   (e.g. `"math_data"` from `data.sources: {"/datasets/math_data": 1.0}`).
+3. Falls back to `"train"`.
+
+For multi-source mixture training the label always falls back to `"train"` because
+there is no per-batch source metadata in the tensor batch.  Per-source diagnostics
+would require changes to the data loader to propagate source information.
+
+### Train artifact files
+
+| File | Description |
+|------|-------------|
+| `diagnostics/summary_train.json` | Scalar metrics summary + token rankings |
+| `diagnostics/train_layer_path_summary.json` | Per-layer streaming stats, keyed `{task_label, per_layer: {layer_idx: {metric_mean, …}}}` |
+| `diagnostics/train_token_effects.jsonl` | Token stats rows tagged with `task` field (only if `collect_token_stats: true`) |
+| `diagnostics/interventions.jsonl` | Raw intervention rows (backward-compatible) |
+| `diagnostics/train_interventions.jsonl` | Same rows plus `task` field injection (canonical train prefix) |
+| `diagnostics/geometry_layer_{L}.npz` | Stem/dense geometry arrays per layer (if `collect_geometry: true`) |
+| `diagnostics/token_stats.jsonl` | Low-level token stats rows |
+
+### Known limitations
+
+- **Per-batch source label not available**: the batch tensor carries only
+  token IDs and labels.  Source/domain labels from a multi-source mixture
+  are not propagated.  To get per-source diagnostics you would need the data
+  loader to emit a per-batch source index; this is not yet implemented.
+- **`stem_projection_finetune.py`** does not run the path-intervention suite
+  during training (it only trains projection weights, not the base model).
+  Forward stats and optimizer-param metrics work normally.
+- **Backward hooks** (`enable_backward_hooks: true`) may have higher overhead
+  with FSDP-sharded models — gradient hooks fire on the local shard.
+- **No extra backward passes** are added by diagnostics.  Interventions run
+  their own `torch.no_grad()` forwards; they never add a backward pass.
+
+---
+
 ## Artifacts
 
 Common outputs:
 
 - `diagnostics/summary_train.json`
+- `diagnostics/train_layer_path_summary.json`   ← train-specific (Round 6)
+- `diagnostics/train_token_effects.jsonl`        ← train-specific (Round 6)
+- `diagnostics/train_interventions.jsonl`        ← train-specific (Round 6)
 - `diagnostics/summary_eval.json`
 - `diagnostics/token_stats.jsonl`
 - `diagnostics/interventions.jsonl`

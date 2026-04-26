@@ -92,7 +92,9 @@ from lingua.metrics import (
 from lingua.diagnostics import (
     DiagnosticsArgs,
     StemDiagnosticsCollector,
+    build_train_diagnostics_collector,
     diagnostics_output_dir,
+    resolve_train_task_label,
 )
 from lingua.optim import OptimArgs, build_lr_fn
 from lingua.logger import init_logger
@@ -900,14 +902,25 @@ def train(args: ProjectionFinetuneArgs):
         torch_profiler = context_stack.enter_context(
             maybe_run_profiler(args.dump_dir, model, args.profiling)
         )
+        diag_output_dir = diagnostics_output_dir(args.dump_dir, args.diagnostics)
         diagnostics = context_stack.enter_context(
-            StemDiagnosticsCollector(
+            build_train_diagnostics_collector(
                 model,
                 args.diagnostics,
-                output_dir=diagnostics_output_dir(args.dump_dir, args.diagnostics),
+                output_dir=diag_output_dir,
                 prefix="diag/train",
             )
         )
+        _proj_task_base = resolve_train_task_label(
+            args.diagnostics,
+            data_sources=getattr(args.data, "sources", None),
+        )
+        # For projection finetune we suffix the generic label with the loss
+        # type so artifacts clearly identify which mode produced them.
+        _proj_task_mse = f"{_proj_task_base}_projection_mse" if _proj_task_base == "train" else f"{_proj_task_base}_mse"
+        _proj_task_nll = f"{_proj_task_base}_projection_nll" if _proj_task_base == "train" else f"{_proj_task_base}_nll"
+        if args.diagnostics.enabled:
+            logger.info(f"Projection finetune diagnostics task labels: mse={_proj_task_mse!r}, nll={_proj_task_nll!r}")
 
         nwords_since_last_log = 0
         time_last_log = timer()
@@ -956,7 +969,7 @@ def train(args: ProjectionFinetuneArgs):
                 # ===========================================================
                 # 1. Collect intermediates from frozen model
                 if collect_diag_batch:
-                    diagnostics.start_batch(input_ids, task="projection_mse")
+                    diagnostics.start_batch(input_ids, task=_proj_task_mse)
                 intermediates, tok_emb, original_nll = (
                     collect_intermediates_and_tok_emb(
                         model, input_ids, stem_layers, target=target,
@@ -1011,7 +1024,7 @@ def train(args: ProjectionFinetuneArgs):
                 # ===========================================================
                 # 1. Compute original NLL (for logging, no grad)
                 if collect_diag_batch:
-                    diagnostics.start_batch(input_ids, task="projection_nll_original")
+                    diagnostics.start_batch(input_ids, task=_proj_task_nll)
                 with torch.no_grad():
                     original_nll = model(input_ids, target=target).detach()
                 if collect_diag_batch:

@@ -56,9 +56,11 @@ from lingua.metrics import (
 from lingua.diagnostics import (
     DiagnosticsArgs,
     StemDiagnosticsCollector,
+    build_train_diagnostics_collector,
     diagnostics_output_dir,
+    resolve_train_task_label,
     run_intervention_suite,
-    write_intervention_rows,
+    write_train_intervention_rows,
 )
 from lingua.optim import build_optimizer
 from lingua.logger import init_logger
@@ -416,14 +418,22 @@ def train(args: StemTrainArgs):
         torch_profiler = context_stack.enter_context(
             maybe_run_profiler(args.dump_dir, model, args.profiling)
         )
+        diag_output_dir = diagnostics_output_dir(args.dump_dir, args.diagnostics)
         diagnostics = context_stack.enter_context(
-            StemDiagnosticsCollector(
+            build_train_diagnostics_collector(
                 model,
                 args.diagnostics,
-                output_dir=diagnostics_output_dir(args.dump_dir, args.diagnostics),
+                output_dir=diag_output_dir,
                 prefix="diag/train",
             )
         )
+        # Resolve the task/source label once; used for every start_batch call.
+        _train_task_label = resolve_train_task_label(
+            args.diagnostics,
+            data_sources=getattr(args.data, "sources", None),
+        )
+        if args.diagnostics.enabled:
+            logger.info(f"Train diagnostics task label: {_train_task_label!r}")
 
         nwords_since_last_log = 0
         time_last_log = timer()
@@ -507,7 +517,7 @@ def train(args: StemTrainArgs):
                 and train_state.step % args.diagnostics.sample_every_n_steps == 0
             )
             if collect_diag_batch:
-                diagnostics.start_batch(input_ids, task="train")
+                diagnostics.start_batch(input_ids, task=_train_task_label)
             loss = model(input_ids, labels)
             if collect_diag_batch:
                 diagnostics.end_batch()
@@ -528,9 +538,10 @@ def train(args: StemTrainArgs):
                 )
                 diag_step_metrics.update(int_metrics)
                 if get_is_master():
-                    write_intervention_rows(
-                        diagnostics_output_dir(args.dump_dir, args.diagnostics),
+                    write_train_intervention_rows(
+                        diag_output_dir,
                         int_rows,
+                        task_label=_train_task_label,
                     )
 
             if args.grad_acc_steps > 1:
