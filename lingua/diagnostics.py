@@ -2481,8 +2481,26 @@ def run_prompt_interventions(
 
 
 def analyze_code_failure(generated: str, reference: Optional[str] = None) -> Dict[str, Any]:
+    """Heuristic single-pass code failure classifier.
+
+    Delegates to :func:`lingua.code_diagnostics.classify_static_failure` for
+    the full taxonomy, falling back to a lightweight inline path so this
+    function remains importable without the new module.
+    """
+    try:
+        from lingua.code_diagnostics import classify_static_failure
+        result = classify_static_failure(
+            generated or "",
+            prompt=None,
+            correct=None,
+        )
+        return {"category": result["static_category"], "detail": result["detail"]}
+    except ImportError:
+        pass
+
+    # Minimal inline fallback (kept for import-time safety)
     text = generated or ""
-    category = "unknown"
+    category = "unknown_failure"
     detail = ""
     try:
         ast.parse(text)
@@ -2490,22 +2508,20 @@ def analyze_code_failure(generated: str, reference: Optional[str] = None) -> Dic
         msg = str(exc).lower()
         detail = str(exc)
         if "indent" in msg:
-            category = "indentation_formatting_error"
+            category = "indentation_error"
         elif "eol while scanning string literal" in msg or "unterminated string" in msg:
             category = "unmatched_bracket_or_quote"
         else:
-            category = "syntax_parse_error"
-    if category == "unknown":
+            category = "syntax_error"
+    if category == "unknown_failure":
         if _has_unbalanced_delimiters(text):
             category = "unmatched_bracket_or_quote"
-        elif re.search(r"NameError|undefined|not defined", text):
-            category = "identifier_mismatch_missing_symbol"
         elif re.search(r"import\s+\*|from\s+\w+\s+import", text) and reference and "import" not in reference:
-            category = "api_or_import_misuse"
+            category = "import_error_or_api_misuse"
         elif "def " not in text and reference and "def " in reference:
-            category = "prompt_non_compliance_wrong_output_format"
+            category = "prompt_noncompliance"
         elif re.search(r"\b(for|while|if|return)\b", text):
-            category = "arithmetic_logic_mismatch"
+            category = "logic_error_likely"
     return {"category": category, "detail": detail}
 
 
@@ -2529,6 +2545,15 @@ def _has_unbalanced_delimiters(text: str) -> bool:
 
 
 def analyze_eval_samples(results: Dict[str, Any], args: DiagnosticsArgs, output_dir: Path) -> Dict[str, Any]:
+    """Analyse code generations from lm-eval results.
+
+    Produces ``code_failure_analysis.json`` with per-task failure counts.
+    When ``diagnostics_eval_samples.jsonl`` and
+    ``interventions_task_aligned.jsonl`` are present in *output_dir* the
+    full causal analysis is also run via
+    :func:`lingua.code_diagnostics.run_code_causal_analysis`, which writes
+    ``code_causal_failure_analysis.json``.
+    """
     if not args.enabled or not args.collect_code_error_taxonomy:
         return {}
     code_tasks = [t.lower() for t in (args.code_tasks or [])]
@@ -2562,9 +2587,25 @@ def analyze_eval_samples(results: Dict[str, Any], args: DiagnosticsArgs, output_
         "code_failure_counts": {task: dict(counter) for task, counter in counts.items()},
         "examples": examples if args.save_raw_samples else [],
     }
+    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_dir / "code_failure_analysis.json", "w") as f:
         json.dump(summary, f, indent=2)
+
+    # Run the full causal analysis if the artifact files are present.
+    samples_jsonl = output_dir / "diagnostics_eval_samples.jsonl"
+    if samples_jsonl.exists():
+        try:
+            from lingua.code_diagnostics import run_code_causal_analysis
+            run_id = getattr(args, "run_id", None) or "unknown"
+            run_code_causal_analysis(
+                output_dir=output_dir,
+                run_id=str(run_id),
+                code_tasks=list(args.code_tasks) if args.code_tasks else None,
+            )
+        except Exception as exc:
+            logger.warning("code_diagnostics: causal analysis failed (non-fatal): %s", exc)
+
     return summary
 
 

@@ -610,19 +610,44 @@ def launch_stem_eval(cfg: StemEvalArgs):
     rank = get_global_rank() if torch.distributed.is_initialized() else 0
     if rank == 0 and results is not None:
         with open(Path(cfg.dump_dir) / "results.json", "w") as f:
-            safe_keys = ['results', 'versions', 'n-shot', 'higher_is_better', 
+            safe_keys = ['results', 'versions', 'n-shot', 'higher_is_better',
                         'n-samples', 'git_hash', 'date', 'pretty_env_info',
                         'transformers_version', 'lm_eval_version']
             serializable_results = {k: v for k, v in results.items() if k in safe_keys}
             f.write(json.dumps(serializable_results))
         logger.info(f"All evaluation results: {results['results']}")
         code_summary = analyze_eval_samples(results, cfg.diagnostics, diag_dir)
+
+        # Run the full causal failure analysis once both JSONL artifacts are
+        # present (written by capture_eval_samples and run_task_aligned_interventions
+        # above).  This is non-fatal; a missing JSONL produces a skipped summary.
+        code_causal_summary: Dict[str, Any] = {}
+        if cfg.diagnostics.enabled and (
+            cfg.diagnostics.collect_eval_samples
+            or cfg.diagnostics.collect_eval_interventions
+        ):
+            try:
+                from lingua.code_diagnostics import run_code_causal_analysis
+                run_id = cfg.diagnostics.run_id or cfg.name
+                code_causal_summary = run_code_causal_analysis(
+                    output_dir=diag_dir,
+                    run_id=str(run_id),
+                    code_tasks=list(cfg.diagnostics.code_tasks)
+                    if cfg.diagnostics.code_tasks
+                    else None,
+                ) or {}
+            except Exception as _exc:
+                logger.warning(
+                    "code_diagnostics: causal analysis failed (non-fatal): %s", _exc
+                )
+
         if cfg.diagnostics.enabled:
             diag_dir.mkdir(parents=True, exist_ok=True)
             with open(diag_dir / "summary_eval.json", "w") as f:
                 f.write(json.dumps({
                     "metrics": eval_diag_metrics,
                     "code_failure_analysis": code_summary,
+                    "code_causal_failure_analysis": code_causal_summary,
                     "eval_intervention_summary": eval_intervention_summary,
                     "eval_activation_summary": eval_activation_summary,
                 }, indent=2, default=str))

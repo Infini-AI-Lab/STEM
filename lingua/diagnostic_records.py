@@ -181,25 +181,44 @@ class TokenEffectRecord:
 class CodeFailureRecord:
     """Taxonomy of a code-generation failure for one sample.
 
-    Produced by :func:`lingua.diagnostics.analyze_code_failure` or offline
-    analysis of :class:`DiagnosticSampleRecord` generations.
+    Produced by :mod:`lingua.code_diagnostics` or offline analysis of
+    :class:`DiagnosticSampleRecord` generations.
+
+    ``failure_category`` is the resolved verdict: equal to
+    ``harness_category`` when execution metadata is available, otherwise
+    equal to ``static_category``.  ``static_category`` and
+    ``harness_category`` let callers distinguish static-analysis results
+    from harness-execution results.
     """
 
     run_id: str
     task: str
     sample_id: str
 
-    failure_category: str = "unknown"   # syntax_parse_error | indentation_formatting_error | …
+    failure_category: str = "unknown_failure"
+    static_category: str = "unknown_failure"    # from ast / regex static analysis
+    harness_category: Optional[str] = None      # from harness execution if available
+
     parse_ok: bool = False
     syntax_error: bool = False
-    runtime_error: bool = False
+    indentation_error: bool = False
+    unmatched_delimiter: bool = False
+    missing_function: bool = False
+    wrong_function_name: bool = False
     signature_error: bool = False
+    import_error: bool = False
+    runtime_error: bool = False
     test_failure: bool = False
     timeout: bool = False
+    empty_or_truncated: bool = False
+    prompt_noncompliance: bool = False
 
     traceback_type: Optional[str] = None
     function_name_expected: Optional[str] = None
     function_name_found: Optional[str] = None
+
+    correct: Optional[bool] = None
+    metric_value: Optional[float] = None
 
     metadata: Dict[str, Any] = field(default_factory=dict)
 

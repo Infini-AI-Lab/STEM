@@ -457,9 +457,27 @@ up-path ablations:
 - `redundant`: both deltas are close to zero
 - `inconclusive`: one of the required metrics is missing
 
-## MBPP / HumanEval Failure Analysis
+## MBPP / HumanEval Causal Failure Analysis (`lingua.code_diagnostics`)
 
-Enable lm-eval sample logging and code taxonomy:
+The full causal analysis connects each sample's outcome to a failure category and
+then joins that category with the per-sample intervention deltas, producing
+queryable summaries.
+
+### Enable
+
+```yaml
+diagnostics:
+  enabled: true
+  collect_eval_samples: true          # writes diagnostics_eval_samples.jsonl
+  collect_eval_interventions: true    # writes interventions_task_aligned.jsonl
+  collect_code_error_taxonomy: true   # triggers analyze_eval_samples wrapper
+  code_tasks: [mbpp, humaneval]
+  save_raw_samples: true
+harness:
+  log_samples: true
+```
+
+CLI:
 
 ```bash
 python -m apps.main.stem_eval \
@@ -467,15 +485,118 @@ python -m apps.main.stem_eval \
   harness.tasks='[mbpp,humaneval]' \
   harness.log_samples=true \
   diagnostics.enabled=true \
-  diagnostics.collect_code_error_taxonomy=true \
-  diagnostics.save_raw_samples=true
+  diagnostics.collect_eval_samples=true \
+  diagnostics.collect_eval_interventions=true \
+  diagnostics.collect_code_error_taxonomy=true
 ```
 
-The taxonomy is deliberately offline-safe and heuristic.  It uses Python parsing
-and regex checks to bucket generations into syntax/parse, indentation,
-unmatched delimiter, missing symbol, API/import misuse, logic mismatch,
-long-range dependency, prompt-format, or unknown categories.  It does not execute
-generated code.
+### Output artifacts
+
+| Path | Description |
+|------|-------------|
+| `diagnostics/code_failures.jsonl` | One `CodeFailureRecord` per code sample |
+| `diagnostics/code_causal_failure_analysis.json` | Summary with counts, delta_loss averages, harmful layers/roles/tokens, examples |
+| `diagnostics/code_failure_examples.jsonl` | Bounded prompt/generation snippets per sample (up to 200) |
+
+### Failure categories
+
+Samples are classified into exactly one of:
+
+| Category | Source | Meaning |
+|----------|--------|---------|
+| `pass` | static + harness | Structurally valid and harness-confirmed correct |
+| `syntax_error` | static | `ast.parse` raises `SyntaxError` (non-indentation) |
+| `indentation_error` | static | `ast.parse` raises `IndentationError` |
+| `unmatched_bracket_or_quote` | static | `SyntaxError` with EOL/EOF message, or unbalanced `()[]{}` |
+| `missing_function` | static | No `def` found when task prompt contains `def` or `expected_fn_name` is set |
+| `wrong_function_name` | static | Has a `def` but function name does not match expected |
+| `signature_error` | static | Function found but positional arg count differs from prompt |
+| `import_error_or_api_misuse` | static + harness | Wildcard import, or harness reports `ImportError` |
+| `runtime_error` | harness | Harness traceback contains a non-timeout non-assertion exception |
+| `timeout` | harness | Harness traceback contains `TimeoutError` or "timed out" |
+| `test_failure` | harness | Harness traceback contains `AssertionError` or "test failed" |
+| `logic_error_likely` | static | Parses OK, structurally valid, but `correct=False` |
+| `prompt_noncompliance` | static | Prose-only response when code was expected |
+| `empty_or_truncated_generation` | static | Generation is empty or fewer than 5 characters |
+| `unknown_failure` | fallback | None of the above could be determined |
+
+**Priority order:** harness execution results override static results when
+available.  Within static analysis: empty → parse errors → delimiter errors →
+missing/wrong function → signature → import → logic → pass.
+
+### Static analysis limitations
+
+1. **`logic_error_likely` is broad.** A generation that parses without error
+   but the harness marks incorrect could be wrong for any reason: semantic bug,
+   off-by-one, wrong algorithm, subtle API misuse not caught by static checks.
+   It cannot distinguish these without execution.
+
+2. **`import_error_or_api_misuse` is conservative.** Only wildcard
+   (`from x import *`) imports are flagged statically.  Non-wildcard bad imports
+   (`import nonexistent_module`) require execution to detect.
+
+3. **Signature comparison is positional-only.** Parameters declared as
+   `*args`, `**kwargs`, or keyword-only are not counted against the expected
+   positional count.  The expected count is extracted from the prompt's
+   function stub using a simple regex + comma-count heuristic.
+
+4. **Fenced code extraction is best-effort.** The extractor tries
+   ` ```python `, ` ```py `, then any backtick fence.  Inline code snippets
+   without fences are treated as raw code.
+
+5. **No code is executed.** Static analysis cannot detect `RuntimeError`,
+   `NameError`, or `AttributeError` that only manifest at runtime.
+
+### How to interpret intervention deltas with failure categories
+
+From `code_causal_failure_analysis.json`:
+
+```
+avg_delta_loss_by_category["logic_error_likely"]["ablate_stem"]
+```
+
+A **positive** value means STEM was *beneficial* on average for
+`logic_error_likely` samples (ablating it raised loss).  A **negative** value
+means STEM was *harmful* (ablating it lowered loss — the model would have done
+better without STEM on these samples).
+
+- `stem_helpful_examples` — samples where `ablate_stem` delta was negative
+  (STEM hurt; removing it helped).  If logic-error samples cluster here, STEM
+  may be actively steering generations away from correct logic.
+- `gate_up_helpful_examples` — samples where `force_gate_1` delta was lower
+  than `force_gate_0`.  Forcing the gate toward the up-path was more helpful
+  for these samples than STEM-path dominance.
+- `harmful_layers_by_category` — layers where the mean per-layer STEM ablation
+  delta was negative for samples of that category.  Points to specific layers
+  where STEM is counterproductive for that failure mode.
+- `harmful_token_roles_by_category` — token roles (e.g. `python_keyword`,
+  `identifier`) where per-token STEM ablation delta was negative.  Indicates
+  which syntactic positions STEM hurts most for that category.
+
+### Standalone / offline use
+
+```python
+from lingua.code_diagnostics import run_code_causal_analysis
+summary = run_code_causal_analysis(
+    output_dir="path/to/diagnostics",
+    run_id="my_run",
+    code_tasks=["mbpp", "humaneval"],
+)
+```
+
+The function reads `diagnostics_eval_samples.jsonl` and
+`interventions_task_aligned.jsonl` from `output_dir` and writes the three
+output artifacts.  It is safe to call when either file is absent; it returns
+`{"skipped": True, "reason": ...}` and writes no files.
+
+### Legacy `collect_code_error_taxonomy` path
+
+The older `diagnostics.collect_code_error_taxonomy=true` path still works.
+It calls `analyze_eval_samples` which writes `code_failure_analysis.json` with
+simple per-task failure counts.  When `diagnostics_eval_samples.jsonl` is
+present in the output directory, `analyze_eval_samples` also automatically
+triggers `run_code_causal_analysis` for the richer analysis.  Both outputs are
+included in `summary_eval.json`.
 
 ## Artifacts
 
@@ -492,6 +613,9 @@ Common outputs:
 - `diagnostics/path_relations_by_task_layer.json`
 - `diagnostics/geometry_layer_{L}.npz`
 - `diagnostics/code_failure_analysis.json`
+- `diagnostics/code_failures.jsonl`
+- `diagnostics/code_causal_failure_analysis.json`
+- `diagnostics/code_failure_examples.jsonl`
 - `diagnostics/README.md`
 
 Task-aligned artifact interpretation:
