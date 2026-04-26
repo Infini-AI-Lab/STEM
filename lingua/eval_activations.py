@@ -502,8 +502,12 @@ def capture_eval_activations(
 
                 prompt = _extract_prompt(sample)
                 completion = _select_completion(sample)
+                target = _extract_target(sample)
                 doc_id = _safe_doc_id(sample)
-                sample_id = make_sample_id(task_name, prompt, completion, doc_idx=doc_id)
+                # Keep the join key identical to eval_sample_capture.  The
+                # diagnostic forward may use the model generation when
+                # available, but downstream joins key records by prompt/target.
+                sample_id = make_sample_id(task_name, prompt, target, doc_idx=doc_id)
                 task_group = classify_task_group(task_name)
 
                 input_ids, tok_ids, tok_strs, tok_roles, prompt_len = _build_input_ids(
