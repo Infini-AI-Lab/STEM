@@ -598,6 +598,168 @@ present in the output directory, `analyze_eval_samples` also automatically
 triggers `run_code_causal_analysis` for the richer analysis.  Both outputs are
 included in `summary_eval.json`.
 
+<!-- ====================================================================== -->
+## Diagnostics Dashboard (`lingua.diagnostic_dashboard`)
+
+Round 5 of the diagnostics pipeline.  Post-processing only — no model loading
+required.  Reads all earlier-round artifacts and produces three summary files.
+
+### Command
+
+```bash
+python -m apps.main.diagnostic_dashboard \
+  --diagnostics-dir path/to/diagnostics \
+  --run-id my_run \
+  [--output-dir path/to/out] \
+  [--total-layers 32] \
+  [--print-summary]
+```
+
+`--diagnostics-dir` must point to the directory containing the JSONL / JSON
+artifact files written by earlier rounds.  `--output-dir` defaults to
+`--diagnostics-dir`.  `--total-layers` is used in the B1 breadth rule to
+compute the fraction of layers that are STEM-harmful; if omitted it is
+estimated from the `layer_path_metrics.jsonl` data.  `--print-summary` prints
+the per-task verdicts to stdout.
+
+### Output files
+
+| Path | Description |
+|------|-------------|
+| `diagnostics/path_interference_dashboard.json` | Per-(task, task_group, layer, token_role) path-norm and intervention statistics |
+| `diagnostics/debuggability_report.json` | Per-task and global `DebuggabilityRecord` classifications with evidence strings |
+| `diagnostics/diagnostics_summary.md` | Human-readable Markdown summary with tables, verdict, and recommended experiments |
+
+### `path_interference_dashboard.json` — key fields
+
+```jsonc
+{
+  "available": true,
+  "groups": [                              // one entry per (task, layer, token_role) combination
+    {
+      "task": "mbpp",
+      "task_group": "code",
+      "layer_idx": 2,
+      "token_role": "python_keyword",
+      "stem_norm":     {"mean": 1.23, "stdev": 0.05, "count": 480},
+      "up_norm":       {"mean": 0.91, "stdev": 0.03, "count": 480},
+      "combined_norm": {"mean": 1.40, "stdev": 0.06, "count": 480},
+      "stem_up_cos":   {"mean": -0.18, "stdev": 0.12, "count": 480},
+      "gate_alpha":    {"mean": 0.31, "stdev": 0.07, "count": 480,
+                        "saturation_near0_frac": 0.12, "saturation_near1_frac": 0.03},
+      "gate_available": true,
+      "intervention_deltas": {             // mean Δloss per intervention type
+        "ablate_stem": {"mean": -0.14, "stdev": 0.06, "count": 12}
+      },
+      "path_relation_counts": {"destructive_stem": 8, "cooperative": 2}
+    }
+  ],
+  "global_path_relation_counts": {"destructive_stem": 40, "cooperative": 120, ...},
+  "top_harmful_tokens":    [...],          // sorted by harm_score descending
+  "top_beneficial_tokens": [...],
+  "top_ineffective_tokens":[...],
+  "gate_analysis": { ... }                 // embedded gate analysis section
+}
+```
+
+`delta_loss = intervened_loss - original_loss`.  A **negative** `ablate_stem`
+mean means STEM was *harmful* (removing it lowered loss).  A **positive** value
+means STEM was *beneficial*.
+
+### `debuggability_report.json` — key fields
+
+```jsonc
+{
+  "run_id": "my_run",
+  "global_classification": "likely_debuggable",
+  "global_evidence": ["likely_debuggable: ['mbpp', 'humaneval']"],
+  "summary_counts": {"likely_debuggable": 2, "inconclusive": 1},
+  "tasks": ["humaneval", "mbpp", "gsm8k"],
+  "per_task": [
+    {
+      "run_id": "my_run",
+      "task": "mbpp",
+      "classification": "likely_debuggable",   // likely_debuggable | possibly_architectural | inconclusive
+      "evidence": [
+        "A1: STEM harmful concentrated in 2 layer(s): [1, 2]",
+        "A3: 3 sample(s) where ablating STEM lowered loss",
+        "A6: gate forcing shows 0.30 mean delta difference ..."
+      ],
+      "confidence": 0.7,
+      "metadata": {
+        "task_group": "code",
+        "n_total_samples": 50,
+        "harmful_layers": [1, 2],
+        "harmful_roles": ["identifier", "python_keyword"]
+      }
+    }
+  ]
+}
+```
+
+### Classifier rules
+
+**`likely_debuggable`** (≥ 2 of these must hold):
+
+| ID | Condition |
+|----|-----------|
+| A1 | STEM harmful concentrated in ≤ 2 layers |
+| A2 | Forcing gate → up path improves code loss (`gate_up_helpful_examples` non-empty) |
+| A3 | Ablating STEM improves failed code samples (`stem_helpful_examples` non-empty) |
+| A4 | Harmful tokens concentrated in ≤ 3 token roles |
+| A5 | `destructive_stem` path-relation fraction > 20% of all classified rows |
+| A6 | Gate forcing shows > 0.05 Δloss difference between `force_gate_0` and `force_gate_1` |
+
+**`possibly_architectural`** (≥ 2 of these must hold):
+
+| ID | Condition |
+|----|-----------|
+| B1 | Harmful STEM layers span ≥ 40% of total layers |
+| B2 | Harmful token roles span ≥ 5 distinct roles |
+| B3 | Gate forcing shows < 0.05 difference — STEM-only and STEM+up fail similarly |
+| B4 | No ablation produces a loss improvement > 0.01 |
+| B5 | ≥ 3 code-specific token roles (identifier, numeral, python_keyword, …) consistently harmed |
+| B6 | Geometry collapse (effective_rank < 4) or high anisotropy (> 0.9) in multiple layers |
+
+When both sides have ≥ 2 signals, the verdict is `inconclusive` with a note
+about the tied evidence.
+
+### Standalone Python use
+
+```python
+from lingua.diagnostic_dashboard import run_diagnostic_dashboard
+
+result = run_diagnostic_dashboard(
+    diagnostics_dir="path/to/diagnostics",
+    run_id="my_run",
+    output_dir="path/to/out",  # optional; defaults to diagnostics_dir
+    total_layers=32,            # optional hint
+)
+
+# result keys: path_interference_dashboard, debuggability_report,
+#              markdown_path, artifacts_available
+dr = result["debuggability_report"]
+print(dr["global_classification"])
+```
+
+### Tolerance for missing artifacts
+
+The dashboard never crashes on absent files.  When an artifact is missing:
+
+- `layer_path_metrics.jsonl` absent → `path_interference_dashboard.groups` is empty,
+  `gate_analysis.gate_available=false`.
+- `interventions_task_aligned.jsonl` absent → all intervention deltas are empty;
+  rules A1/A2/A3/A5/A6/B1/B3/B4 cannot fire; verdict defaults to `inconclusive`.
+- `code_causal_failure_analysis.json` absent → rules A2/A3 cannot use
+  `stem_helpful_examples` / `gate_up_helpful_examples`.
+- `eval_geometry_summary.json` absent → rule B6 does not fire.
+- All absent → global verdict is `inconclusive` with an evidence note.
+
+Availability of each artifact is reported in the `artifacts_available` dict in
+the return value and printed by `--print-summary`.
+
+---
+
 ## Artifacts
 
 Common outputs:
@@ -617,6 +779,9 @@ Common outputs:
 - `diagnostics/code_causal_failure_analysis.json`
 - `diagnostics/code_failure_examples.jsonl`
 - `diagnostics/README.md`
+- `diagnostics/path_interference_dashboard.json`  ← Round 5 dashboard
+- `diagnostics/debuggability_report.json`         ← Round 5 classifier verdicts
+- `diagnostics/diagnostics_summary.md`            ← Round 5 human-readable summary
 
 Task-aligned artifact interpretation:
 
