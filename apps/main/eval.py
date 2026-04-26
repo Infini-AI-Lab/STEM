@@ -391,7 +391,10 @@ def launch_eval(cfg: EvalArgs):
     eval_activation_summary: Dict[str, Any] = {}
     if (
         cfg.diagnostics.enabled
-        and cfg.diagnostics.collect_eval_activations
+        and (
+            cfg.diagnostics.collect_eval_activations
+            or cfg.diagnostics.collect_richer_geometry
+        )
         and results is not None
     ):
         run_id = cfg.diagnostics.run_id or cfg.name

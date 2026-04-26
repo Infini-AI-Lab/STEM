@@ -12,6 +12,15 @@ diagnostics:
   collect_eval_stats: true
   collect_token_stats: true
   collect_geometry: false
+  collect_richer_geometry: false
+  reference_checkpoint_path: null
+  reference_model_type: null
+  geometry_by_token_role: true
+  geometry_by_frequency_bucket: true
+  compute_cka: true
+  compute_svcca: false
+  max_geometry_samples_per_task: 16
+  max_geometry_tokens_per_bucket: 1024
   collect_optimizer_stats: false
   collect_interventions: false
   collect_code_error_taxonomy: false

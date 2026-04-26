@@ -457,6 +457,97 @@ up-path ablations:
 - `redundant`: both deltas are close to zero
 - `inconclusive`: one of the required metrics is missing
 
+## Richer Eval Geometry
+
+Richer geometry is a separate opt-in layer on top of eval activation capture.
+It reruns bounded forward passes on lm-eval samples and writes task/layer/token
+role geometry, observed-frequency bucket geometry drift, gate-conditioned
+geometry, and optional baseline-vs-STEM CKA.
+
+### Enable without a reference checkpoint
+
+```yaml
+diagnostics:
+  enabled: true
+  collect_richer_geometry: true
+  collect_eval_activations: false       # optional; richer geometry can trigger the capture loop
+  collect_eval_geometry: false          # old compact eval_geometry_summary remains independent
+  max_geometry_samples_per_task: 8
+  max_geometry_tokens_per_bucket: 512
+  eval_activation_max_tokens_per_sample: 256
+  eval_layers: [1, 3, 5, 7]             # optional cap; null = all FFN layers
+  geometry_by_token_role: true
+  geometry_by_frequency_bucket: true
+harness:
+  log_samples: true
+```
+
+CLI:
+
+```bash
+python -m apps.main.stem_eval \
+  config=apps/main/configs/stem_eval.yaml \
+  harness.log_samples=true \
+  diagnostics.enabled=true \
+  diagnostics.collect_richer_geometry=true \
+  diagnostics.max_geometry_samples_per_task=8 \
+  diagnostics.max_geometry_tokens_per_bucket=512
+```
+
+### Enable with a baseline/reference checkpoint
+
+```yaml
+diagnostics:
+  enabled: true
+  collect_richer_geometry: true
+  reference_checkpoint_path: /path/to/baseline/0000200000
+  reference_model_type: llama       # optional; otherwise read from params.json when possible
+  compute_cka: true
+  compute_svcca: false              # optional simplified PCA+CCA-style score
+```
+
+`reference_checkpoint_path` may point at a consolidated checkpoint directory
+or at a checkpoint root containing a `consolidated/params.json`. If the path is
+missing or unsupported, the run writes a skipped baseline-comparison status and
+continues. No reference model is required unless you explicitly provide this
+path.
+
+CKA/SVCCA can be expensive because they require loading another model and
+running the same sampled eval prompts through it. Keep
+`max_geometry_samples_per_task`, `max_geometry_tokens_per_bucket`, and
+`eval_layers` small for exploratory runs.
+
+### Output artifacts
+
+| Path | Description |
+|------|-------------|
+| `diagnostics/richer_geometry_summary.json` | Compact run metadata, metric notes, gate-bucket summary, and geometry warnings |
+| `diagnostics/geometry_by_task_layer_role.json` | Task → layer → token-role geometry for hidden, STEM, up, combined, and FFN-output vectors |
+| `diagnostics/geometry_by_frequency_bucket.json` | Task → layer → rare/mid/frequent observed-frequency geometry and drift vs all observed tokens |
+| `diagnostics/baseline_comparison_cka.json` | Optional baseline-vs-current linear CKA, plus simplified SVCCA when requested |
+
+### Metric meanings
+
+| Metric | Meaning |
+|--------|---------|
+| `effective_rank` | Entropy effective rank of the centered singular-value spectrum; low values indicate dimensional collapse. |
+| `explained_var_rank` | Smallest PCA rank explaining `diagnostics.geometry_var_frac` variance. |
+| `anisotropy` | `||centroid|| / mean(||token_vector||)`; high values mean vectors point in a shared direction. |
+| `pairwise_cos_mean/std` | Mean and standard deviation of sampled off-diagonal pairwise cosine similarities. |
+| `centroid_cos_mean/std` | Cosine from each token vector to that cell's centroid. |
+| `alignment_to_stem_centroid` | Mean cosine alignment to the STEM-path centroid for the same task/layer/role or bucket. |
+| `alignment_to_up_path_mean` | Mean cosine alignment to the dense/up-path mean. |
+| `alignment_to_up_path_top_pc` | Mean absolute cosine alignment to the up-path top principal component. |
+| `norm_ratio_stem_to_up` | Mean STEM-path norm divided by mean up-path norm. |
+| `linear_cka` | Centered linear CKA between row-aligned current and reference representations. |
+| `simplified_svcca` | Optional lightweight PCA+CCA-style similarity; use a dedicated SVCCA package for publication-grade analysis. |
+
+Frequency buckets are `rare`, `mid`, and `frequent`. The current eval-time
+schema does not include corpus-level token frequencies, so buckets are marked
+`frequency_source: observed_eval_subset` and derived as rank tertiles over
+observed token counts in the sampled eval records. Treat them as approximate
+observed-frequency buckets, not corpus-frequency buckets.
+
 ## MBPP / HumanEval Causal Failure Analysis (`lingua.code_diagnostics`)
 
 The full causal analysis connects each sample's outcome to a failure category and
@@ -628,7 +719,7 @@ the per-task verdicts to stdout.
 |------|-------------|
 | `diagnostics/path_interference_dashboard.json` | Per-(task, task_group, layer, token_role) path-norm and intervention statistics |
 | `diagnostics/debuggability_report.json` | Per-task and global `DebuggabilityRecord` classifications with evidence strings |
-| `diagnostics/diagnostics_summary.md` | Human-readable Markdown summary with tables, verdict, and recommended experiments |
+| `diagnostics/diagnostics_summary.md` | Human-readable Markdown summary with tables, verdict, richer-geometry warnings, and recommended experiments |
 
 ### `path_interference_dashboard.json` — key fields
 
@@ -658,7 +749,13 @@ the per-task verdicts to stdout.
   "top_harmful_tokens":    [...],          // sorted by harm_score descending
   "top_beneficial_tokens": [...],
   "top_ineffective_tokens":[...],
-  "gate_analysis": { ... }                 // embedded gate analysis section
+  "gate_analysis": { ... },                // embedded gate analysis section
+  "richer_geometry_analysis": {            // present when richer geometry artifacts exist
+    "warning_counts": {"low_effective_rank": 2},
+    "code_vs_reasoning_geometry": {...},
+    "rare_token_geometry_differences": [...],
+    "baseline_comparison": {...}
+  }
 }
 ```
 
@@ -753,6 +850,9 @@ The dashboard never crashes on absent files.  When an artifact is missing:
 - `code_causal_failure_analysis.json` absent → rules A2/A3 cannot use
   `stem_helpful_examples` / `gate_up_helpful_examples`.
 - `eval_geometry_summary.json` absent → rule B6 does not fire.
+- `richer_geometry_summary.json` and related richer geometry artifacts absent →
+  richer dashboard warnings are marked unavailable; the rest of the dashboard
+  still runs.
 - All absent → global verdict is `inconclusive` with an evidence note.
 
 Availability of each artifact is reported in the `artifacts_available` dict in
@@ -857,6 +957,10 @@ Common outputs:
 - `diagnostics/path_interference_dashboard.json`  ← Round 5 dashboard
 - `diagnostics/debuggability_report.json`         ← Round 5 classifier verdicts
 - `diagnostics/diagnostics_summary.md`            ← Round 5 human-readable summary
+- `diagnostics/richer_geometry_summary.json`
+- `diagnostics/geometry_by_task_layer_role.json`
+- `diagnostics/geometry_by_frequency_bucket.json`
+- `diagnostics/baseline_comparison_cka.json`
 
 Task-aligned artifact interpretation:
 
@@ -874,8 +978,9 @@ Task-aligned artifact interpretation:
 
 ## Caveats
 
-Geometry and interventions add extra computation only when enabled.  Keep
-`max_batches_per_collection`, `max_token_positions`, and
-`max_tokens_per_layer_geometry` small for routine runs.  Baseline-checkpoint CKA
-and dense-path swapping are reserved behind config fields and not run unless
-explicitly implemented for a specific comparison checkpoint.
+Geometry and interventions add extra computation only when enabled. Keep
+`max_batches_per_collection`, `max_token_positions`,
+`max_tokens_per_layer_geometry`, `max_geometry_samples_per_task`, and
+`max_geometry_tokens_per_bucket` small for routine runs. Baseline-checkpoint
+CKA/SVCCA requires an explicit `reference_checkpoint_path` and may be expensive
+because it loads a second model and runs the same sampled prompts through it.

@@ -40,7 +40,7 @@ layers — it simply records what is available and notes the rest.
 from __future__ import annotations
 
 import logging
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
@@ -54,7 +54,14 @@ from lingua.diagnostic_records import (
     make_sample_id,
     write_json_atomic,
 )
-from lingua.diagnostics import StemDiagnosticsCollector, _iter_all_ffn_layers
+from lingua.diagnostics import (
+    BASELINE_COMPARISON_CKA_JSON,
+    GEOMETRY_BY_FREQUENCY_BUCKET_JSON,
+    GEOMETRY_BY_TASK_LAYER_ROLE_JSON,
+    RICHER_GEOMETRY_SUMMARY_JSON,
+    StemDiagnosticsCollector,
+    _iter_all_ffn_layers,
+)
 from lingua.eval_sample_capture import (
     iter_lm_eval_samples,
     _extract_generation,
@@ -69,6 +76,7 @@ logger = logging.getLogger(__name__)
 LAYER_PATH_METRICS_JSONL = "layer_path_metrics.jsonl"
 EVAL_ACTIVATION_SUMMARY = "eval_activation_summary.json"
 EVAL_GEOMETRY_SUMMARY = "eval_geometry_summary.json"
+CONSOLIDATE_FOLDER = "consolidated"
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +218,118 @@ def _is_rank0() -> bool:
     return True
 
 
+def _resolve_consolidated_reference_path(path: Path) -> Tuple[Optional[Path], Optional[str]]:
+    """Return a consolidated checkpoint path or a non-fatal skip reason."""
+    if not path.exists():
+        return None, "reference_checkpoint_missing"
+    if (path / "params.json").exists():
+        return path, None
+    consolidated = path / CONSOLIDATE_FOLDER
+    if (consolidated / "params.json").exists():
+        return consolidated, None
+    return None, "reference_checkpoint_not_consolidated"
+
+
+def load_reference_model_for_geometry(
+    args: Any,
+) -> Tuple[Optional[torch.nn.Module], Optional[Any], Dict[str, Any]]:
+    """Best-effort reference model loader for baseline CKA/SVCCA diagnostics.
+
+    Missing paths, unconsolidated checkpoints, unsupported model types, CPU-only
+    hosts, and loader failures all return ``(None, None, status)`` rather than
+    raising.  The caller writes the status into ``baseline_comparison_cka.json``.
+    """
+    ref_path_raw = getattr(args, "reference_checkpoint_path", None)
+    status: Dict[str, Any] = {
+        "requested": bool(ref_path_raw),
+        "reference_checkpoint_path": ref_path_raw,
+    }
+    if not ref_path_raw:
+        status.update({"skipped": True, "reason": "reference_checkpoint_path not provided"})
+        return None, None, status
+
+    ref_path = Path(str(ref_path_raw)).expanduser()
+    consolidated_path, reason = _resolve_consolidated_reference_path(ref_path)
+    if consolidated_path is None:
+        status.update({"skipped": True, "reason": reason})
+        return None, None, status
+
+    try:
+        from omegaconf import OmegaConf
+        ckpt_cfg = OmegaConf.load(consolidated_path / "params.json")
+        ckpt_model_type = str(getattr(ckpt_cfg, "model_type", "llama"))
+    except Exception:
+        ckpt_model_type = "llama"
+    model_type = getattr(args, "reference_model_type", None) or ckpt_model_type
+    status.update(
+        {
+            "consolidated_path": str(consolidated_path),
+            "reference_model_type": model_type,
+        }
+    )
+
+    try:
+        from apps.main.qwen3 import Qwen3LMTransformer, Qwen3LMTransformerArgs
+        from apps.main.olmo3 import OLMo3LMTransformer, OLMo3LMTransformerArgs
+        from apps.main.transformer import LMTransformer, LMTransformerArgs
+
+        dense_registry = {
+            "llama": (LMTransformer, LMTransformerArgs),
+            "qwen3": (Qwen3LMTransformer, Qwen3LMTransformerArgs),
+            "olmo3": (OLMo3LMTransformer, OLMo3LMTransformerArgs),
+        }
+
+        stem_registry: Dict[str, Any] = {}
+        try:
+            from apps.main.stem import STEM_MODEL_REGISTRY
+            from apps.main.stem_dag import DAG_STEM_MODEL_REGISTRY
+            stem_registry.update(STEM_MODEL_REGISTRY)
+            stem_registry.update(DAG_STEM_MODEL_REGISTRY)
+        except Exception:
+            stem_registry = {}
+
+        if model_type in stem_registry:
+            from apps.main.stem_generate import load_consolidated_model_and_tokenizer
+            model_cls, model_args_cls = stem_registry[model_type][:2]
+            model, tokenizer, _cfg = load_consolidated_model_and_tokenizer(
+                str(consolidated_path),
+                model_cls=model_cls,
+                model_args_cls=model_args_cls,
+            )
+            status.update({"loaded": True, "model_family": "stem"})
+            return model, tokenizer, status
+
+        if model_type not in dense_registry:
+            status.update(
+                {
+                    "skipped": True,
+                    "reason": "unsupported_reference_model_type",
+                    "available_dense_model_types": sorted(dense_registry),
+                    "available_stem_model_types": sorted(stem_registry),
+                }
+            )
+            return None, None, status
+
+        from apps.main.generate import load_consolidated_model_and_tokenizer
+        model_cls, model_args_cls = dense_registry[model_type]
+        model, tokenizer, _cfg = load_consolidated_model_and_tokenizer(
+            str(consolidated_path),
+            model_cls=model_cls,
+            model_args_cls=model_args_cls,
+        )
+        status.update({"loaded": True, "model_family": "dense"})
+        return model, tokenizer, status
+    except Exception as exc:
+        status.update(
+            {
+                "skipped": True,
+                "reason": "reference_load_failed",
+                "error": str(exc),
+            }
+        )
+        return None, None, status
+
+
 # ---------------------------------------------------------------------------
 # Top-level capture
 # ---------------------------------------------------------------------------
@@ -269,7 +389,9 @@ def capture_eval_activations(
         disabled or no samples were processed.
     """
     enabled = bool(getattr(args, "enabled", False))
-    activations_on = bool(getattr(args, "collect_eval_activations", False))
+    activations_on = bool(getattr(args, "collect_eval_activations", False)) or bool(
+        getattr(args, "collect_richer_geometry", False)
+    )
     if not enabled or not activations_on:
         return {}
     if results is None:
@@ -317,6 +439,23 @@ def capture_eval_activations(
     )
     collector.register()
 
+    reference_model: Optional[torch.nn.Module] = None
+    reference_collector: Optional[StemDiagnosticsCollector] = None
+    reference_status: Dict[str, Any] = {}
+    reference_failures = 0
+    if bool(getattr(args, "collect_richer_geometry", False)) and getattr(args, "reference_checkpoint_path", None):
+        reference_model, _reference_tokenizer, reference_status = load_reference_model_for_geometry(args)
+        if reference_model is not None:
+            reference_collector = StemDiagnosticsCollector(
+                reference_model,
+                args,
+                output_dir=output_dir,
+                prefix="diag/reference",
+                mode="eval",
+                run_id=f"{run_id}:reference",
+            )
+            reference_collector.register()
+
     tasks_filter = getattr(args, "tasks", None)
     max_per_task = getattr(args, "eval_activation_max_samples_per_task", None)
     write_records = bool(getattr(args, "write_layer_path_records", False))
@@ -329,9 +468,26 @@ def capture_eval_activations(
 
     was_training = model.training
     model.eval()
+    ref_was_training = bool(reference_model.training) if reference_model is not None else False
+    if reference_model is not None:
+        reference_model.eval()
+
+    def _clear_collector_context(c: StemDiagnosticsCollector) -> None:
+        c._active = False
+        c.current_sample_records = []
+        c.current_sample_id = None
+        c.current_task = None
+        c.current_task_group = None
+        c.current_token_ids_list = None
+        c.current_tokens_list = None
+        c.current_token_roles = None
+        c.current_include_richer_geometry = False
 
     try:
-        with disable_kv_cache(model):
+        with ExitStack() as stack:
+            stack.enter_context(disable_kv_cache(model))
+            if reference_model is not None:
+                stack.enter_context(disable_kv_cache(reference_model))
             for task_name, sample in iter_lm_eval_samples(
                 results, tasks_filter=tasks_filter, max_per_task=max_per_task
             ):
@@ -384,11 +540,39 @@ def capture_eval_activations(
                         task_name, sample_id, exc,
                     )
                     samples_failed += 1
-                    collector._active = False
-                    collector.current_sample_records = []
-                    collector.current_sample_id = None
-                    collector.current_task = None
+                    _clear_collector_context(collector)
                     continue
+
+                include_reference = (
+                    reference_model is not None
+                    and reference_collector is not None
+                    and collector.current_include_richer_geometry
+                )
+                if include_reference:
+                    reference_collector.set_sample_context(
+                        task=task_name,
+                        sample_id=sample_id,
+                        task_group=task_group,
+                        token_ids=tok_ids,
+                        tokens=tok_strs,
+                        token_roles=tok_roles,
+                    )
+                    if reference_collector._active:
+                        try:
+                            ref_device = next(reference_model.parameters()).device
+                            ref_input_ids = input_ids.to(ref_device)
+                            with torch.no_grad():
+                                _ = reference_model(ref_input_ids)
+                            reference_collector.flush_sample()
+                        except Exception as exc:  # pragma: no cover — defensive
+                            logger.warning(
+                                "diagnostics: reference forward failed for task=%s sample=%s: %s",
+                                task_name,
+                                sample_id,
+                                exc,
+                            )
+                            reference_failures += 1
+                            _clear_collector_context(reference_collector)
 
                 sample_records = collector.flush_sample()
                 if write_records:
@@ -407,14 +591,22 @@ def capture_eval_activations(
                 samples_processed += 1
     finally:
         collector.close()
+        if reference_collector is not None:
+            reference_collector.close()
         if was_training:
             model.train()
+        if reference_model is not None and ref_was_training:
+            reference_model.train()
 
     # Write artifacts.  We always go through diagnostic_records' helpers
     # which gate on rank-0.
+    if reference_status:
+        reference_status["forward_failures"] = int(reference_failures)
     summary = collector.write_eval_artifacts(
         output_dir=output_dir,
         layer_path_records=layer_path_records if write_records else None,
+        reference_collector=reference_collector,
+        reference_status=reference_status,
     )
     if isinstance(summary, dict):
         summary.setdefault("samples_processed", samples_processed)
@@ -445,9 +637,14 @@ def capture_eval_activations(
 # ---------------------------------------------------------------------------
 
 __all__ = [
+    "BASELINE_COMPARISON_CKA_JSON",
     "LAYER_PATH_METRICS_JSONL",
     "EVAL_ACTIVATION_SUMMARY",
     "EVAL_GEOMETRY_SUMMARY",
+    "GEOMETRY_BY_FREQUENCY_BUCKET_JSON",
+    "GEOMETRY_BY_TASK_LAYER_ROLE_JSON",
+    "RICHER_GEOMETRY_SUMMARY_JSON",
     "capture_eval_activations",
     "disable_kv_cache",
+    "load_reference_model_for_geometry",
 ]

@@ -125,6 +125,10 @@ _ARTIFACT_CODE_FAILURES = "code_failures.jsonl"
 _ARTIFACT_CODE_CAUSAL = "code_causal_failure_analysis.json"
 _ARTIFACT_EVAL_SAMPLES = "diagnostics_eval_samples.jsonl"
 _ARTIFACT_EVAL_GEOMETRY = "eval_geometry_summary.json"
+_ARTIFACT_RICHER_GEOMETRY = "richer_geometry_summary.json"
+_ARTIFACT_GEOMETRY_BY_TASK_LAYER_ROLE = "geometry_by_task_layer_role.json"
+_ARTIFACT_GEOMETRY_BY_FREQUENCY_BUCKET = "geometry_by_frequency_bucket.json"
+_ARTIFACT_BASELINE_COMPARISON_CKA = "baseline_comparison_cka.json"
 _ARTIFACT_TOKEN_EFFECTS_BY_TASK = "token_effects_by_task.json"
 _ARTIFACT_PATH_RELATIONS = "path_relations_by_task_layer.json"
 
@@ -157,6 +161,10 @@ class ArtifactBundle:
     # JSON blobs (None when file absent/unreadable)
     code_causal: Optional[Dict[str, Any]] = None
     eval_geometry: Optional[Dict[str, Any]] = None
+    richer_geometry: Optional[Dict[str, Any]] = None
+    geometry_by_task_layer_role: Optional[Dict[str, Any]] = None
+    geometry_by_frequency_bucket: Optional[Dict[str, Any]] = None
+    baseline_comparison_cka: Optional[Dict[str, Any]] = None
     token_effects_by_task: Optional[Dict[str, Any]] = None
     path_relations: Optional[Dict[str, Any]] = None
 
@@ -189,6 +197,10 @@ class ArtifactBundle:
         bundle.eval_sample_rows = _load_jsonl(_ARTIFACT_EVAL_SAMPLES)
         bundle.code_causal = _load_json(_ARTIFACT_CODE_CAUSAL)
         bundle.eval_geometry = _load_json(_ARTIFACT_EVAL_GEOMETRY)
+        bundle.richer_geometry = _load_json(_ARTIFACT_RICHER_GEOMETRY)
+        bundle.geometry_by_task_layer_role = _load_json(_ARTIFACT_GEOMETRY_BY_TASK_LAYER_ROLE)
+        bundle.geometry_by_frequency_bucket = _load_json(_ARTIFACT_GEOMETRY_BY_FREQUENCY_BUCKET)
+        bundle.baseline_comparison_cka = _load_json(_ARTIFACT_BASELINE_COMPARISON_CKA)
         bundle.token_effects_by_task = _load_json(_ARTIFACT_TOKEN_EFFECTS_BY_TASK)
         bundle.path_relations = _load_json(_ARTIFACT_PATH_RELATIONS)
 
@@ -215,6 +227,12 @@ class ArtifactBundle:
                     tasks.add(str(t))
         if self.code_causal:
             for t in (self.code_causal.get("failure_counts_by_task") or {}):
+                tasks.add(str(t))
+        if self.geometry_by_task_layer_role:
+            for t in (self.geometry_by_task_layer_role.get("per_task_layer_role") or {}):
+                tasks.add(str(t))
+        if self.geometry_by_frequency_bucket:
+            for t in (self.geometry_by_frequency_bucket.get("per_task_layer_bucket") or {}):
                 tasks.add(str(t))
         return sorted(tasks)
 
@@ -517,6 +535,162 @@ def build_gate_analysis(bundle: ArtifactBundle) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Richer geometry dashboard
+# ---------------------------------------------------------------------------
+
+def build_richer_geometry_analysis(bundle: ArtifactBundle) -> Dict[str, Any]:
+    """Summarise richer geometry artifacts and warning categories."""
+
+    rich = bundle.richer_geometry or {}
+    by_role = bundle.geometry_by_task_layer_role or {}
+    by_freq = bundle.geometry_by_frequency_bucket or {}
+    baseline = bundle.baseline_comparison_cka or {}
+
+    available = bool(rich or by_role or by_freq or baseline)
+    if not available:
+        return sanitize_for_json({
+            "available": False,
+            "reason": "no richer geometry artifacts found",
+            "warnings": [],
+            "warning_counts": {},
+        })
+
+    warnings: List[Dict[str, Any]] = []
+    for warning in rich.get("warnings") or []:
+        if isinstance(warning, dict):
+            warnings.append(dict(warning))
+
+    # Derive warnings as a fallback if the summary file was not produced but
+    # the detailed role/frequency artifacts are present.
+    if not warnings and by_role:
+        per_task_layer_role = by_role.get("per_task_layer_role") or {}
+        for task, by_layer in per_task_layer_role.items():
+            for layer_idx, roles in (by_layer or {}).items():
+                cell = (roles or {}).get("all") or {}
+                er = cell.get("stem_effective_rank")
+                ani = cell.get("stem_anisotropy")
+                top_pc = cell.get("stem_top_pc_var_frac")
+                if isinstance(er, (int, float)) and er < 4:
+                    warnings.append({
+                        "type": "low_effective_rank",
+                        "severity": "warning",
+                        "task": task,
+                        "layer_idx": layer_idx,
+                        "value": er,
+                        "message": "STEM representation has low effective rank.",
+                    })
+                if isinstance(ani, (int, float)) and ani > 0.9:
+                    warnings.append({
+                        "type": "high_anisotropy",
+                        "severity": "warning",
+                        "task": task,
+                        "layer_idx": layer_idx,
+                        "value": ani,
+                        "message": "STEM representation is highly anisotropic.",
+                    })
+                if isinstance(top_pc, (int, float)) and top_pc > 0.8:
+                    warnings.append({
+                        "type": "representation_collapse",
+                        "severity": "warning",
+                        "task": task,
+                        "layer_idx": layer_idx,
+                        "value": top_pc,
+                        "message": "Top principal component explains most STEM variance.",
+                    })
+
+    warning_counts = Counter(str(w.get("type", "unknown")) for w in warnings)
+
+    # Compact code-vs-non-code geometry comparison for dashboard readers.
+    group_rank: Dict[str, List[float]] = defaultdict(list)
+    group_aniso: Dict[str, List[float]] = defaultdict(list)
+    per_task_layer_role = by_role.get("per_task_layer_role") or {}
+    for task, by_layer in per_task_layer_role.items():
+        tg = bundle.task_group(str(task))
+        for _layer_idx, roles in (by_layer or {}).items():
+            cell = (roles or {}).get("all") or {}
+            er = cell.get("stem_effective_rank")
+            ani = cell.get("stem_anisotropy")
+            if isinstance(er, (int, float)):
+                group_rank[tg].append(float(er))
+            if isinstance(ani, (int, float)):
+                group_aniso[tg].append(float(ani))
+
+    def _avg(vals: List[float]) -> Optional[float]:
+        return sum(vals) / len(vals) if vals else None
+
+    code_vs_reasoning = {
+        "code_effective_rank_mean": _avg(group_rank.get("code", [])),
+        "non_code_effective_rank_mean": _avg([
+            v for g, vals in group_rank.items() if g != "code" for v in vals
+        ]),
+        "code_anisotropy_mean": _avg(group_aniso.get("code", [])),
+        "non_code_anisotropy_mean": _avg([
+            v for g, vals in group_aniso.items() if g != "code" for v in vals
+        ]),
+    }
+    if (
+        code_vs_reasoning["code_effective_rank_mean"] is not None
+        and code_vs_reasoning["non_code_effective_rank_mean"] is not None
+    ):
+        code_vs_reasoning["effective_rank_difference"] = (
+            code_vs_reasoning["code_effective_rank_mean"]
+            - code_vs_reasoning["non_code_effective_rank_mean"]
+        )
+
+    rare_token_differences: List[Dict[str, Any]] = []
+    per_task_layer_bucket = by_freq.get("per_task_layer_bucket") or {}
+    for task, by_layer in per_task_layer_bucket.items():
+        for layer_idx, buckets in (by_layer or {}).items():
+            rare = (buckets or {}).get("rare") or {}
+            frequent = (buckets or {}).get("frequent") or {}
+            for metric in ("stem_effective_rank", "stem_anisotropy", "stem_centroid_cos_mean"):
+                rv = rare.get(metric)
+                fv = frequent.get(metric)
+                if isinstance(rv, (int, float)) and isinstance(fv, (int, float)):
+                    rare_token_differences.append({
+                        "task": task,
+                        "layer_idx": layer_idx,
+                        "metric": metric,
+                        "rare_value": rv,
+                        "frequent_value": fv,
+                        "difference": float(rv) - float(fv),
+                    })
+    rare_token_differences.sort(key=lambda r: abs(float(r.get("difference", 0.0))), reverse=True)
+
+    baseline_summary = {
+        "available": bool(baseline.get("available")),
+        "requested": bool(baseline.get("requested")),
+        "reason": baseline.get("reason"),
+        "status": baseline.get("status") or {},
+    }
+    if baseline.get("per_task_layer"):
+        cka_vals: List[float] = []
+        for by_layer in (baseline.get("per_task_layer") or {}).values():
+            for by_path in (by_layer or {}).values():
+                for metrics in (by_path or {}).values():
+                    val = metrics.get("linear_cka") if isinstance(metrics, dict) else None
+                    if isinstance(val, (int, float)):
+                        cka_vals.append(float(val))
+        baseline_summary["linear_cka_mean"] = _avg(cka_vals)
+        baseline_summary["linear_cka_min"] = min(cka_vals) if cka_vals else None
+
+    return sanitize_for_json({
+        "available": True,
+        "warnings": warnings,
+        "warning_counts": dict(warning_counts),
+        "code_vs_reasoning_geometry": code_vs_reasoning,
+        "rare_token_geometry_differences": rare_token_differences[:20],
+        "baseline_comparison": baseline_summary,
+        "artifacts_used": {
+            "richer_geometry_summary": bundle.available.get(_ARTIFACT_RICHER_GEOMETRY, False),
+            "geometry_by_task_layer_role": bundle.available.get(_ARTIFACT_GEOMETRY_BY_TASK_LAYER_ROLE, False),
+            "geometry_by_frequency_bucket": bundle.available.get(_ARTIFACT_GEOMETRY_BY_FREQUENCY_BUCKET, False),
+            "baseline_comparison_cka": bundle.available.get(_ARTIFACT_BASELINE_COMPARISON_CKA, False),
+        },
+    })
+
+
+# ---------------------------------------------------------------------------
 # Debuggability classifier
 # ---------------------------------------------------------------------------
 
@@ -777,13 +951,32 @@ def _classify_task(
             evidence_architectural.append(
                 f"B6: high anisotropy (>0.9) in layers: {high_anisotropy_layers[:5]}"
             )
+    if bundle.richer_geometry:
+        task_warnings = [
+            w for w in (bundle.richer_geometry.get("warnings") or [])
+            if isinstance(w, dict) and str(w.get("task") or "") == task
+        ]
+        collapse_like = [
+            w for w in task_warnings
+            if str(w.get("type") or "") in {
+                "representation_collapse",
+                "low_effective_rank",
+                "high_anisotropy",
+            }
+        ]
+        if collapse_like:
+            evidence_architectural.append(
+                f"B6: richer geometry warning(s): "
+                f"{[w.get('type') for w in collapse_like[:5]]}"
+            )
 
     # ---- Insufficient data check ----
 
     has_intv_data = len(task_intv) >= _MIN_SAMPLES_FOR_CLASSIFICATION
     has_sample_data = n_total >= _MIN_SAMPLES_FOR_CLASSIFICATION
+    has_geometry_data = bool(bundle.eval_geometry or bundle.richer_geometry)
 
-    if not has_intv_data and not has_sample_data:
+    if not has_intv_data and not has_sample_data and not has_geometry_data:
         return DebuggabilityRecord(
             run_id=run_id,
             task=task,
@@ -1183,6 +1376,68 @@ def write_markdown_summary(
                 ))
                 lines.append("")
 
+    # ---- Richer geometry summary ----
+    h(2, "Richer Geometry Summary")
+    geom = dashboard.get("richer_geometry_analysis") or {}
+    if not geom.get("available"):
+        p(f"_Richer geometry not available: {geom.get('reason', 'no richer geometry artifacts found')}_")
+    else:
+        counts = geom.get("warning_counts") or {}
+        if counts:
+            p(
+                "**Geometry warnings:** "
+                + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+            )
+        warnings = geom.get("warnings") or []
+        if warnings:
+            rows_gw = []
+            for w in warnings[:10]:
+                rows_gw.append([
+                    w.get("type", "?"),
+                    w.get("task", "global"),
+                    w.get("layer_idx", "?"),
+                    w.get("metric", "?"),
+                    _fmt(w.get("value", w.get("difference"))),
+                ])
+            lines.append(_md_table(
+                ["Warning", "Task", "Layer", "Metric", "Value"],
+                rows_gw,
+            ))
+            lines.append("")
+        cvr = geom.get("code_vs_reasoning_geometry") or {}
+        if any(v is not None for v in cvr.values()):
+            p(
+                f"**Code effective-rank mean:** {_fmt(cvr.get('code_effective_rank_mean'))}  \n"
+                f"**Non-code effective-rank mean:** {_fmt(cvr.get('non_code_effective_rank_mean'))}  \n"
+                f"**Code anisotropy mean:** {_fmt(cvr.get('code_anisotropy_mean'))}  \n"
+                f"**Non-code anisotropy mean:** {_fmt(cvr.get('non_code_anisotropy_mean'))}"
+            )
+        rare_diffs = geom.get("rare_token_geometry_differences") or []
+        if rare_diffs:
+            rows_rd = []
+            for row in rare_diffs[:8]:
+                rows_rd.append([
+                    row.get("task", "?"),
+                    row.get("layer_idx", "?"),
+                    row.get("metric", "?"),
+                    _fmt(row.get("rare_value")),
+                    _fmt(row.get("frequent_value")),
+                    _fmt(row.get("difference")),
+                ])
+            lines.append(_md_table(
+                ["Task", "Layer", "Metric", "Rare", "Frequent", "Δ"],
+                rows_rd,
+            ))
+            lines.append("")
+        bcka = geom.get("baseline_comparison") or {}
+        if bcka.get("requested"):
+            p(
+                f"**Baseline CKA available:** {bcka.get('available')}  \n"
+                f"**Mean linear CKA:** {_fmt(bcka.get('linear_cka_mean'))}  \n"
+                f"**Min linear CKA:** {_fmt(bcka.get('linear_cka_min'))}  \n"
+                f"**Status:** {bcka.get('reason') or (bcka.get('status') or {}).get('reason') or 'ok'}"
+            )
+
     # ---- Debuggable vs architectural verdict ----
     h(2, "Debuggable vs Architectural Verdict")
     per_task = debug_report.get("per_task") or []
@@ -1303,10 +1558,12 @@ def run_diagnostic_dashboard(
 
     dashboard = build_path_interference_dashboard(bundle)
     gate_analysis = build_gate_analysis(bundle)
+    richer_geometry_analysis = build_richer_geometry_analysis(bundle)
     debug_report = build_debuggability_report(bundle, total_layers=total_layers)
 
     # Merge gate analysis into dashboard for convenience
     dashboard["gate_analysis"] = gate_analysis
+    dashboard["richer_geometry_analysis"] = richer_geometry_analysis
 
     # Write JSON outputs
     pi_path = d_out / PATH_INTERFERENCE_DASHBOARD_JSON
@@ -1324,6 +1581,7 @@ def run_diagnostic_dashboard(
     return {
         "path_interference_dashboard": dashboard,
         "debuggability_report": debug_report,
+        "richer_geometry_analysis": richer_geometry_analysis,
         "markdown_path": str(md_path),
         "artifacts_available": bundle.available,
     }

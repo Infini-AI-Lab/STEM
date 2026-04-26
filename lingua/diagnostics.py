@@ -21,7 +21,10 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
-from torch.distributed._tensor import DTensor
+try:
+    from torch.distributed._tensor import DTensor
+except Exception:  # Older torch builds do not expose DTensor.
+    DTensor = ()  # type: ignore
 
 from lingua.diagnostic_records import (
     InterventionRecord,
@@ -39,6 +42,19 @@ TOKEN_EFFECTS_JSONL = "token_effects.jsonl"
 TOKEN_EFFECTS_BY_TASK_JSON = "token_effects_by_task.json"
 TOKEN_EFFECTS_BY_ROLE_JSON = "token_effects_by_role.json"
 PATH_RELATIONS_BY_TASK_LAYER_JSON = "path_relations_by_task_layer.json"
+RICHER_GEOMETRY_SUMMARY_JSON = "richer_geometry_summary.json"
+GEOMETRY_BY_TASK_LAYER_ROLE_JSON = "geometry_by_task_layer_role.json"
+GEOMETRY_BY_FREQUENCY_BUCKET_JSON = "geometry_by_frequency_bucket.json"
+BASELINE_COMPARISON_CKA_JSON = "baseline_comparison_cka.json"
+
+RICHER_GEOMETRY_PATHS: Tuple[str, ...] = (
+    "hidden",
+    "stem",
+    "up",
+    "combined",
+    "ffn_out",
+)
+FREQUENCY_BUCKETS: Tuple[str, ...] = ("rare", "mid", "frequent")
 
 
 @dataclass
@@ -116,6 +132,22 @@ class DiagnosticsArgs:
     eval_activation_max_layer_path_records_per_sample: int = 64
     eval_geometry_max_tokens_per_layer: int = 4096
     eval_geometry_save_npz: bool = False
+
+    # ------------------------------------------------------------------
+    # Optional richer representation geometry (P2).  This is intentionally
+    # gated behind its own master switch; all defaults preserve historical
+    # train/eval behaviour.  ``reference_checkpoint_path`` enables optional
+    # baseline-vs-STEM CKA/SVCCA-style comparisons when provided.
+    # ------------------------------------------------------------------
+    collect_richer_geometry: bool = False
+    reference_checkpoint_path: Optional[str] = None
+    reference_model_type: Optional[str] = None
+    geometry_by_token_role: bool = True
+    geometry_by_frequency_bucket: bool = True
+    compute_cka: bool = True
+    compute_svcca: bool = False
+    max_geometry_samples_per_task: Optional[int] = 16
+    max_geometry_tokens_per_bucket: int = 1024
 
     # ------------------------------------------------------------------
     # Task-aligned eval interventions (Round 4: causal loss deltas on the
@@ -262,6 +294,54 @@ class TensorReservoir:
         return torch.cat(self.chunks, dim=0)
 
 
+class TokenTaggedReservoir:
+    """Bounded tensor sample that keeps token ids aligned to rows."""
+
+    def __init__(self, max_items: int) -> None:
+        self.max_items = max(0, max_items)
+        self.chunks: List[torch.Tensor] = []
+        self.token_chunks: List[torch.Tensor] = []
+        self.count = 0
+
+    def add(self, x: Any, token_ids: Any) -> None:
+        if self.max_items <= 0:
+            return
+        x = _as_local_tensor(x)
+        token_ids = _as_local_tensor(token_ids)
+        if x is None or token_ids is None:
+            return
+        flat = x.detach().float().reshape(-1, x.shape[-1]).cpu()
+        ids = token_ids.detach().reshape(-1).long().cpu()
+        n = min(int(flat.shape[0]), int(ids.shape[0]))
+        if n <= 0:
+            return
+        flat = flat[:n]
+        ids = ids[:n]
+        remaining = self.max_items - self.count
+        if remaining <= 0:
+            return
+        if n > remaining:
+            idx = torch.linspace(0, n - 1, remaining).long()
+            flat = flat.index_select(0, idx)
+            ids = ids.index_select(0, idx)
+        self.chunks.append(flat)
+        self.token_chunks.append(ids)
+        self.count += int(flat.shape[0])
+
+    def tensor_and_ids(self) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        if not self.chunks:
+            return None, None
+        return torch.cat(self.chunks, dim=0), torch.cat(self.token_chunks, dim=0)
+
+
+def _path_reservoirs(max_items: int) -> Dict[str, TensorReservoir]:
+    return {path_name: TensorReservoir(max_items) for path_name in RICHER_GEOMETRY_PATHS}
+
+
+def _path_token_reservoirs(max_items: int) -> Dict[str, TokenTaggedReservoir]:
+    return {path_name: TokenTaggedReservoir(max_items) for path_name in RICHER_GEOMETRY_PATHS}
+
+
 def pairwise_cosine_stats(x: torch.Tensor, max_pairs: int = 2048) -> Dict[str, float]:
     x = x.detach().float()
     if x.ndim != 2 or x.shape[0] < 2:
@@ -329,6 +409,249 @@ def geometry_summary(
     except RuntimeError:
         pass
     return out
+
+
+def linear_cka(x: torch.Tensor, y: torch.Tensor, *, eps: float = 1e-12) -> float:
+    """Centered linear CKA between two row-aligned representation matrices."""
+    x = x.detach().float()
+    y = y.detach().float()
+    if x.ndim != 2 or y.ndim != 2:
+        return 0.0
+    n = min(int(x.shape[0]), int(y.shape[0]))
+    if n < 2:
+        return 0.0
+    x = x[:n]
+    y = y[:n]
+    finite = torch.isfinite(x).all(dim=-1) & torch.isfinite(y).all(dim=-1)
+    x = x[finite]
+    y = y[finite]
+    n = min(int(x.shape[0]), int(y.shape[0]))
+    if n < 2:
+        return 0.0
+    x = x[:n] - x[:n].mean(dim=0, keepdim=True)
+    y = y[:n] - y[:n].mean(dim=0, keepdim=True)
+    xty = x.T @ y
+    xtx = x.T @ x
+    yty = y.T @ y
+    numerator = xty.square().sum()
+    denominator = xtx.square().sum().sqrt() * yty.square().sum().sqrt()
+    if float(denominator.item()) <= eps:
+        return 0.0
+    return _finite(float((numerator / denominator.clamp_min(eps)).item()))
+
+
+def simplified_svcca_similarity(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    *,
+    var_frac: float = 0.99,
+    max_components: int = 64,
+    eps: float = 1e-6,
+) -> Optional[float]:
+    """Small, dependency-free SVCCA-style score for optional diagnostics.
+
+    This is intentionally conservative: PCA is done in torch, then the mean
+    singular value of the cross-correlation matrix between whitened components
+    is reported.  It is a compact similarity score, not a full replacement for
+    a dedicated SVCCA package.
+    """
+    x = x.detach().float()
+    y = y.detach().float()
+    if x.ndim != 2 or y.ndim != 2:
+        return None
+    n = min(int(x.shape[0]), int(y.shape[0]))
+    if n < 3:
+        return None
+    x = x[:n]
+    y = y[:n]
+    finite = torch.isfinite(x).all(dim=-1) & torch.isfinite(y).all(dim=-1)
+    x = x[finite]
+    y = y[finite]
+    n = int(x.shape[0])
+    if n < 3:
+        return None
+    x = x - x.mean(dim=0, keepdim=True)
+    y = y - y.mean(dim=0, keepdim=True)
+
+    def _pca_scores(z: torch.Tensor) -> Optional[torch.Tensor]:
+        try:
+            u, s, _vh = torch.linalg.svd(z, full_matrices=False)
+        except RuntimeError:
+            return None
+        if s.numel() == 0:
+            return None
+        var = s.square()
+        total = var.sum().clamp_min(eps)
+        keep = int((var / total).cumsum(dim=0).lt(var_frac).sum().item()) + 1
+        keep = max(1, min(keep, max_components, int(s.numel())))
+        scores = u[:, :keep] * s[:keep].unsqueeze(0)
+        scores = scores - scores.mean(dim=0, keepdim=True)
+        std = scores.std(dim=0, unbiased=False).clamp_min(eps)
+        return scores / std
+
+    xp = _pca_scores(x)
+    yp = _pca_scores(y)
+    if xp is None or yp is None:
+        return None
+    corr = (xp.T @ yp) / max(1, xp.shape[0] - 1)
+    try:
+        s = torch.linalg.svdvals(corr)
+    except RuntimeError:
+        return None
+    if s.numel() == 0:
+        return None
+    return _finite(float(s.clamp(0.0, 1.0).mean().item()))
+
+
+def _top_pc(x: torch.Tensor) -> Optional[torch.Tensor]:
+    if x.ndim != 2 or x.shape[0] < 2:
+        return None
+    centered = x.detach().float() - x.detach().float().mean(dim=0, keepdim=True)
+    try:
+        _u, _s, vh = torch.linalg.svd(centered, full_matrices=False)
+    except RuntimeError:
+        return None
+    if vh.numel() == 0:
+        return None
+    return vh[0]
+
+
+def _mean_alignment_to_vector(
+    x: torch.Tensor,
+    vector: torch.Tensor,
+    *,
+    abs_value: bool = False,
+) -> Optional[float]:
+    if x.ndim != 2 or x.shape[0] == 0 or vector.numel() == 0:
+        return None
+    vec = vector.detach().float().reshape(1, -1)
+    if int(vec.shape[-1]) != int(x.shape[-1]):
+        return None
+    vals = F.cosine_similarity(
+        x.detach().float(),
+        vec.expand(x.shape[0], -1),
+        dim=-1,
+        eps=1e-8,
+    )
+    if abs_value:
+        vals = vals.abs()
+    return _finite(float(vals.mean().item()))
+
+
+def richer_geometry_cell_from_tensors(
+    paths: Dict[str, Optional[torch.Tensor]],
+    *,
+    var_frac: float = 0.9,
+) -> Dict[str, Any]:
+    """Compute richer path geometry for one task/layer/role-or-bucket cell."""
+    tensors: Dict[str, torch.Tensor] = {}
+    for name, value in paths.items():
+        if value is None:
+            continue
+        value = value.detach().float()
+        if value.ndim != 2 or value.shape[0] == 0:
+            continue
+        value = value[torch.isfinite(value).all(dim=-1)]
+        if value.shape[0] == 0:
+            continue
+        tensors[name] = value
+
+    if not tensors:
+        return {}
+
+    cell: Dict[str, Any] = {
+        "paths": {},
+        "path_token_counts": {name: int(t.shape[0]) for name, t in tensors.items()},
+    }
+    stem = tensors.get("stem")
+    up = tensors.get("up")
+    stem_centroid = stem.mean(dim=0) if stem is not None else None
+    up_centroid = up.mean(dim=0) if up is not None else None
+    up_pc = _top_pc(up) if up is not None else None
+
+    for name, tensor in tensors.items():
+        metrics = geometry_summary(tensor, var_frac=var_frac)
+        metrics["sample_count"] = int(tensor.shape[0])
+        if stem_centroid is not None:
+            aligned = _mean_alignment_to_vector(tensor, stem_centroid)
+            if aligned is not None:
+                metrics["alignment_to_stem_centroid"] = aligned
+        if up_centroid is not None:
+            aligned = _mean_alignment_to_vector(tensor, up_centroid)
+            if aligned is not None:
+                metrics["alignment_to_up_path_mean"] = aligned
+        if up_pc is not None:
+            aligned = _mean_alignment_to_vector(tensor, up_pc, abs_value=True)
+            if aligned is not None:
+                metrics["alignment_to_up_path_top_pc"] = aligned
+        cell["paths"][name] = metrics
+        for key, value in metrics.items():
+            cell[f"{name}_{key}"] = value
+
+    if stem is not None and up is not None:
+        stem_norm = stem.norm(dim=-1).mean()
+        up_norm = up.norm(dim=-1).mean()
+        ratio = stem_norm / up_norm.clamp_min(1e-8)
+        cross = {
+            "norm_ratio_stem_to_up": _finite(float(ratio.item())),
+            "stem_up_centroid_cos": _finite(
+                float(
+                    F.cosine_similarity(
+                        stem.mean(dim=0, keepdim=True),
+                        up.mean(dim=0, keepdim=True),
+                        dim=-1,
+                        eps=1e-8,
+                    ).item()
+                )
+            ),
+        }
+        if up_pc is not None:
+            aligned = _mean_alignment_to_vector(stem, up_pc, abs_value=True)
+            if aligned is not None:
+                cross["stem_alignment_to_up_path_top_pc"] = aligned
+        if stem_centroid is not None:
+            aligned = _mean_alignment_to_vector(up, stem_centroid)
+            if aligned is not None:
+                cross["up_alignment_to_stem_centroid"] = aligned
+        cell["cross_path"] = cross
+        cell.update(cross)
+    return cell
+
+
+def observed_frequency_bucket_lookup(freq: Counter[int]) -> Tuple[Dict[int, str], Dict[str, Any]]:
+    """Map observed token ids into rare/mid/frequent tertiles.
+
+    These are explicitly observed-subset buckets, not corpus-frequency buckets.
+    The rank-based policy stays useful for tiny eval subsets where absolute
+    counts would otherwise put every token in ``rare``.
+    """
+    if not freq:
+        return {}, {
+            "frequency_source": "observed_eval_subset",
+            "bucket_policy": "no token ids observed",
+        }
+    items = sorted(((int(tok), int(count)) for tok, count in freq.items()), key=lambda x: (x[1], x[0]))
+    n = len(items)
+    rare_cut = max(1, math.ceil(n / 3))
+    mid_cut = max(rare_cut, math.ceil(2 * n / 3))
+    lookup: Dict[int, str] = {}
+    for idx, (tok, _count) in enumerate(items):
+        if idx < rare_cut:
+            bucket = "rare"
+        elif idx < mid_cut:
+            bucket = "mid"
+        else:
+            bucket = "frequent"
+        lookup[tok] = bucket
+    counts = Counter(lookup.values())
+    return lookup, {
+        "frequency_source": "observed_eval_subset",
+        "bucket_policy": "rank_tertiles_over_observed_token_counts",
+        "tokens_observed": int(n),
+        "bucket_token_type_counts": dict(counts),
+        "min_observed_count": int(items[0][1]),
+        "max_observed_count": int(items[-1][1]),
+    }
 
 
 def _iter_stem_layers(model: torch.nn.Module, layers: Optional[List[int]] = None) -> Iterator[Tuple[int, torch.nn.Module]]:
@@ -721,6 +1044,39 @@ class StemDiagnosticsCollector:
                 }
             )
         )
+        richer_all_cap = max(1, int(args.eval_geometry_max_tokens_per_layer))
+        richer_bucket_cap = max(1, int(args.max_geometry_tokens_per_bucket))
+        richer_tagged_cap = max(1, richer_bucket_cap * len(FREQUENCY_BUCKETS))
+        self.current_include_richer_geometry = False
+        self.eval_richer_task_sample_counts: Dict[str, int] = defaultdict(int)
+        self.eval_observed_token_freq: Counter[int] = Counter()
+        self.eval_richer_task_layer_geometry: Dict[
+            str, Dict[int, Dict[str, TensorReservoir]]
+        ] = defaultdict(
+            lambda: defaultdict(lambda: _path_reservoirs(richer_all_cap))
+        )
+        self.eval_richer_task_layer_role_geometry: Dict[
+            str, Dict[int, Dict[str, Dict[str, TensorReservoir]]]
+        ] = defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(lambda: _path_reservoirs(richer_bucket_cap))
+            )
+        )
+        self.eval_richer_frequency_geometry: Dict[
+            str, Dict[int, Dict[str, TokenTaggedReservoir]]
+        ] = defaultdict(
+            lambda: defaultdict(lambda: _path_token_reservoirs(richer_tagged_cap))
+        )
+        self.eval_richer_gate_geometry: Dict[
+            str, Dict[int, Dict[str, Dict[str, TensorReservoir]]]
+        ] = defaultdict(
+            lambda: defaultdict(
+                lambda: defaultdict(lambda: _path_reservoirs(richer_bucket_cap))
+            )
+        )
+        self.eval_richer_gate_stats: Dict[
+            str, Dict[int, Dict[str, OnlineStats]]
+        ] = defaultdict(lambda: defaultdict(lambda: defaultdict(OnlineStats)))
         # Counts of samples seen per task — drives the per-task sample cap.
         self.eval_task_sample_counts: Dict[str, int] = defaultdict(int)
         self.eval_task_layer_path_records_written: int = 0
@@ -944,6 +1300,7 @@ class StemDiagnosticsCollector:
         self.current_tokens_list = None
         self.current_token_roles = None
         self.current_sample_records = []
+        self.current_include_richer_geometry = False
 
         cap = self.args.eval_activation_max_samples_per_task
         if cap is not None and self.eval_task_sample_counts.get(task, 0) >= cap:
@@ -955,6 +1312,15 @@ class StemDiagnosticsCollector:
         self.current_token_ids_list = token_ids
         self.current_tokens_list = tokens
         self.current_token_roles = token_roles
+        if self.args.collect_richer_geometry:
+            richer_cap = self.args.max_geometry_samples_per_task
+            if (
+                richer_cap is None
+                or self.eval_richer_task_sample_counts.get(task, 0) < int(richer_cap)
+            ):
+                self.current_include_richer_geometry = True
+                if token_ids:
+                    self.eval_observed_token_freq.update(int(tok) for tok in token_ids)
         self._active = True
 
     @staticmethod
@@ -1075,6 +1441,19 @@ class StemDiagnosticsCollector:
             if x3 is not None:
                 geo["dense"].add(x3)
 
+        if self.args.collect_richer_geometry and self.current_include_richer_geometry:
+            self._eval_record_richer_geometry(
+                layer_idx,
+                n_pos=n_pos,
+                sample_idx=sample_idx,
+                x=x,
+                y=y,
+                x3=x3,
+                up=up,
+                out2=out2,
+                alpha_sig=alpha_sig,
+            )
+
         # Detailed per-position records (optional).
         if self.args.write_layer_path_records:
             cap_records = max(1, int(self.args.eval_activation_max_layer_path_records_per_sample))
@@ -1130,6 +1509,91 @@ class StemDiagnosticsCollector:
         v = float(vals[idx].item())
         return v if math.isfinite(v) else None
 
+    @staticmethod
+    def _gate_alpha_bucket(alpha_value: Optional[float]) -> str:
+        if alpha_value is None or not math.isfinite(alpha_value):
+            return "unknown"
+        if alpha_value < 1.0 / 3.0:
+            return "low_alpha"
+        if alpha_value < 2.0 / 3.0:
+            return "mid_alpha"
+        return "high_alpha"
+
+    def _eval_record_richer_geometry(
+        self,
+        layer_idx: int,
+        *,
+        n_pos: int,
+        sample_idx: torch.Tensor,
+        x: Optional[torch.Tensor],
+        y: Optional[torch.Tensor],
+        x3: Optional[torch.Tensor],
+        up: Optional[torch.Tensor],
+        out2: Optional[torch.Tensor],
+        alpha_sig: Optional[torch.Tensor],
+    ) -> None:
+        """Populate richer bounded reservoirs for role/frequency/CKA analyses."""
+        if self.current_task is None:
+            return
+        task = self.current_task
+        path_sources = {
+            "hidden": x,
+            "stem": y,
+            "up": x3,
+            "combined": up,
+            "ffn_out": out2,
+        }
+        sampled_paths: Dict[str, torch.Tensor] = {}
+        for path_name, source in path_sources.items():
+            flat = self._flatten_per_token(source)
+            if flat is None or flat.shape[0] != n_pos:
+                continue
+            sampled_paths[path_name] = flat.index_select(0, sample_idx.to(flat.device)).detach().float().cpu()
+        if not sampled_paths:
+            return
+
+        all_geo = self.eval_richer_task_layer_geometry[task][layer_idx]
+        for path_name, tensor in sampled_paths.items():
+            all_geo[path_name].add(tensor)
+
+        alpha_value: Optional[float] = None
+        if alpha_sig is not None:
+            try:
+                alpha_value = float(alpha_sig.detach().float().mean().item())
+            except Exception:
+                alpha_value = None
+            if alpha_value is not None and math.isfinite(alpha_value):
+                self.eval_richer_gate_stats[task][layer_idx]["all"].update(alpha_value)
+                gate_bucket = self._gate_alpha_bucket(alpha_value)
+                gate_geo = self.eval_richer_gate_geometry[task][layer_idx][gate_bucket]
+                for path_name, tensor in sampled_paths.items():
+                    gate_geo[path_name].add(tensor)
+
+        roles = self.current_token_roles
+        if self.args.geometry_by_token_role and roles is not None and len(roles) >= n_pos:
+            sampled_roles = [str(roles[int(i)]) for i in sample_idx.tolist()]
+            unique_roles = sorted(set(sampled_roles))
+            for role in unique_roles:
+                role_positions = [i for i, r in enumerate(sampled_roles) if r == role]
+                if not role_positions:
+                    continue
+                idx = torch.tensor(role_positions, dtype=torch.long)
+                role_geo = self.eval_richer_task_layer_role_geometry[task][layer_idx][role]
+                for path_name, tensor in sampled_paths.items():
+                    role_geo[path_name].add(tensor.index_select(0, idx))
+                if alpha_value is not None and math.isfinite(alpha_value):
+                    self.eval_richer_gate_stats[task][layer_idx][role].update(alpha_value)
+
+        tok_ids = self.current_token_ids_list
+        if self.args.geometry_by_frequency_bucket and tok_ids is not None and len(tok_ids) >= n_pos:
+            sampled_ids = torch.tensor(
+                [int(tok_ids[int(i)]) for i in sample_idx.tolist()],
+                dtype=torch.long,
+            )
+            freq_geo = self.eval_richer_frequency_geometry[task][layer_idx]
+            for path_name, tensor in sampled_paths.items():
+                freq_geo[path_name].add(tensor, sampled_ids)
+
     def flush_sample(self) -> List[Any]:
         """Finalise the in-flight sample and return any detailed records.
 
@@ -1147,6 +1611,8 @@ class StemDiagnosticsCollector:
         # the per-task counter alone so retries / re-attempts are safe.
         if self._active and self.current_task is not None:
             self.eval_task_sample_counts[self.current_task] += 1
+            if self.current_include_richer_geometry:
+                self.eval_richer_task_sample_counts[self.current_task] += 1
         self.current_sample_records = []
         self.current_sample_id = None
         self.current_task = None
@@ -1154,6 +1620,7 @@ class StemDiagnosticsCollector:
         self.current_token_ids_list = None
         self.current_tokens_list = None
         self.current_token_roles = None
+        self.current_include_richer_geometry = False
         self._active = False
         return records
 
@@ -1432,11 +1899,473 @@ class StemDiagnosticsCollector:
                 per_task_layer[task] = per_layer
         return {"per_task_layer": per_task_layer, "scalar_metrics": scalar_metrics}
 
+    def geometry_by_task_layer_role_summary(self) -> Dict[str, Any]:
+        """Richer geometry keyed by task, layer, and token role."""
+        if not self.is_eval_mode or not self.args.collect_richer_geometry:
+            return {}
+        per_task: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for task, by_layer in self.eval_richer_task_layer_geometry.items():
+            layer_out: Dict[str, Dict[str, Any]] = {}
+            for layer_idx, path_reservoirs in by_layer.items():
+                role_out: Dict[str, Any] = {}
+                all_paths = {
+                    path_name: reservoir.tensor()
+                    for path_name, reservoir in path_reservoirs.items()
+                }
+                all_cell = richer_geometry_cell_from_tensors(
+                    all_paths,
+                    var_frac=self.args.geometry_var_frac,
+                )
+                if all_cell:
+                    all_cell["token_role"] = "all"
+                    role_out["all"] = all_cell
+
+                if self.args.geometry_by_token_role:
+                    for role, role_reservoirs in self.eval_richer_task_layer_role_geometry.get(task, {}).get(layer_idx, {}).items():
+                        role_paths = {
+                            path_name: reservoir.tensor()
+                            for path_name, reservoir in role_reservoirs.items()
+                        }
+                        cell = richer_geometry_cell_from_tensors(
+                            role_paths,
+                            var_frac=self.args.geometry_var_frac,
+                        )
+                        if not cell:
+                            continue
+                        cell["token_role"] = role
+                        gate_stat = self.eval_richer_gate_stats.get(task, {}).get(layer_idx, {}).get(role)
+                        if gate_stat is not None and gate_stat.count:
+                            cell["gate_alpha"] = gate_stat.as_dict("gate_alpha")
+                            cell["gate_alpha_bucket"] = self._gate_alpha_bucket(gate_stat.mean)
+                            cell["gate_conditioned_geometry"] = True
+                        role_out[role] = cell
+                gate_all = self.eval_richer_gate_stats.get(task, {}).get(layer_idx, {}).get("all")
+                if gate_all is not None and gate_all.count and "all" in role_out:
+                    role_out["all"]["gate_alpha"] = gate_all.as_dict("gate_alpha")
+                    role_out["all"]["gate_alpha_bucket"] = self._gate_alpha_bucket(gate_all.mean)
+                    role_out["all"]["gate_conditioned_geometry"] = True
+                if role_out:
+                    layer_out[str(int(layer_idx))] = role_out
+            if layer_out:
+                per_task[task] = layer_out
+        return {
+            "run_id": self.run_id,
+            "available": bool(per_task),
+            "schema": "task -> layer_idx -> token_role -> metrics",
+            "samples_per_task": dict(self.eval_richer_task_sample_counts),
+            "per_task_layer_role": per_task,
+        }
+
+    @staticmethod
+    def _select_bucket_rows(
+        x: torch.Tensor,
+        ids: torch.Tensor,
+        bucket_lookup: Dict[int, str],
+        bucket: str,
+        *,
+        max_items: int,
+    ) -> Optional[torch.Tensor]:
+        if x is None or ids is None or x.shape[0] == 0:
+            return None
+        mask = torch.tensor(
+            [bucket_lookup.get(int(tok), "rare") == bucket for tok in ids.tolist()],
+            dtype=torch.bool,
+        )
+        if not bool(mask.any()):
+            return None
+        selected = x[mask]
+        if selected.shape[0] > max_items:
+            idx = torch.linspace(0, selected.shape[0] - 1, max_items).long()
+            selected = selected.index_select(0, idx)
+        return selected
+
+    @staticmethod
+    def _centroid_drift_metrics(
+        bucket_tensor: Optional[torch.Tensor],
+        all_tensor: Optional[torch.Tensor],
+        *,
+        bucket_cell: Dict[str, Any],
+        all_cell: Dict[str, Any],
+        path_name: str,
+    ) -> Dict[str, float]:
+        if bucket_tensor is None or all_tensor is None:
+            return {}
+        if bucket_tensor.ndim != 2 or all_tensor.ndim != 2 or bucket_tensor.shape[0] == 0 or all_tensor.shape[0] == 0:
+            return {}
+        bucket_centroid = bucket_tensor.mean(dim=0, keepdim=True)
+        all_centroid = all_tensor.mean(dim=0, keepdim=True)
+        out = {
+            f"{path_name}_centroid_cos_to_all_tokens": _finite(
+                float(F.cosine_similarity(bucket_centroid, all_centroid, dim=-1, eps=1e-8).item())
+            ),
+            f"{path_name}_centroid_l2_delta_to_all_tokens": _finite(
+                float((bucket_centroid - all_centroid).norm().item())
+            ),
+        }
+        b_path = (bucket_cell.get("paths") or {}).get(path_name) or {}
+        a_path = (all_cell.get("paths") or {}).get(path_name) or {}
+        for metric in ("effective_rank", "anisotropy", "centroid_cos_mean"):
+            bv = b_path.get(metric)
+            av = a_path.get(metric)
+            if isinstance(bv, (int, float)) and isinstance(av, (int, float)):
+                out[f"{path_name}_{metric}_delta_to_all_tokens"] = _finite(float(bv) - float(av))
+        return out
+
+    def geometry_by_frequency_bucket_summary(self) -> Dict[str, Any]:
+        """Richer geometry keyed by observed token-frequency bucket."""
+        if (
+            not self.is_eval_mode
+            or not self.args.collect_richer_geometry
+            or not self.args.geometry_by_frequency_bucket
+        ):
+            return {}
+        bucket_lookup, bucket_meta = observed_frequency_bucket_lookup(self.eval_observed_token_freq)
+        per_task: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        max_items = max(1, int(self.args.max_geometry_tokens_per_bucket))
+        for task, by_layer in self.eval_richer_frequency_geometry.items():
+            layer_out: Dict[str, Dict[str, Any]] = {}
+            for layer_idx, path_reservoirs in by_layer.items():
+                all_paths: Dict[str, Optional[torch.Tensor]] = {}
+                path_ids: Dict[str, Optional[torch.Tensor]] = {}
+                for path_name, reservoir in path_reservoirs.items():
+                    tensor, ids = reservoir.tensor_and_ids()
+                    all_paths[path_name] = tensor
+                    path_ids[path_name] = ids
+                all_cell = richer_geometry_cell_from_tensors(
+                    all_paths,
+                    var_frac=self.args.geometry_var_frac,
+                )
+                bucket_out: Dict[str, Any] = {}
+                for bucket in FREQUENCY_BUCKETS:
+                    bucket_paths: Dict[str, Optional[torch.Tensor]] = {}
+                    for path_name, tensor in all_paths.items():
+                        ids = path_ids.get(path_name)
+                        if tensor is None or ids is None:
+                            bucket_paths[path_name] = None
+                            continue
+                        bucket_paths[path_name] = self._select_bucket_rows(
+                            tensor,
+                            ids,
+                            bucket_lookup,
+                            bucket,
+                            max_items=max_items,
+                        )
+                    cell = richer_geometry_cell_from_tensors(
+                        bucket_paths,
+                        var_frac=self.args.geometry_var_frac,
+                    )
+                    if not cell:
+                        continue
+                    cell["frequency_bucket"] = bucket
+                    cell["frequency_source"] = bucket_meta.get("frequency_source")
+                    for path_name, bucket_tensor in bucket_paths.items():
+                        drift = self._centroid_drift_metrics(
+                            bucket_tensor,
+                            all_paths.get(path_name),
+                            bucket_cell=cell,
+                            all_cell=all_cell,
+                            path_name=path_name,
+                        )
+                        cell.update(drift)
+                    bucket_out[bucket] = cell
+                if bucket_out:
+                    layer_out[str(int(layer_idx))] = bucket_out
+            if layer_out:
+                per_task[task] = layer_out
+        return {
+            "run_id": self.run_id,
+            "available": bool(per_task),
+            "schema": "task -> layer_idx -> frequency_bucket -> metrics",
+            **bucket_meta,
+            "per_task_layer_bucket": per_task,
+        }
+
+    def geometry_by_gate_alpha_summary(self) -> Dict[str, Any]:
+        if not self.is_eval_mode or not self.args.collect_richer_geometry:
+            return {}
+        per_task: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for task, by_layer in self.eval_richer_gate_geometry.items():
+            layer_out: Dict[str, Dict[str, Any]] = {}
+            for layer_idx, by_bucket in by_layer.items():
+                bucket_out: Dict[str, Any] = {}
+                for bucket, path_reservoirs in by_bucket.items():
+                    paths = {
+                        path_name: reservoir.tensor()
+                        for path_name, reservoir in path_reservoirs.items()
+                    }
+                    cell = richer_geometry_cell_from_tensors(
+                        paths,
+                        var_frac=self.args.geometry_var_frac,
+                    )
+                    if cell:
+                        cell["gate_alpha_bucket"] = bucket
+                        cell["gate_conditioned_geometry"] = True
+                        bucket_out[bucket] = cell
+                if bucket_out:
+                    layer_out[str(int(layer_idx))] = bucket_out
+            if layer_out:
+                per_task[task] = layer_out
+        return {
+            "run_id": self.run_id,
+            "available": bool(per_task),
+            "schema": "task -> layer_idx -> gate_alpha_bucket -> metrics",
+            "per_task_layer_gate_bucket": per_task,
+        }
+
+    @staticmethod
+    def _collect_geometry_warnings(
+        by_role: Dict[str, Any],
+        by_frequency: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        warnings: List[Dict[str, Any]] = []
+        per_task_layer_role = by_role.get("per_task_layer_role") or {}
+        group_stats: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+        for task, by_layer in per_task_layer_role.items():
+            task_group = classify_task_group(str(task))
+            for layer_idx, by_role_cell in (by_layer or {}).items():
+                for role, cell in (by_role_cell or {}).items():
+                    if role != "all" or not isinstance(cell, dict):
+                        continue
+                    er = cell.get("stem_effective_rank")
+                    ani = cell.get("stem_anisotropy")
+                    top_pc = cell.get("stem_top_pc_var_frac")
+                    if isinstance(er, (int, float)):
+                        group_stats[task_group]["effective_rank"].append(float(er))
+                        if er < 4.0:
+                            warnings.append(
+                                {
+                                    "type": "low_effective_rank",
+                                    "severity": "warning",
+                                    "task": task,
+                                    "layer_idx": layer_idx,
+                                    "token_role": role,
+                                    "metric": "stem_effective_rank",
+                                    "value": _finite(float(er)),
+                                    "message": "STEM representation has low effective rank.",
+                                }
+                            )
+                    if isinstance(ani, (int, float)):
+                        group_stats[task_group]["anisotropy"].append(float(ani))
+                        if ani > 0.9:
+                            warnings.append(
+                                {
+                                    "type": "high_anisotropy",
+                                    "severity": "warning",
+                                    "task": task,
+                                    "layer_idx": layer_idx,
+                                    "token_role": role,
+                                    "metric": "stem_anisotropy",
+                                    "value": _finite(float(ani)),
+                                    "message": "STEM representation is highly anisotropic.",
+                                }
+                            )
+                    if isinstance(top_pc, (int, float)) and top_pc > 0.8:
+                        warnings.append(
+                            {
+                                "type": "representation_collapse",
+                                "severity": "warning",
+                                "task": task,
+                                "layer_idx": layer_idx,
+                                "token_role": role,
+                                "metric": "stem_top_pc_var_frac",
+                                "value": _finite(float(top_pc)),
+                                "message": "Top principal component explains most STEM variance.",
+                            }
+                        )
+
+        code_rank = group_stats.get("code", {}).get("effective_rank") or []
+        non_code_rank = [
+            v
+            for group, stats in group_stats.items()
+            if group != "code"
+            for v in (stats.get("effective_rank") or [])
+        ]
+        if code_rank and non_code_rank:
+            code_mean = sum(code_rank) / len(code_rank)
+            non_code_mean = sum(non_code_rank) / len(non_code_rank)
+            if abs(code_mean - non_code_mean) >= 2.0:
+                warnings.append(
+                    {
+                        "type": "code_vs_reasoning_geometry_difference",
+                        "severity": "info",
+                        "code_effective_rank_mean": _finite(code_mean),
+                        "non_code_effective_rank_mean": _finite(non_code_mean),
+                        "message": "Code-task STEM effective rank differs from non-code tasks.",
+                    }
+                )
+
+        freq = by_frequency.get("per_task_layer_bucket") or {}
+        for task, by_layer in freq.items():
+            for layer_idx, by_bucket in (by_layer or {}).items():
+                rare = (by_bucket or {}).get("rare") or {}
+                frequent = (by_bucket or {}).get("frequent") or {}
+                rare_er = rare.get("stem_effective_rank")
+                freq_er = frequent.get("stem_effective_rank")
+                rare_ani = rare.get("stem_anisotropy")
+                freq_ani = frequent.get("stem_anisotropy")
+                if isinstance(rare_er, (int, float)) and isinstance(freq_er, (int, float)):
+                    diff = float(rare_er) - float(freq_er)
+                    if abs(diff) >= 2.0:
+                        warnings.append(
+                            {
+                                "type": "rare_token_geometry_difference",
+                                "severity": "info",
+                                "task": task,
+                                "layer_idx": layer_idx,
+                                "metric": "stem_effective_rank",
+                                "rare_value": _finite(float(rare_er)),
+                                "frequent_value": _finite(float(freq_er)),
+                                "difference": _finite(diff),
+                                "message": "Rare-token STEM geometry differs from frequent-token geometry.",
+                            }
+                        )
+                if isinstance(rare_ani, (int, float)) and isinstance(freq_ani, (int, float)):
+                    diff = float(rare_ani) - float(freq_ani)
+                    if abs(diff) >= 0.2:
+                        warnings.append(
+                            {
+                                "type": "rare_token_geometry_difference",
+                                "severity": "info",
+                                "task": task,
+                                "layer_idx": layer_idx,
+                                "metric": "stem_anisotropy",
+                                "rare_value": _finite(float(rare_ani)),
+                                "frequent_value": _finite(float(freq_ani)),
+                                "difference": _finite(diff),
+                                "message": "Rare-token STEM anisotropy differs from frequent-token anisotropy.",
+                            }
+                        )
+        return warnings
+
+    def richer_geometry_summary(self) -> Dict[str, Any]:
+        if not self.is_eval_mode or not self.args.collect_richer_geometry:
+            return {}
+        by_role = self.geometry_by_task_layer_role_summary()
+        by_frequency = self.geometry_by_frequency_bucket_summary()
+        by_gate = self.geometry_by_gate_alpha_summary()
+        warnings = self._collect_geometry_warnings(by_role, by_frequency)
+        return {
+            "run_id": self.run_id,
+            "available": bool(by_role.get("available") or by_frequency.get("available")),
+            "samples_per_task": dict(self.eval_richer_task_sample_counts),
+            "caps": {
+                "max_geometry_samples_per_task": self.args.max_geometry_samples_per_task,
+                "max_geometry_tokens_per_bucket": self.args.max_geometry_tokens_per_bucket,
+                "eval_geometry_max_tokens_per_layer": self.args.eval_geometry_max_tokens_per_layer,
+            },
+            "enabled_features": {
+                "geometry_by_token_role": bool(self.args.geometry_by_token_role),
+                "geometry_by_frequency_bucket": bool(self.args.geometry_by_frequency_bucket),
+                "compute_cka": bool(self.args.compute_cka),
+                "compute_svcca": bool(self.args.compute_svcca),
+            },
+            "metric_notes": {
+                "effective_rank": "Entropy effective rank of centered singular-value spectrum.",
+                "explained_var_rank": f"Smallest PCA rank explaining {self.args.geometry_var_frac:g} variance.",
+                "anisotropy": "Norm of centroid divided by mean token-vector norm.",
+                "pairwise_cos": "Mean/std over sampled off-diagonal pairwise cosine similarities.",
+                "centroid_cos": "Cosine from each token vector to its cell centroid.",
+                "alignment_to_up_path_top_pc": "Mean absolute cosine to the up-path top principal component.",
+                "linear_cka": "Centered linear CKA on row-aligned sampled representations.",
+            },
+            "warnings": warnings,
+            "warning_counts": dict(Counter(str(w.get("type")) for w in warnings)),
+            "by_gate_alpha_bucket": by_gate,
+            "artifact_files": {
+                "summary": RICHER_GEOMETRY_SUMMARY_JSON,
+                "by_task_layer_role": GEOMETRY_BY_TASK_LAYER_ROLE_JSON,
+                "by_frequency_bucket": GEOMETRY_BY_FREQUENCY_BUCKET_JSON,
+                "baseline_comparison": BASELINE_COMPARISON_CKA_JSON,
+            },
+        }
+
+    def baseline_comparison_summary(
+        self,
+        reference_collector: Optional["StemDiagnosticsCollector"],
+        *,
+        reference_checkpoint_path: Optional[str] = None,
+        reference_model_type: Optional[str] = None,
+        reference_status: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Compute optional baseline-vs-current representation similarities."""
+        requested = bool(reference_checkpoint_path)
+        out: Dict[str, Any] = {
+            "run_id": self.run_id,
+            "requested": requested,
+            "reference_checkpoint_path": reference_checkpoint_path,
+            "reference_model_type": reference_model_type,
+            "compute_cka": bool(self.args.compute_cka),
+            "compute_svcca": bool(self.args.compute_svcca),
+            "available": False,
+            "per_task_layer": {},
+            "status": reference_status or {},
+        }
+        if not requested:
+            out["skipped"] = True
+            out["reason"] = "reference_checkpoint_path not provided"
+            return out
+        if reference_collector is None:
+            out["skipped"] = True
+            out["reason"] = (reference_status or {}).get("reason", "reference model unavailable")
+            return out
+        if not self.args.compute_cka and not self.args.compute_svcca:
+            out["skipped"] = True
+            out["reason"] = "compute_cka and compute_svcca are both false"
+            return out
+
+        per_task_layer: Dict[str, Dict[str, Any]] = {}
+        for task, by_layer in self.eval_richer_task_layer_geometry.items():
+            ref_by_layer = reference_collector.eval_richer_task_layer_geometry.get(task, {})
+            task_out: Dict[str, Any] = {}
+            for layer_idx, path_reservoirs in by_layer.items():
+                ref_paths = ref_by_layer.get(layer_idx)
+                if not ref_paths:
+                    continue
+                layer_out: Dict[str, Any] = {}
+                for path_name in ("hidden", "up", "combined", "ffn_out"):
+                    current = path_reservoirs.get(path_name).tensor() if path_name in path_reservoirs else None
+                    ref = ref_paths.get(path_name).tensor() if path_name in ref_paths else None
+                    if current is None or ref is None:
+                        continue
+                    n = min(int(current.shape[0]), int(ref.shape[0]))
+                    if n < 2:
+                        continue
+                    metrics: Dict[str, Any] = {
+                        "sample_count": int(n),
+                        "current_dim": int(current.shape[-1]),
+                        "reference_dim": int(ref.shape[-1]),
+                    }
+                    if self.args.compute_cka:
+                        metrics["linear_cka"] = linear_cka(current[:n], ref[:n])
+                    if self.args.compute_svcca:
+                        metrics["simplified_svcca"] = simplified_svcca_similarity(
+                            current[:n],
+                            ref[:n],
+                            var_frac=max(float(self.args.geometry_var_frac), 0.9),
+                        )
+                        metrics["svcca_note"] = (
+                            "simplified PCA+CCA-style score; use a dedicated SVCCA "
+                            "implementation for publication-grade analysis"
+                        )
+                    layer_out[path_name] = metrics
+                if layer_out:
+                    task_out[str(int(layer_idx))] = layer_out
+            if task_out:
+                per_task_layer[task] = task_out
+        out["per_task_layer"] = per_task_layer
+        out["available"] = bool(per_task_layer)
+        if not per_task_layer:
+            out["skipped"] = True
+            out["reason"] = "no matching row-aligned richer geometry samples"
+        return out
+
     def write_eval_artifacts(
         self,
         *,
         output_dir: Optional[Path] = None,
         layer_path_records: Optional[List[Any]] = None,
+        reference_collector: Optional["StemDiagnosticsCollector"] = None,
+        reference_status: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Write eval-mode artifacts to disk and return the summary dict.
 
@@ -1495,6 +2424,24 @@ class StemDiagnosticsCollector:
                             )
                 except Exception:
                     pass
+        if self.args.collect_richer_geometry:
+            richer = self.richer_geometry_summary()
+            if richer:
+                write_json_atomic(out_dir / RICHER_GEOMETRY_SUMMARY_JSON, richer)
+            by_role = self.geometry_by_task_layer_role_summary()
+            if by_role:
+                write_json_atomic(out_dir / GEOMETRY_BY_TASK_LAYER_ROLE_JSON, by_role)
+            by_freq = self.geometry_by_frequency_bucket_summary()
+            if by_freq:
+                write_json_atomic(out_dir / GEOMETRY_BY_FREQUENCY_BUCKET_JSON, by_freq)
+            if self.args.reference_checkpoint_path:
+                baseline = self.baseline_comparison_summary(
+                    reference_collector,
+                    reference_checkpoint_path=self.args.reference_checkpoint_path,
+                    reference_model_type=self.args.reference_model_type,
+                    reference_status=reference_status,
+                )
+                write_json_atomic(out_dir / BASELINE_COMPARISON_CKA_JSON, baseline)
         return summary
 
     def scalar_metrics(self) -> Dict[str, float]:

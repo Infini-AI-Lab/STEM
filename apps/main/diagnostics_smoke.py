@@ -18,10 +18,12 @@ from lingua.diagnostics import (
     StemDiagnosticsCollector,
     TokenStatsAggregator,
     geometry_summary,
+    linear_cka,
     run_intervention_suite,
     run_task_aligned_interventions,
 )
 from lingua.diagnostic_records import read_jsonl
+from lingua.eval_activations import load_reference_model_for_geometry
 from lingua.stem import StemFeedForward
 from lingua.stem_dag import STEMDagFeedForward
 
@@ -206,6 +208,84 @@ def _assert_geometry_utilities_are_finite():
         assert math.isfinite(value)
 
 
+def _assert_linear_cka_behaves():
+    torch.manual_seed(0)
+    x = torch.randn(64, 16)
+    identical = linear_cka(x, x.clone())
+    assert abs(identical - 1.0) < 1e-5
+    y = torch.randn(64, 16)
+    unrelated = linear_cka(x, y)
+    assert 0.0 <= unrelated <= 1.0
+    assert unrelated < 0.8
+
+
+def _assert_richer_frequency_bucket_aggregation(tmp_path: Path):
+    torch.manual_seed(0)
+    model = _StemToy(dag=True)
+    args = DiagnosticsArgs(
+        enabled=True,
+        collect_richer_geometry=True,
+        collect_eval_activations=False,
+        geometry_by_token_role=True,
+        geometry_by_frequency_bucket=True,
+        max_geometry_samples_per_task=4,
+        max_geometry_tokens_per_bucket=32,
+        eval_activation_max_tokens_per_sample=12,
+        output_dir=str(tmp_path),
+    )
+    collector = StemDiagnosticsCollector(
+        model,
+        args,
+        output_dir=tmp_path,
+        mode="eval",
+        run_id="smoke",
+    )
+    collector.register()
+    samples = [
+        [1, 1, 1, 2, 2, 3],
+        [1, 1, 4, 4, 5, 6],
+        [1, 7, 8, 9, 10, 11],
+    ]
+    try:
+        for idx, ids in enumerate(samples):
+            roles = ["identifier", "identifier", "operator", "numeral", "natural_language", "whitespace"]
+            collector.set_sample_context(
+                task="mbpp",
+                sample_id=f"s{idx}",
+                task_group="code",
+                token_ids=ids,
+                tokens=[str(i) for i in ids],
+                token_roles=roles,
+            )
+            model(torch.tensor([ids], dtype=torch.long))
+            collector.flush_sample()
+    finally:
+        collector.close()
+    by_freq = collector.geometry_by_frequency_bucket_summary()
+    assert by_freq["available"]
+    assert by_freq["frequency_source"] == "observed_eval_subset"
+    buckets = by_freq["per_task_layer_bucket"]["mbpp"]["0"]
+    assert {"rare", "mid", "frequent"} & set(buckets)
+    assert any("stem_effective_rank" in cell for cell in buckets.values())
+    by_role = collector.geometry_by_task_layer_role_summary()
+    assert by_role["available"]
+    assert "identifier" in by_role["per_task_layer_role"]["mbpp"]["0"]
+
+
+def _assert_missing_reference_checkpoint_does_not_crash(tmp_path: Path):
+    args = DiagnosticsArgs(
+        enabled=True,
+        collect_richer_geometry=True,
+        reference_checkpoint_path=str(tmp_path / "missing_reference"),
+        compute_cka=True,
+    )
+    model, tokenizer, status = load_reference_model_for_geometry(args)
+    assert model is None
+    assert tokenizer is None
+    assert status["skipped"] is True
+    assert status["reason"] == "reference_checkpoint_missing"
+
+
 def main():
     with TemporaryDirectory() as tmp:
         _assert_hooks_register_and_cleanup_plain_stem_without_w3(Path(tmp))
@@ -215,6 +295,11 @@ def main():
     with TemporaryDirectory() as tmp:
         _assert_task_aligned_interventions_write_artifacts(Path(tmp))
     _assert_geometry_utilities_are_finite()
+    _assert_linear_cka_behaves()
+    with TemporaryDirectory() as tmp:
+        _assert_richer_frequency_bucket_aggregation(Path(tmp))
+    with TemporaryDirectory() as tmp:
+        _assert_missing_reference_checkpoint_does_not_crash(Path(tmp))
     print("diagnostics smoke checks passed")
 
 

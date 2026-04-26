@@ -560,7 +560,10 @@ def launch_stem_eval(cfg: StemEvalArgs):
     eval_activation_summary: Dict[str, Any] = {}
     if (
         cfg.diagnostics.enabled
-        and cfg.diagnostics.collect_eval_activations
+        and (
+            cfg.diagnostics.collect_eval_activations
+            or cfg.diagnostics.collect_richer_geometry
+        )
         and results is not None
     ):
         from lingua.stem_dist_utils import get_stem_model_parallel_rank
