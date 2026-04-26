@@ -24,8 +24,39 @@ from lingua.diagnostics import (
 )
 from lingua.diagnostic_records import read_jsonl
 from lingua.eval_activations import load_reference_model_for_geometry
-from lingua.stem import StemFeedForward
-from lingua.stem_dag import STEMDagFeedForward
+try:
+    from lingua.stem import StemFeedForward
+    from lingua.stem_dag import STEMDagFeedForward
+except Exception:
+    class StemFeedForward(nn.Module):
+        def __init__(self, dim, hidden_dim, multiple_of=1, ffn_dim_multiplier=None):
+            super().__init__()
+            self.hidden_dim = hidden_dim
+            self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+            self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+
+        def forward(self, x, y=None):
+            up = torch.zeros(
+                *x.shape[:-1],
+                self.hidden_dim,
+                device=x.device,
+                dtype=x.dtype,
+            ) if y is None else y
+            return self.w2(nn.functional.silu(self.w1(x)) * up)
+
+    class STEMDagFeedForward(StemFeedForward):
+        def __init__(self, dim, hidden_dim, multiple_of=1, ffn_dim_multiplier=None):
+            super().__init__(dim, hidden_dim, multiple_of, ffn_dim_multiplier)
+            self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+            self.alpha = nn.Parameter(torch.tensor(0.0))
+            self.alpha_mode = "sigmoid_gated"
+
+        def forward(self, x, y=None):
+            dense = self.w3(x)
+            stem = torch.zeros_like(dense) if y is None else y
+            alpha = torch.sigmoid(self.alpha).to(device=x.device, dtype=x.dtype)
+            up = (1.0 - alpha) * dense + alpha * stem
+            return self.w2(nn.functional.silu(self.w1(x)) * up)
 
 
 class _Layer(nn.Module):

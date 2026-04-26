@@ -12,7 +12,7 @@ from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
 from typing import Any, Dict, List, Optional, Tuple, Union
 from lm_eval import simple_evaluate
-from omegaconf import OmegaConf
+from omegaconf import ListConfig, OmegaConf
 import torch
 import wandb
 from apps.main.generate import (
@@ -54,6 +54,19 @@ MODEL_REGISTRY = {
 }
 
 logger = logging.getLogger()
+
+
+def _load_config_arg(config_arg):
+    """Load one config path or a list of config paths, merged left to right."""
+    if isinstance(config_arg, ListConfig):
+        paths = list(config_arg)
+    elif isinstance(config_arg, (list, tuple)):
+        paths = list(config_arg)
+    else:
+        paths = [config_arg]
+    if not paths:
+        raise ValueError("config must contain at least one path")
+    return OmegaConf.merge(*[OmegaConf.load(str(path)) for path in paths])
 
 
 @dataclass
@@ -540,7 +553,7 @@ def main():
     Plus all the default values in EvalArgs dataclass.
     """
     cli_args = OmegaConf.from_cli()
-    file_cfg = OmegaConf.load(cli_args.config)
+    file_cfg = _load_config_arg(cli_args.config)
     # We remove 'config' attribute from config as the underlying DataClass does not have it
     del cli_args.config
 

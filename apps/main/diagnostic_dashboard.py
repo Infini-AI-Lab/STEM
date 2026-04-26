@@ -82,6 +82,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Print the global verdict and task-level classifications to stdout after writing files.",
     )
+    p.add_argument(
+        "--validate",
+        action="store_true",
+        default=False,
+        help=(
+            "After generating the dashboard, validate expected diagnostics artifacts "
+            "and print present/missing files, counts, tasks, and intervention/code summaries."
+        ),
+    )
     return p
 
 
@@ -140,6 +149,38 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nArtifacts present: {', '.join(present)}")
         if missing:
             print(f"Artifacts missing: {', '.join(missing)}")
+
+    if args.validate:
+        from lingua.diagnostic_dashboard import validate_diagnostics_artifacts
+
+        validation = validate_diagnostics_artifacts(
+            diagnostics_dir=diag_dir,
+            output_dir=out_dir,
+            run_id=args.run_id,
+            write_report=True,
+        )
+        print("\n=== Diagnostics Validation ===")
+        print(f"OK: {validation.get('ok')}")
+        print(f"Tasks found: {', '.join(validation.get('tasks_found') or []) or '(none)'}")
+        print(f"Record counts: {json.dumps(validation.get('record_counts') or {}, sort_keys=True)}")
+        print(
+            "Interventions found: "
+            f"{', '.join(validation.get('interventions_found') or []) or '(none)'}"
+        )
+        print(
+            "Token effects found: "
+            f"{validation.get('token_effects_found', False)}"
+        )
+        print(
+            "Code failures found: "
+            f"{json.dumps(validation.get('code_failures_found') or {}, sort_keys=True)}"
+        )
+        print(f"Dashboard generated: {validation.get('dashboard_generated')}")
+        present = validation.get("present_artifacts") or []
+        missing = validation.get("missing_artifacts") or []
+        print(f"Present artifacts: {', '.join(present) if present else '(none)'}")
+        print(f"Missing artifacts: {', '.join(missing) if missing else '(none)'}")
+        print(f"Validation report: {out_dir / 'diagnostics_validation.json'}")
 
     return 0
 

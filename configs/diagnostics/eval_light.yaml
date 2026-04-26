@@ -1,0 +1,22 @@
+# Lightweight eval sample capture overlay.
+#
+# Example:
+#   python -m apps.main.stem_eval \
+#     config='[apps/main/configs/stem_eval.yaml,configs/diagnostics/eval_light.yaml]' \
+#     ckpt_dir=/path/to/stem/checkpoint \
+#     harness.tasks='[mbpp]' \
+#     harness.limit=5
+
+harness:
+  log_samples: true
+  limit: 5
+
+diagnostics:
+  enabled: true
+  collect_eval_samples: true
+  max_eval_samples_per_task: 5
+  capture_prompts: true
+  capture_generations: true
+  capture_token_ids: false
+  max_text_chars: 4096
+  rank0_only: true

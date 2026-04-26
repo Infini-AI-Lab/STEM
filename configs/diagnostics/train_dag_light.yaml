@@ -1,0 +1,32 @@
+# Lightweight DAG train-time diagnostics overlay.
+#
+# Example:
+#   torchrun --nproc-per-node=4 -m apps.main.stem_dag_train \
+#     config='[apps/main/configs/stem_dag_llama3_1B.yaml,configs/diagnostics/train_dag_light.yaml]'
+
+diagnostics:
+  enabled: true
+  collect_train_stats: true
+  collect_token_stats: true
+  collect_geometry: false
+  collect_optimizer_stats: true
+
+  sample_every_n_steps: 500
+  log_every_n_steps: 100
+  max_batches_per_collection: 1
+  max_token_positions: 1024
+  max_tokens_per_layer_geometry: 2048
+  layers: null
+
+  enable_backward_hooks: true
+  enable_optimizer_moment_logging: true
+
+  # Optional train-time prompt interventions. Keep false for low-overhead
+  # routine runs; flip to true for occasional debugging windows.
+  collect_interventions: false
+  path_ablation_eval_every_n_steps: 2000
+  path_ablation_num_batches: 1
+  gate_alpha_values: [0.0, 0.25, 0.5, 0.75, 1.0]
+
+  train_task_label: null
+  infer_task_from_data_path: false

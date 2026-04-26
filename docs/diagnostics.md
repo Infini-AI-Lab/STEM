@@ -309,10 +309,9 @@ classify_task_group(task_name: str) -> str  # code | math | knowledge_reasoning 
 
 ---
 
-> **Note:** This module is infrastructure only.  Later rounds will wire these
-> record types into `stem_eval.py` (sample-level JSONL output), `stem_train.py`
-> (train-step records), and `apps/main/stem_diagnostics.py` (standalone
-> analysis).  No train/eval behaviour changes when diagnostics are disabled.
+> **Note:** These record types are the stable interchange layer used by eval,
+> train, code-failure, and dashboard diagnostics.  No train/eval behaviour
+> changes when diagnostics are disabled.
 
 <!-- ====================================================================== -->
 
@@ -323,6 +322,228 @@ and does not change training, checkpointing, or eval behavior.
 Scalar summaries are logged into the existing `metrics.jsonl` /
 `metrics.eval.jsonl` files under `diag/...` keys.  Larger artifacts are written
 under `<dump_dir>/diagnostics` unless `diagnostics.output_dir` is set.
+
+## End-to-End Recipes
+
+These overlays live under `configs/diagnostics/` and can be merged with the
+normal app configs via OmegaConf `config=...` arguments.
+
+### A. Minimal eval sample capture
+
+Config overlay: `configs/diagnostics/eval_light.yaml`
+
+```yaml
+harness:
+  log_samples: true
+  limit: 5
+diagnostics:
+  enabled: true
+  collect_eval_samples: true
+  max_eval_samples_per_task: 5
+  capture_prompts: true
+  capture_generations: true
+  capture_token_ids: false
+```
+
+Exact command:
+
+```bash
+python -m apps.main.stem_eval \
+  config='[apps/main/configs/stem_eval.yaml,configs/diagnostics/eval_light.yaml]' \
+  ckpt_dir=/path/to/stem/checkpoint \
+  harness.tasks='[mbpp]' \
+  dump_dir=logs/diag_eval_light
+```
+
+Expected first artifact: `logs/diag_eval_light/diagnostics/diagnostics_eval_samples.jsonl`.
+
+### B. Full task-aligned causal code eval
+
+Config overlay: `configs/diagnostics/eval_causal_code.yaml`
+
+```yaml
+harness:
+  tasks: [mbpp, humaneval]
+  log_samples: true
+  limit: 20
+diagnostics:
+  enabled: true
+  collect_eval_samples: true
+  collect_eval_activations: true
+  collect_eval_geometry: true
+  write_layer_path_records: true
+  collect_eval_interventions: true
+  compute_per_token_delta: true
+  update_token_effectiveness: true
+  collect_code_error_taxonomy: true
+  code_tasks: [mbpp, humaneval]
+```
+
+Exact commands:
+
+```bash
+python -m apps.main.stem_eval \
+  config='[apps/main/configs/stem_eval.yaml,configs/diagnostics/eval_causal_code.yaml]' \
+  ckpt_dir=/path/to/stem/checkpoint \
+  dump_dir=logs/diag_causal_code
+
+python -m apps.main.diagnostic_dashboard \
+  --diagnostics-dir logs/diag_causal_code/diagnostics \
+  --run-id diag_causal_code \
+  --validate \
+  --print-summary
+```
+
+This produces sample records, layer-path records, task-aligned interventions,
+token-effect summaries, code-failure analysis, dashboard JSON, Markdown, and
+`diagnostics_validation.json`.
+
+### C. DAG train diagnostics
+
+Config overlay: `configs/diagnostics/train_dag_light.yaml`
+
+```yaml
+diagnostics:
+  enabled: true
+  collect_train_stats: true
+  collect_token_stats: true
+  collect_optimizer_stats: true
+  enable_backward_hooks: true
+  enable_optimizer_moment_logging: true
+  collect_interventions: false
+  path_ablation_eval_every_n_steps: 2000
+```
+
+Exact command:
+
+```bash
+torchrun --nproc-per-node=4 -m apps.main.stem_dag_train \
+  config='[apps/main/configs/stem_dag_llama3_1B.yaml,configs/diagnostics/train_dag_light.yaml]' \
+  dump_dir=logs/diag_dag_train
+```
+
+For occasional train-time prompt interventions, add:
+
+```bash
+diagnostics.collect_interventions=true \
+diagnostics.path_ablation_eval_every_n_steps=2000 \
+diagnostics.path_ablation_num_batches=1
+```
+
+### D. Rich geometry
+
+Config overlay: `configs/diagnostics/geometry_reference.yaml`
+
+```yaml
+diagnostics:
+  enabled: true
+  collect_eval_samples: true
+  collect_eval_activations: true
+  collect_eval_geometry: true
+  collect_richer_geometry: true
+  reference_checkpoint_path: null
+  reference_model_type: null
+  compute_cka: true
+  compute_svcca: false
+  max_geometry_samples_per_task: 8
+  max_geometry_tokens_per_bucket: 512
+```
+
+Without a reference checkpoint:
+
+```bash
+python -m apps.main.stem_eval \
+  config='[apps/main/configs/stem_eval.yaml,configs/diagnostics/geometry_reference.yaml]' \
+  ckpt_dir=/path/to/stem/checkpoint \
+  diagnostics.reference_checkpoint_path=null \
+  dump_dir=logs/diag_geometry
+```
+
+With a reference checkpoint:
+
+```bash
+python -m apps.main.stem_eval \
+  config='[apps/main/configs/stem_eval.yaml,configs/diagnostics/geometry_reference.yaml]' \
+  ckpt_dir=/path/to/stem/checkpoint \
+  diagnostics.reference_checkpoint_path=/path/to/baseline/checkpoint \
+  diagnostics.reference_model_type=llama \
+  dump_dir=logs/diag_geometry_ref
+```
+
+CKA/SVCCA can be expensive because the reference path loads a second model and
+runs the same sampled prompts through it. Keep `eval_layers`,
+`max_geometry_samples_per_task`, and `max_geometry_tokens_per_bucket` small.
+
+### E. Expected artifacts
+
+Full causal eval artifacts:
+
+- `diagnostics_eval_samples.jsonl`
+- `eval_sample_summary.json`
+- `eval_activation_summary.json`
+- `layer_path_metrics.jsonl`
+- `eval_geometry_summary.json`
+- `interventions_task_aligned.jsonl`
+- `eval_intervention_summary.json`
+- `token_effects.jsonl`
+- `token_effects_by_task.json`
+- `token_effects_by_role.json`
+- `path_relations_by_task_layer.json`
+- `code_failures.jsonl`
+- `code_causal_failure_analysis.json`
+- `code_failure_examples.jsonl`
+- `path_interference_dashboard.json`
+- `debuggability_report.json`
+- `diagnostics_summary.md`
+- `diagnostics_validation.json`
+
+Geometry-specific artifacts:
+
+- `geometry_layer_{L}.npz` for train geometry when `collect_geometry=true`
+- `eval_geometry_layer_{L}.npz` when `eval_geometry_save_npz=true`
+- `richer_geometry_summary.json`
+- `geometry_by_task_layer_role.json`
+- `geometry_by_frequency_bucket.json`
+- `baseline_comparison_cka.json` when `reference_checkpoint_path` is provided
+
+### F. Interpretation guide
+
+- `delta_loss = intervened_loss - original_loss`.
+- Positive STEM/up ablation delta means the ablated path was beneficial:
+  removing it increased loss.
+- Negative STEM/up ablation delta means the path was harmful:
+  removing it decreased loss.
+- `benefit_score = max(mean_stem_ablation_delta_loss, 0)`.
+- `harm_score = max(-mean_stem_ablation_delta_loss, 0)`.
+- `ineffective_score` is high when a high-count token has no positive STEM
+  benefit, using `log1p(count)/(1 + abs(mean_delta))` when `mean_delta <= 0`.
+- `cooperative`: ablating both STEM and up paths hurts.
+- `redundant`: both path deltas are close to zero.
+- `destructive_stem`: ablating STEM helps, so STEM was counterproductive.
+- `destructive_up`: ablating the up path helps, so the up path was
+  counterproductive.
+- `likely_debuggable`: dashboard rules found localized, intervention-sensitive
+  failure signals such as a small set of harmful layers/roles or helpful gate
+  forcing.
+- `possibly_architectural`: dashboard rules found broad failures, severe
+  geometry collapse/anisotropy, or no meaningful intervention improvement.
+
+### Smoke and validation
+
+Run the self-contained e2e smoke test:
+
+```bash
+python -m apps.main.diagnostics_smoke_e2e
+```
+
+Validate an existing diagnostics directory and regenerate dashboard outputs:
+
+```bash
+python -m apps.main.diagnostic_dashboard \
+  --diagnostics-dir logs/diag_causal_code/diagnostics \
+  --run-id diag_causal_code \
+  --validate
+```
 
 ## Lightweight Train-Time Diagnostics
 
@@ -360,7 +581,12 @@ torchrun --nproc-per-node=4 -m apps.main.stem_dag_train \
   diagnostics.collect_optimizer_stats=true
 ```
 
-## Eval-Time Path Ablations
+## Legacy Prompt Path Ablations
+
+This older `diagnostics.collect_interventions` path runs on validation prompts
+or fallback strings, not on exact lm-eval samples.  Prefer the task-aligned
+`collect_eval_interventions` recipe above for causal eval analysis.  This path
+is kept for backward compatibility and lightweight prompt probing.
 
 ```yaml
 diagnostics:
@@ -703,7 +929,8 @@ python -m apps.main.diagnostic_dashboard \
   --run-id my_run \
   [--output-dir path/to/out] \
   [--total-layers 32] \
-  [--print-summary]
+  [--print-summary] \
+  [--validate]
 ```
 
 `--diagnostics-dir` must point to the directory containing the JSONL / JSON
@@ -711,7 +938,10 @@ artifact files written by earlier rounds.  `--output-dir` defaults to
 `--diagnostics-dir`.  `--total-layers` is used in the B1 breadth rule to
 compute the fraction of layers that are STEM-harmful; if omitted it is
 estimated from the `layer_path_metrics.jsonl` data.  `--print-summary` prints
-the per-task verdicts to stdout.
+the per-task verdicts to stdout.  `--validate` writes
+`diagnostics_validation.json` and reports present/missing artifacts, record
+counts, tasks, intervention types, token effects, code failures, and whether the
+dashboard files were generated.
 
 ### Output files
 
@@ -720,6 +950,7 @@ the per-task verdicts to stdout.
 | `diagnostics/path_interference_dashboard.json` | Per-(task, task_group, layer, token_role) path-norm and intervention statistics |
 | `diagnostics/debuggability_report.json` | Per-task and global `DebuggabilityRecord` classifications with evidence strings |
 | `diagnostics/diagnostics_summary.md` | Human-readable Markdown summary with tables, verdict, richer-geometry warnings, and recommended experiments |
+| `diagnostics/diagnostics_validation.json` | Validation report when `--validate` is passed |
 
 ### `path_interference_dashboard.json` — key fields
 
@@ -949,6 +1180,11 @@ Common outputs:
 - `diagnostics/token_effects_by_role.json`
 - `diagnostics/path_relations_by_task_layer.json`
 - `diagnostics/geometry_layer_{L}.npz`
+- `diagnostics/diagnostics_eval_samples.jsonl`
+- `diagnostics/eval_sample_summary.json`
+- `diagnostics/eval_activation_summary.json`
+- `diagnostics/layer_path_metrics.jsonl`
+- `diagnostics/eval_geometry_summary.json`
 - `diagnostics/code_failure_analysis.json`
 - `diagnostics/code_failures.jsonl`
 - `diagnostics/code_causal_failure_analysis.json`
@@ -957,6 +1193,7 @@ Common outputs:
 - `diagnostics/path_interference_dashboard.json`  ← Round 5 dashboard
 - `diagnostics/debuggability_report.json`         ← Round 5 classifier verdicts
 - `diagnostics/diagnostics_summary.md`            ← Round 5 human-readable summary
+- `diagnostics/diagnostics_validation.json`
 - `diagnostics/richer_geometry_summary.json`
 - `diagnostics/geometry_by_task_layer_role.json`
 - `diagnostics/geometry_by_frequency_bucket.json`

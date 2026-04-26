@@ -1,0 +1,59 @@
+# Full task-aligned causal diagnostics for code evals.
+#
+# Example:
+#   python -m apps.main.stem_eval \
+#     config='[apps/main/configs/stem_eval.yaml,configs/diagnostics/eval_causal_code.yaml]' \
+#     ckpt_dir=/path/to/stem/checkpoint
+#
+# Then:
+#   python -m apps.main.diagnostic_dashboard \
+#     --diagnostics-dir <dump_dir>/diagnostics \
+#     --run-id <run_id> \
+#     --validate
+
+harness:
+  tasks: [mbpp, humaneval]
+  log_samples: true
+  limit: 20
+
+diagnostics:
+  enabled: true
+  tasks: [mbpp, humaneval]
+  rank0_only: true
+
+  collect_eval_samples: true
+  max_eval_samples_per_task: 20
+  capture_prompts: true
+  capture_generations: true
+  capture_token_ids: true
+
+  collect_eval_activations: true
+  collect_eval_geometry: true
+  eval_activation_max_samples_per_task: 20
+  eval_activation_max_tokens_per_sample: 256
+  write_layer_path_records: true
+  eval_activation_max_layer_path_records_per_sample: 64
+  eval_geometry_max_tokens_per_layer: 2048
+
+  collect_eval_interventions: true
+  intervention_max_samples_per_task: 8
+  intervention_layers: null
+  compute_per_token_delta: true
+  update_token_effectiveness: true
+  intervention_types:
+    - ablate_stem
+    - ablate_up
+    - ablate_combined
+    - ablate_layer_stem
+    - ablate_layer_up
+    - force_gate_0
+    - force_gate_0_25
+    - force_gate_0_5
+    - force_gate_0_75
+    - force_gate_1
+    - replace_stem_mean
+    - replace_up_mean
+
+  collect_code_error_taxonomy: true
+  code_tasks: [mbpp, humaneval]
+  token_topk: 50

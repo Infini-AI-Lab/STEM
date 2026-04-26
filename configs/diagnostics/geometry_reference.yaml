@@ -1,0 +1,43 @@
+# Rich geometry overlay with optional reference-checkpoint comparison.
+#
+# Example without reference:
+#   python -m apps.main.stem_eval \
+#     config='[apps/main/configs/stem_eval.yaml,configs/diagnostics/geometry_reference.yaml]' \
+#     ckpt_dir=/path/to/stem/checkpoint \
+#     diagnostics.reference_checkpoint_path=null
+#
+# Example with reference:
+#   python -m apps.main.stem_eval \
+#     config='[apps/main/configs/stem_eval.yaml,configs/diagnostics/geometry_reference.yaml]' \
+#     ckpt_dir=/path/to/stem/checkpoint \
+#     diagnostics.reference_checkpoint_path=/path/to/baseline/checkpoint \
+#     diagnostics.reference_model_type=llama
+
+harness:
+  log_samples: true
+  limit: 20
+
+diagnostics:
+  enabled: true
+  rank0_only: true
+
+  collect_eval_samples: true
+  max_eval_samples_per_task: 20
+  capture_token_ids: true
+
+  collect_eval_activations: true
+  collect_eval_geometry: true
+  eval_layers: null
+  eval_activation_max_samples_per_task: 20
+  eval_activation_max_tokens_per_sample: 256
+  eval_geometry_max_tokens_per_layer: 2048
+
+  collect_richer_geometry: true
+  reference_checkpoint_path: null
+  reference_model_type: null
+  geometry_by_token_role: true
+  geometry_by_frequency_bucket: true
+  compute_cka: true
+  compute_svcca: false
+  max_geometry_samples_per_task: 8
+  max_geometry_tokens_per_bucket: 512

@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 PATH_INTERFERENCE_DASHBOARD_JSON = "path_interference_dashboard.json"
 DEBUGGABILITY_REPORT_JSON = "debuggability_report.json"
 DIAGNOSTICS_SUMMARY_MD = "diagnostics_summary.md"
+DIAGNOSTICS_VALIDATION_JSON = "diagnostics_validation.json"
 
 # ---------------------------------------------------------------------------
 # Running-statistics accumulator (Welford / sum-of-squares)
@@ -130,7 +131,22 @@ _ARTIFACT_GEOMETRY_BY_TASK_LAYER_ROLE = "geometry_by_task_layer_role.json"
 _ARTIFACT_GEOMETRY_BY_FREQUENCY_BUCKET = "geometry_by_frequency_bucket.json"
 _ARTIFACT_BASELINE_COMPARISON_CKA = "baseline_comparison_cka.json"
 _ARTIFACT_TOKEN_EFFECTS_BY_TASK = "token_effects_by_task.json"
+_ARTIFACT_TOKEN_EFFECTS_BY_ROLE = "token_effects_by_role.json"
 _ARTIFACT_PATH_RELATIONS = "path_relations_by_task_layer.json"
+
+_REQUIRED_E2E_ARTIFACTS: Tuple[str, ...] = (
+    _ARTIFACT_EVAL_SAMPLES,
+    _ARTIFACT_LAYER_PATH_METRICS,
+    _ARTIFACT_INTERVENTIONS,
+    _ARTIFACT_TOKEN_EFFECTS,
+    _ARTIFACT_TOKEN_EFFECTS_BY_TASK,
+    _ARTIFACT_TOKEN_EFFECTS_BY_ROLE,
+    _ARTIFACT_CODE_FAILURES,
+    _ARTIFACT_CODE_CAUSAL,
+    PATH_INTERFERENCE_DASHBOARD_JSON,
+    DEBUGGABILITY_REPORT_JSON,
+    DIAGNOSTICS_SUMMARY_MD,
+)
 
 
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
@@ -166,6 +182,7 @@ class ArtifactBundle:
     geometry_by_frequency_bucket: Optional[Dict[str, Any]] = None
     baseline_comparison_cka: Optional[Dict[str, Any]] = None
     token_effects_by_task: Optional[Dict[str, Any]] = None
+    token_effects_by_role: Optional[Dict[str, Any]] = None
     path_relations: Optional[Dict[str, Any]] = None
 
     # Availability flags
@@ -202,6 +219,7 @@ class ArtifactBundle:
         bundle.geometry_by_frequency_bucket = _load_json(_ARTIFACT_GEOMETRY_BY_FREQUENCY_BUCKET)
         bundle.baseline_comparison_cka = _load_json(_ARTIFACT_BASELINE_COMPARISON_CKA)
         bundle.token_effects_by_task = _load_json(_ARTIFACT_TOKEN_EFFECTS_BY_TASK)
+        bundle.token_effects_by_role = _load_json(_ARTIFACT_TOKEN_EFFECTS_BY_ROLE)
         bundle.path_relations = _load_json(_ARTIFACT_PATH_RELATIONS)
 
         logger.info(
@@ -688,6 +706,104 @@ def build_richer_geometry_analysis(bundle: ArtifactBundle) -> Dict[str, Any]:
             "baseline_comparison_cka": bundle.available.get(_ARTIFACT_BASELINE_COMPARISON_CKA, False),
         },
     })
+
+
+# ---------------------------------------------------------------------------
+# Artifact validation
+# ---------------------------------------------------------------------------
+
+def validate_diagnostics_artifacts(
+    diagnostics_dir: "os.PathLike[str] | str",
+    *,
+    output_dir: Optional["os.PathLike[str] | str"] = None,
+    run_id: str = "unknown",
+    write_report: bool = True,
+) -> Dict[str, Any]:
+    """Validate that a diagnostics directory is usable end to end.
+
+    The validator is intentionally filesystem-only: it does not load a model or
+    rerun diagnostics.  It reports present/missing artifacts, record counts,
+    discovered tasks, intervention/token/code rows, and whether dashboard files
+    exist.  Missing files are reported instead of raising.
+    """
+    d_in = Path(diagnostics_dir)
+    d_out = Path(output_dir) if output_dir else d_in
+    bundle = ArtifactBundle.load(d_in, run_id=run_id)
+
+    artifact_paths = {
+        name: (d_out / name if name in {
+            PATH_INTERFERENCE_DASHBOARD_JSON,
+            DEBUGGABILITY_REPORT_JSON,
+            DIAGNOSTICS_SUMMARY_MD,
+        } else d_in / name)
+        for name in _REQUIRED_E2E_ARTIFACTS
+    }
+    # Optional geometry artifacts are reported separately because light runs do
+    # not need them.
+    optional_geometry = {
+        _ARTIFACT_EVAL_GEOMETRY: d_in / _ARTIFACT_EVAL_GEOMETRY,
+        _ARTIFACT_RICHER_GEOMETRY: d_in / _ARTIFACT_RICHER_GEOMETRY,
+        _ARTIFACT_GEOMETRY_BY_TASK_LAYER_ROLE: d_in / _ARTIFACT_GEOMETRY_BY_TASK_LAYER_ROLE,
+        _ARTIFACT_GEOMETRY_BY_FREQUENCY_BUCKET: d_in / _ARTIFACT_GEOMETRY_BY_FREQUENCY_BUCKET,
+        _ARTIFACT_BASELINE_COMPARISON_CKA: d_in / _ARTIFACT_BASELINE_COMPARISON_CKA,
+    }
+
+    present = sorted(name for name, path in artifact_paths.items() if path.exists())
+    missing = sorted(name for name, path in artifact_paths.items() if not path.exists())
+    optional_present = sorted(name for name, path in optional_geometry.items() if path.exists())
+    optional_missing = sorted(name for name, path in optional_geometry.items() if not path.exists())
+
+    tasks = bundle.tasks()
+    intervention_types = sorted({
+        str(row.get("intervention_type"))
+        for row in bundle.intervention_rows
+        if row.get("intervention_type")
+    })
+    path_relations = Counter(
+        str(row.get("path_relation") or (row.get("metadata") or {}).get("path_relation"))
+        for row in bundle.intervention_rows
+        if row.get("path_relation") or (row.get("metadata") or {}).get("path_relation")
+    )
+    code_categories = Counter(
+        str(row.get("failure_category"))
+        for row in bundle.code_failure_rows
+        if row.get("failure_category")
+    )
+
+    dashboard_generated = all(
+        (d_out / name).exists()
+        for name in (
+            PATH_INTERFERENCE_DASHBOARD_JSON,
+            DEBUGGABILITY_REPORT_JSON,
+            DIAGNOSTICS_SUMMARY_MD,
+        )
+    )
+    report = sanitize_for_json({
+        "run_id": run_id,
+        "diagnostics_dir": str(d_in),
+        "output_dir": str(d_out),
+        "ok": not missing and dashboard_generated,
+        "present_artifacts": present,
+        "missing_artifacts": missing,
+        "optional_geometry_present": optional_present,
+        "optional_geometry_missing": optional_missing,
+        "record_counts": {
+            "eval_samples": len(bundle.eval_sample_rows),
+            "layer_path_metrics": len(bundle.layer_path_rows),
+            "interventions": len(bundle.intervention_rows),
+            "token_effects": len(bundle.token_effect_rows),
+            "code_failures": len(bundle.code_failure_rows),
+        },
+        "tasks_found": tasks,
+        "interventions_found": intervention_types,
+        "path_relations_found": dict(path_relations),
+        "token_effects_found": len(bundle.token_effect_rows) > 0,
+        "code_failures_found": dict(code_categories),
+        "dashboard_generated": dashboard_generated,
+    })
+    if write_report:
+        write_json_atomic(d_out / DIAGNOSTICS_VALIDATION_JSON, report, rank0_only=False)
+    return report
 
 
 # ---------------------------------------------------------------------------
