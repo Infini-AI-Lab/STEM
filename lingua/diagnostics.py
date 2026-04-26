@@ -72,6 +72,21 @@ class DiagnosticsArgs:
     rank0_only: bool = True
     run_id: Optional[str] = None  # propagated into DiagnosticSampleRecord.run_id
 
+    # ------------------------------------------------------------------
+    # Eval-time activation diagnostics (Round 3: per-task, per-layer
+    # forward-only metrics on actual lm-eval samples).  All defaults are
+    # off so existing eval flows are unchanged when these are absent.
+    # ------------------------------------------------------------------
+    collect_eval_activations: bool = False
+    collect_eval_geometry: bool = False
+    eval_activation_max_samples_per_task: Optional[int] = 64
+    eval_activation_max_tokens_per_sample: int = 256
+    eval_layers: Optional[List[int]] = None
+    write_layer_path_records: bool = False
+    eval_activation_max_layer_path_records_per_sample: int = 64
+    eval_geometry_max_tokens_per_layer: int = 4096
+    eval_geometry_save_npz: bool = False
+
 
 def _as_local_tensor(x: Any) -> Optional[torch.Tensor]:
     if x is None:
@@ -275,6 +290,28 @@ def _iter_stem_layers(model: torch.nn.Module, layers: Optional[List[int]] = None
             yield idx, layer
 
 
+def _iter_all_ffn_layers(
+    model: torch.nn.Module,
+    layers: Optional[List[int]] = None,
+) -> Iterator[Tuple[int, torch.nn.Module]]:
+    """Iterate every block with a ``feed_forward`` attribute.
+
+    Unlike :func:`_iter_stem_layers` this does not gate on STEM-specific
+    attributes, so plain transformer blocks can also be tracked when the
+    caller explicitly opts in via ``layers``.  Used by eval-mode activation
+    diagnostics so plain dense FFNs can be measured alongside STEM blocks.
+    """
+    lm = getattr(model, "lm_transformer", model)
+    layer_modules = getattr(lm, "layers", [])
+    allowed = set(layers) if layers is not None else None
+    for idx, layer in enumerate(layer_modules):
+        if allowed is not None and idx not in allowed:
+            continue
+        ff = getattr(layer, "feed_forward", None)
+        if ff is not None:
+            yield idx, layer
+
+
 def _stem_embedding_for_layer(model: torch.nn.Module, layer_idx: int) -> Optional[torch.nn.Module]:
     if not hasattr(model, "stem_embeddings"):
         return None
@@ -399,6 +436,27 @@ class TokenStatsAggregator:
 
 
 class StemDiagnosticsCollector:
+    """Hook-based diagnostics for STEM / DAG / plain FFNs.
+
+    Two modes are supported:
+
+    * ``mode="train"`` (default): unchanged historical behaviour.  Forward
+      and (optionally) backward hooks accumulate streaming stats and feed
+      :func:`scalar_metrics` / :func:`write_artifacts`.  Optimizer state
+      can be sampled via :func:`collect_param_metrics`.
+    * ``mode="eval"``: forward-only.  No backward hooks, no optimizer
+      probing, no training mutation.  Per-task / per-layer / per-role
+      streaming aggregates are accumulated and detailed
+      :class:`LayerPathMetricRecord`s can optionally be written.  Use
+      :meth:`set_sample_context` before each forward, then call
+      :meth:`flush_sample` after.
+
+    Switching mode happens at construction time; ``register()`` always
+    consults the chosen mode.
+    """
+
+    VALID_MODES = ("train", "eval")
+
     def __init__(
         self,
         model: torch.nn.Module,
@@ -406,10 +464,16 @@ class StemDiagnosticsCollector:
         *,
         output_dir: Optional[Path] = None,
         prefix: str = "diag/train",
+        mode: str = "train",
+        run_id: Optional[str] = None,
     ) -> None:
+        if mode not in self.VALID_MODES:
+            raise ValueError(f"mode must be one of {self.VALID_MODES}; got {mode!r}")
         self.model = model
         self.args = args
+        self.mode = mode
         self.prefix = prefix
+        self.run_id = run_id or getattr(args, "run_id", None) or "run"
         self.output_dir = Path(output_dir or args.output_dir or "diagnostics")
         self.handles: List[Any] = []
         self.stats: Dict[str, OnlineStats] = defaultdict(OnlineStats)
@@ -426,9 +490,49 @@ class StemDiagnosticsCollector:
         self._active = False
         self._raw_samples: List[Dict[str, Any]] = []
 
+        # ------------------------------------------------------------------
+        # Eval-mode state.  Always present for simplicity but only populated
+        # when self.mode == "eval".  Per-task aggregation is keyed on
+        # ``(task, layer_idx, metric_name)`` so we can emit a compact
+        # per-task summary at the end of eval.  Role-bucketed aggregation
+        # mirrors that with an extra ``role`` axis.
+        # ------------------------------------------------------------------
+        self.current_sample_id: Optional[str] = None
+        self.current_task_group: Optional[str] = None
+        self.current_token_ids_list: Optional[List[int]] = None
+        self.current_tokens_list: Optional[List[str]] = None
+        self.current_token_roles: Optional[List[str]] = None
+        self.current_sample_records: List[Any] = []  # LayerPathMetricRecord
+
+        self.eval_task_layer_stats: Dict[str, Dict[int, Dict[str, OnlineStats]]] = (
+            defaultdict(lambda: defaultdict(lambda: defaultdict(OnlineStats)))
+        )
+        self.eval_task_layer_role_stats: Dict[
+            str, Dict[int, Dict[str, Dict[str, OnlineStats]]]
+        ] = defaultdict(
+            lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(OnlineStats)))
+        )
+        self.eval_task_layer_geometry: Dict[
+            str, Dict[int, Dict[str, TensorReservoir]]
+        ] = defaultdict(
+            lambda: defaultdict(
+                lambda: {
+                    "stem": TensorReservoir(args.eval_geometry_max_tokens_per_layer),
+                    "dense": TensorReservoir(args.eval_geometry_max_tokens_per_layer),
+                }
+            )
+        )
+        # Counts of samples seen per task — drives the per-task sample cap.
+        self.eval_task_sample_counts: Dict[str, int] = defaultdict(int)
+        self.eval_task_layer_path_records_written: int = 0
+
     @property
     def enabled(self) -> bool:
         return bool(self.args.enabled)
+
+    @property
+    def is_eval_mode(self) -> bool:
+        return self.mode == "eval"
 
     def __enter__(self) -> "StemDiagnosticsCollector":
         if self.enabled:
@@ -439,7 +543,21 @@ class StemDiagnosticsCollector:
         self.close()
 
     def register(self) -> None:
+        """Register hooks.
+
+        In eval mode we deliberately register *only* forward hooks: no
+        backward hooks, no parameter grad hooks, no optimizer touch points.
+        The set of layers is determined by ``args.eval_layers`` in eval
+        mode, falling back to ``args.layers``.
+        """
         if self.handles or not self.enabled:
+            return
+        if self.is_eval_mode:
+            layers_arg = self.args.eval_layers if self.args.eval_layers is not None else self.args.layers
+            iterator = _iter_all_ffn_layers(self.model, layers_arg)
+            for layer_idx, layer in iterator:
+                ff = layer.feed_forward
+                self.handles.append(ff.register_forward_hook(self._make_ffn_hook(layer_idx)))
             return
         for layer_idx, layer in _iter_stem_layers(self.model, self.args.layers):
             ff = layer.feed_forward
@@ -532,13 +650,35 @@ class StemDiagnosticsCollector:
                 alpha_sig = None
                 if hasattr(module, "alpha"):
                     alpha_sig = torch.sigmoid(_as_local_tensor(module.alpha)).detach().float()
-                    self.stats[f"layer_{layer_idx}/alpha_sigmoid"].update(alpha_sig)
+                    if not self.is_eval_mode:
+                        self.stats[f"layer_{layer_idx}/alpha_sigmoid"].update(alpha_sig)
                     if x3 is not None and y is not None:
                         up = (1.0 - alpha_sig.to(x3.device).to(x3.dtype)) * x3 + alpha_sig.to(y.device).to(y.dtype) * y
+                    elif x3 is not None and y is None:
+                        # Sigmoid-gated DAG eval where the stem path was not
+                        # provided (e.g. plain LM forward without stem_embeddings_fn).
+                        up = (1.0 - alpha_sig.to(x3.device).to(x3.dtype)) * x3
+                if up is None and x3 is not None:
+                    # Plain dense FFN with no stem path: combined == dense up.
+                    up = x3
                 if up is not None:
                     out2 = module.w2(act * up)
                 else:
                     out2 = _as_local_tensor(output)
+
+                if self.is_eval_mode:
+                    self._eval_record_layer(
+                        layer_idx,
+                        x=xf,
+                        y=y,
+                        x3=x3,
+                        up=up,
+                        out2=out2,
+                        x1=x1,
+                        act=act,
+                        alpha_sig=alpha_sig,
+                    )
+                    return None
 
                 stem_norm = _safe_norm(y)
                 up_norm = _safe_norm(x3)
@@ -573,6 +713,250 @@ class StemDiagnosticsCollector:
                     )
             return None
         return hook
+
+    # ------------------------------------------------------------------
+    # Eval-mode helpers
+    # ------------------------------------------------------------------
+
+    def set_sample_context(
+        self,
+        *,
+        task: str,
+        sample_id: str,
+        task_group: Optional[str] = None,
+        token_ids: Optional[List[int]] = None,
+        tokens: Optional[List[str]] = None,
+        token_roles: Optional[List[str]] = None,
+    ) -> None:
+        """Bind the next forward pass to a specific lm-eval sample.
+
+        Must be called from eval mode.  After the forward, call
+        :meth:`flush_sample` to emit the per-sample detailed records (if
+        enabled) and increment the per-task sample counter.
+        """
+        if not self.is_eval_mode:
+            raise RuntimeError("set_sample_context only valid in eval mode")
+        # Reset all sample-level state up front so a skipped sample does
+        # not leak the previous sample's task / id into ``flush_sample``.
+        self.current_task = None
+        self.current_sample_id = None
+        self.current_task_group = None
+        self.current_token_ids_list = None
+        self.current_tokens_list = None
+        self.current_token_roles = None
+        self.current_sample_records = []
+
+        cap = self.args.eval_activation_max_samples_per_task
+        if cap is not None and self.eval_task_sample_counts.get(task, 0) >= cap:
+            self._active = False
+            return
+        self.current_task = task
+        self.current_sample_id = sample_id
+        self.current_task_group = task_group
+        self.current_token_ids_list = token_ids
+        self.current_tokens_list = tokens
+        self.current_token_roles = token_roles
+        self._active = True
+
+    @staticmethod
+    def _flatten_per_token(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if t is None:
+            return None
+        if t.ndim < 2:
+            return None
+        return t.detach().float().reshape(-1, t.shape[-1])
+
+    def _per_token_norms(self, t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        flat = self._flatten_per_token(t)
+        if flat is None or flat.numel() == 0:
+            return None
+        return flat.norm(dim=-1).cpu()
+
+    def _eval_record_layer(
+        self,
+        layer_idx: int,
+        *,
+        x: Optional[torch.Tensor],
+        y: Optional[torch.Tensor],
+        x3: Optional[torch.Tensor],
+        up: Optional[torch.Tensor],
+        out2: Optional[torch.Tensor],
+        x1: Optional[torch.Tensor],
+        act: Optional[torch.Tensor],
+        alpha_sig: Optional[torch.Tensor],
+    ) -> None:
+        """Update per-task / per-layer streaming aggregates."""
+        from lingua.diagnostic_records import LayerPathMetricRecord  # lazy
+
+        if self.current_task is None or self.current_sample_id is None:
+            return
+        task = self.current_task
+        # Cap tokens per sample by sub-sampling positions consistently across
+        # all per-token tensors so role/index alignment is preserved.
+        max_tokens = max(1, int(self.args.eval_activation_max_tokens_per_sample))
+
+        per_token = {
+            "stem_norm": self._per_token_norms(y),
+            "up_norm": self._per_token_norms(x3),
+            "combined_norm": self._per_token_norms(up),
+            "ffn_out_norm": self._per_token_norms(out2),
+            "w1_act_norm": self._per_token_norms(x1),
+            "silu_act_norm": self._per_token_norms(act),
+        }
+        # Pairwise stem/up cosine, per token.
+        cos_per_token: Optional[torch.Tensor] = None
+        flat_y = self._flatten_per_token(y)
+        flat_x3 = self._flatten_per_token(x3)
+        if flat_y is not None and flat_x3 is not None and flat_y.shape == flat_x3.shape:
+            cos_per_token = F.cosine_similarity(flat_y, flat_x3, dim=-1, eps=1e-8).cpu()
+        per_token["stem_up_cos"] = cos_per_token
+
+        # Determine number of positions and sub-sample indices.
+        n_pos = 0
+        for v in per_token.values():
+            if v is not None:
+                n_pos = max(n_pos, int(v.shape[0]))
+                break
+        if n_pos == 0:
+            n_pos = self._flatten_per_token(x).shape[0] if self._flatten_per_token(x) is not None else 0
+        if n_pos == 0:
+            return
+        if n_pos > max_tokens:
+            sample_idx = torch.linspace(0, n_pos - 1, max_tokens).long()
+        else:
+            sample_idx = torch.arange(n_pos)
+        sub: Dict[str, Optional[torch.Tensor]] = {}
+        for name, vals in per_token.items():
+            if vals is None:
+                sub[name] = None
+            else:
+                v = vals
+                if v.shape[0] != n_pos:
+                    # Length mismatch (e.g. some tensors broadcast to a different
+                    # shape).  Skip alignment-dependent metrics in that case.
+                    sub[name] = None
+                else:
+                    sub[name] = v.index_select(0, sample_idx)
+
+        layer_stats = self.eval_task_layer_stats[task][layer_idx]
+        token_count_added = 0
+        for name, vals in sub.items():
+            if vals is None:
+                continue
+            layer_stats[name].update(vals)
+            token_count_added = max(token_count_added, int(vals.numel()))
+        if alpha_sig is not None:
+            try:
+                alpha_val = float(alpha_sig.detach().float().mean().item())
+            except Exception:
+                alpha_val = None
+            if alpha_val is not None and math.isfinite(alpha_val):
+                layer_stats["gate_alpha"].update(float(alpha_val))
+        # Track token_count separately for visibility (e.g. for debugging
+        # when a layer received 0 positions).
+        if token_count_added > 0:
+            layer_stats["token_count"].update(float(token_count_added))
+
+        # Role-bucketed stats.
+        roles = self.current_token_roles
+        if roles is not None and len(roles) >= n_pos:
+            sampled_roles = [roles[i] for i in sample_idx.tolist()]
+            for name, vals in sub.items():
+                if vals is None:
+                    continue
+                vals_list = vals.tolist()
+                for role, v in zip(sampled_roles, vals_list):
+                    self.eval_task_layer_role_stats[task][layer_idx][role][name].update(float(v))
+
+        # Geometry reservoirs (stem and dense).
+        if self.args.collect_eval_geometry:
+            geo = self.eval_task_layer_geometry[task][layer_idx]
+            if y is not None:
+                geo["stem"].add(y)
+            if x3 is not None:
+                geo["dense"].add(x3)
+
+        # Detailed per-position records (optional).
+        if self.args.write_layer_path_records:
+            cap_records = max(1, int(self.args.eval_activation_max_layer_path_records_per_sample))
+            tok_ids = self.current_token_ids_list or []
+            tok_strs = self.current_tokens_list or []
+            tok_roles = self.current_token_roles or []
+            # Cap the number of detailed records we emit per sample/layer.
+            record_idx = sample_idx[:cap_records].tolist()
+            for pos_idx in record_idx:
+                pos = int(pos_idx)
+                rec = LayerPathMetricRecord(
+                    run_id=self.run_id,
+                    task=task,
+                    sample_id=self.current_sample_id,
+                    layer_idx=int(layer_idx),
+                    token_position=pos,
+                    token_id=int(tok_ids[pos]) if pos < len(tok_ids) else None,
+                    token=tok_strs[pos] if pos < len(tok_strs) else None,
+                    token_role=tok_roles[pos] if pos < len(tok_roles) else None,
+                    stem_norm=self._opt_at(sub.get("stem_norm"), pos, sample_idx),
+                    up_norm=self._opt_at(sub.get("up_norm"), pos, sample_idx),
+                    combined_norm=self._opt_at(sub.get("combined_norm"), pos, sample_idx),
+                    stem_up_cos=self._opt_at(sub.get("stem_up_cos"), pos, sample_idx),
+                    ffn_out_norm=self._opt_at(sub.get("ffn_out_norm"), pos, sample_idx),
+                    gate_alpha=float(alpha_sig.detach().float().mean().item()) if alpha_sig is not None else None,
+                    w1_act_norm=self._opt_at(sub.get("w1_act_norm"), pos, sample_idx),
+                    silu_act_norm=self._opt_at(sub.get("silu_act_norm"), pos, sample_idx),
+                    metadata={
+                        "task_group": self.current_task_group,
+                    },
+                )
+                self.current_sample_records.append(rec)
+
+    @staticmethod
+    def _opt_at(vals: Optional[torch.Tensor], pos: int, sample_idx: torch.Tensor) -> Optional[float]:
+        """Look up the value for absolute position *pos* in a sub-sampled tensor.
+
+        ``sample_idx`` carries the original positions so we map *pos* back
+        to its location in the sub-sampled tensor.
+        """
+        if vals is None:
+            return None
+        # sample_idx is sorted ascending; find the index where it equals pos.
+        try:
+            offsets = (sample_idx == pos).nonzero(as_tuple=False)
+        except Exception:
+            return None
+        if offsets.numel() == 0:
+            return None
+        idx = int(offsets[0].item())
+        if idx >= int(vals.shape[0]):
+            return None
+        v = float(vals[idx].item())
+        return v if math.isfinite(v) else None
+
+    def flush_sample(self) -> List[Any]:
+        """Finalise the in-flight sample and return any detailed records.
+
+        Returns the list of :class:`LayerPathMetricRecord` accumulated for
+        this sample.  Callers should write them to a JSONL file (we do not
+        write here so that all IO can be batched centrally).  The per-task
+        sample counter is incremented exactly once per ``set_sample_context``
+        / ``flush_sample`` pair.
+        """
+        if not self.is_eval_mode:
+            return []
+        records = list(self.current_sample_records)
+        # Only count the sample if the forward actually ran (``_active``
+        # was set true by ``set_sample_context``).  Skipped samples leave
+        # the per-task counter alone so retries / re-attempts are safe.
+        if self._active and self.current_task is not None:
+            self.eval_task_sample_counts[self.current_task] += 1
+        self.current_sample_records = []
+        self.current_sample_id = None
+        self.current_task = None
+        self.current_task_group = None
+        self.current_token_ids_list = None
+        self.current_tokens_list = None
+        self.current_token_roles = None
+        self._active = False
+        return records
 
     def collect_param_metrics(self, optimizers: Optional[Any] = None) -> Dict[str, float]:
         if not self.enabled:
@@ -671,6 +1055,248 @@ class StemDiagnosticsCollector:
             if exp_avg_sq_norms:
                 out[f"{self.prefix}/optim/{opt_name}_adam_m2_norm_mean"] = _finite(float(torch.stack(exp_avg_sq_norms).mean().item()))
         return out
+
+    # ------------------------------------------------------------------
+    # Eval-mode aggregation outputs
+    # ------------------------------------------------------------------
+
+    # Compact per-layer metric names emitted into the metrics logger.
+    EVAL_SCALAR_KEYS: Tuple[str, ...] = (
+        "stem_norm",
+        "up_norm",
+        "combined_norm",
+        "stem_up_cos",
+        "ffn_out_norm",
+        "gate_alpha",
+        "w1_act_norm",
+        "silu_act_norm",
+    )
+
+    def eval_scalar_metrics(self) -> Dict[str, float]:
+        """Return compact metrics suitable for the metrics-logger JSONL.
+
+        Keys follow the convention::
+
+            diag/eval/{task}/layer_{L}/{metric}_mean
+            diag/eval/{task}/layer_{L}/gate_alpha_std
+            diag/eval/global/layer_{L}/{metric}_mean
+
+        ``effective_rank`` is added under the per-task / global layer key
+        when geometry is enabled.
+        """
+        if not self.is_eval_mode or not self.enabled:
+            return {}
+        out: Dict[str, float] = {}
+        # Per-task per-layer.
+        for task, by_layer in self.eval_task_layer_stats.items():
+            for layer_idx, metrics in by_layer.items():
+                for name, stats in metrics.items():
+                    if stats.count == 0:
+                        continue
+                    out[f"diag/eval/{task}/layer_{layer_idx}/{name}_mean"] = _finite(stats.mean)
+                    if name == "gate_alpha":
+                        var = stats.m2 / max(1, stats.count - 1)
+                        out[f"diag/eval/{task}/layer_{layer_idx}/gate_alpha_std"] = _finite(
+                            math.sqrt(max(var, 0.0))
+                        )
+        # Global aggregate across tasks (mean of per-task means).
+        global_by_layer: Dict[int, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+        for task, by_layer in self.eval_task_layer_stats.items():
+            for layer_idx, metrics in by_layer.items():
+                for name, stats in metrics.items():
+                    if stats.count == 0:
+                        continue
+                    global_by_layer[layer_idx][name].append(stats.mean)
+        for layer_idx, by_name in global_by_layer.items():
+            for name, vals in by_name.items():
+                if not vals:
+                    continue
+                m = float(sum(vals) / len(vals))
+                out[f"diag/eval/global/layer_{layer_idx}/{name}_mean"] = _finite(m)
+        # Geometry-derived scalars.
+        if self.args.collect_eval_geometry:
+            geo_metrics = self.eval_geometry_summary().get("scalar_metrics", {})
+            out.update(geo_metrics)
+        return out
+
+    def eval_summary_dict(self) -> Dict[str, Any]:
+        """Return a dict suitable for ``eval_activation_summary.json``."""
+        if not self.is_eval_mode:
+            return {}
+        per_task: Dict[str, Any] = {}
+        for task, by_layer in self.eval_task_layer_stats.items():
+            task_entry: Dict[str, Any] = {
+                "task_layers": {},
+                "samples_seen": int(self.eval_task_sample_counts.get(task, 0)),
+            }
+            for layer_idx, metrics in by_layer.items():
+                layer_entry: Dict[str, Any] = {}
+                for name, stats in metrics.items():
+                    if stats.count == 0:
+                        continue
+                    var = stats.m2 / max(1, stats.count - 1)
+                    layer_entry[f"{name}_mean"] = _finite(stats.mean)
+                    layer_entry[f"{name}_std"] = _finite(math.sqrt(max(var, 0.0)))
+                    layer_entry[f"{name}_count"] = int(stats.count)
+                # Role-bucketed sub-aggregates.
+                role_entry: Dict[str, Any] = {}
+                for role, role_metrics in self.eval_task_layer_role_stats.get(task, {}).get(layer_idx, {}).items():
+                    role_dict: Dict[str, Any] = {}
+                    for rname, rstats in role_metrics.items():
+                        if rstats.count == 0:
+                            continue
+                        role_dict[f"{rname}_mean"] = _finite(rstats.mean)
+                        role_dict[f"{rname}_count"] = int(rstats.count)
+                    if role_dict:
+                        role_entry[role] = role_dict
+                if role_entry:
+                    layer_entry["by_role"] = role_entry
+                if layer_entry:
+                    task_entry["task_layers"][str(int(layer_idx))] = layer_entry
+            per_task[task] = task_entry
+        out = {
+            "run_id": self.run_id,
+            "mode": self.mode,
+            "per_task": per_task,
+            "scalar_metrics": self.eval_scalar_metrics(),
+        }
+        if self.args.collect_eval_geometry:
+            out["geometry"] = self.eval_geometry_summary().get("per_task_layer", {})
+        return out
+
+    def eval_geometry_summary(self) -> Dict[str, Any]:
+        """Compute geometry metrics from per-task / per-layer reservoirs.
+
+        Returns a dict with two top-level keys: ``per_task_layer`` (rich
+        per-cell measurements suitable for JSON dump) and ``scalar_metrics``
+        (compact key/value pairs for the metrics logger).
+        """
+        if not self.is_eval_mode:
+            return {}
+        per_task_layer: Dict[str, Dict[str, Any]] = {}
+        scalar_metrics: Dict[str, float] = {}
+        # Aggregate dense up-path mean / top PC across tasks for the
+        # alignment metrics on stem-only blocks.
+        global_dense_mean: Dict[int, torch.Tensor] = {}
+        global_dense_pc: Dict[int, torch.Tensor] = {}
+        for task, by_layer in self.eval_task_layer_geometry.items():
+            for layer_idx, reservoirs in by_layer.items():
+                dense = reservoirs["dense"].tensor()
+                if dense is not None and dense.shape[0] >= 2:
+                    centroid = dense.mean(dim=0, keepdim=True)
+                    global_dense_mean[layer_idx] = centroid.squeeze(0)
+                    try:
+                        _, _, vh = torch.linalg.svd(dense - centroid, full_matrices=False)
+                        global_dense_pc[layer_idx] = vh[0]
+                    except RuntimeError:
+                        pass
+        for task, by_layer in self.eval_task_layer_geometry.items():
+            per_layer: Dict[str, Any] = {}
+            for layer_idx, reservoirs in by_layer.items():
+                stem = reservoirs["stem"].tensor()
+                dense = reservoirs["dense"].tensor()
+                cell: Dict[str, Any] = {}
+                if stem is not None and stem.shape[0] >= 2:
+                    geo = geometry_summary(stem, var_frac=self.args.geometry_var_frac, compare_to=dense)
+                    for k, v in geo.items():
+                        cell[f"stem_{k}"] = v
+                    if "effective_rank" in geo:
+                        scalar_metrics[
+                            f"diag/eval/{task}/layer_{layer_idx}/effective_rank"
+                        ] = _finite(float(geo["effective_rank"]))
+                if dense is not None and dense.shape[0] >= 2:
+                    geo = geometry_summary(dense, var_frac=self.args.geometry_var_frac)
+                    for k, v in geo.items():
+                        cell[f"dense_{k}"] = v
+                # Alignment to *global* dense up-path mean / PC if available.
+                if stem is not None and stem.shape[0] >= 1:
+                    centroid = stem.mean(dim=0)
+                    if layer_idx in global_dense_mean:
+                        cos = F.cosine_similarity(
+                            centroid.unsqueeze(0),
+                            global_dense_mean[layer_idx].unsqueeze(0),
+                            dim=-1,
+                            eps=1e-8,
+                        )
+                        cell["alignment_with_global_dense_mean"] = _finite(float(cos.item()))
+                    if layer_idx in global_dense_pc:
+                        cos = F.cosine_similarity(
+                            stem,
+                            global_dense_pc[layer_idx].unsqueeze(0).expand_as(stem),
+                            dim=-1,
+                            eps=1e-8,
+                        ).abs().mean()
+                        cell["alignment_with_global_dense_top_pc"] = _finite(float(cos.item()))
+                if cell:
+                    per_layer[str(int(layer_idx))] = cell
+            if per_layer:
+                per_task_layer[task] = per_layer
+        return {"per_task_layer": per_task_layer, "scalar_metrics": scalar_metrics}
+
+    def write_eval_artifacts(
+        self,
+        *,
+        output_dir: Optional[Path] = None,
+        layer_path_records: Optional[List[Any]] = None,
+    ) -> Dict[str, Any]:
+        """Write eval-mode artifacts to disk and return the summary dict.
+
+        Always rank-0 only (delegates to :func:`append_jsonl` /
+        :func:`write_json_atomic` which gate on rank).  When
+        ``layer_path_records`` is provided it is appended to
+        ``layer_path_metrics.jsonl``; otherwise the caller is assumed to
+        have streamed them already.
+        """
+        from lingua.diagnostic_records import (  # lazy
+            append_jsonl,
+            write_json_atomic,
+        )
+
+        if not self.is_eval_mode or not self.enabled:
+            return {}
+        out_dir = Path(output_dir) if output_dir is not None else self.output_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        summary = self.eval_summary_dict()
+        write_json_atomic(out_dir / "eval_activation_summary.json", summary)
+
+        if self.args.write_layer_path_records and layer_path_records:
+            append_jsonl(
+                out_dir / "layer_path_metrics.jsonl",
+                layer_path_records,
+                rank0_only=True,
+            )
+
+        if self.args.collect_eval_geometry:
+            geo = self.eval_geometry_summary()
+            if geo.get("per_task_layer"):
+                write_json_atomic(out_dir / "eval_geometry_summary.json", geo)
+            if self.args.eval_geometry_save_npz:
+                try:
+                    import numpy as np  # type: ignore
+                    # Aggregate per-layer across tasks (concatenate samples).
+                    per_layer: Dict[int, Dict[str, List[torch.Tensor]]] = defaultdict(
+                        lambda: {"stem": [], "dense": []}
+                    )
+                    for _task, by_layer in self.eval_task_layer_geometry.items():
+                        for layer_idx, reservoirs in by_layer.items():
+                            for path_name in ("stem", "dense"):
+                                t = reservoirs[path_name].tensor()
+                                if t is not None:
+                                    per_layer[layer_idx][path_name].append(t)
+                    for layer_idx, paths in per_layer.items():
+                        arrays: Dict[str, Any] = {}
+                        for path_name, chunks in paths.items():
+                            if chunks:
+                                arrays[path_name] = torch.cat(chunks, dim=0).cpu().numpy()
+                        if arrays:
+                            np.savez(
+                                out_dir / f"eval_geometry_layer_{layer_idx}.npz",
+                                **arrays,
+                            )
+                except Exception:
+                    pass
+        return summary
 
     def scalar_metrics(self) -> Dict[str, float]:
         if not self.enabled:

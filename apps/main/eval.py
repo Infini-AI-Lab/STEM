@@ -34,6 +34,7 @@ from lingua.diagnostics import (
     write_intervention_rows,
 )
 from lingua.eval_sample_capture import capture_eval_samples
+from lingua.eval_activations import capture_eval_activations
 from lingua.distributed import (
     DistributedArgs,
     dist_mean_dict,
@@ -357,6 +358,33 @@ def launch_eval(cfg: EvalArgs):
         except Exception as e:
             logger.warning(f"Eval sample capture failed (non-fatal): {e}")
 
+    eval_activation_summary: Dict[str, Any] = {}
+    if (
+        cfg.diagnostics.enabled
+        and cfg.diagnostics.collect_eval_activations
+        and results is not None
+    ):
+        run_id = cfg.diagnostics.run_id or cfg.name
+        try:
+            eval_activation_summary = capture_eval_activations(
+                model=model,
+                tokenizer=tokenizer,
+                results=results,
+                args=cfg.diagnostics,
+                output_dir=diag_dir,
+                run_id=run_id,
+                rank=get_global_rank(),
+            ) or {}
+            scalar_metrics = (
+                eval_activation_summary.get("scalar_metrics", {})
+                if isinstance(eval_activation_summary, dict)
+                else {}
+            )
+            if isinstance(scalar_metrics, dict):
+                eval_diag_metrics.update(scalar_metrics)
+        except Exception as e:
+            logger.warning(f"Eval activation capture failed (non-fatal): {e}")
+
     if get_global_rank() == 0:
         with open(Path(cfg.dump_dir) / "results.json", "w") as f:
             # Filter out non-serializable keys (configs contains function objects)
@@ -373,7 +401,8 @@ def launch_eval(cfg: EvalArgs):
                 f.write(json.dumps({
                     "metrics": eval_diag_metrics,
                     "code_failure_analysis": code_summary,
-                }, indent=2))
+                    "eval_activation_summary": eval_activation_summary,
+                }, indent=2, default=str))
         if val_results is not None:
             with open(Path(cfg.dump_dir) / "validation.json", "w") as f:
                 f.write(json.dumps(val_results))

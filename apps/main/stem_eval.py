@@ -33,6 +33,7 @@ from lingua.diagnostics import (
     write_intervention_rows,
 )
 from lingua.eval_sample_capture import capture_eval_samples
+from lingua.eval_activations import capture_eval_activations
 from lingua.distributed import (
     DistributedArgs,
     dist_mean_dict,
@@ -519,6 +520,40 @@ def launch_stem_eval(cfg: StemEvalArgs):
             except Exception as e:
                 logger.warning(f"Eval sample capture failed (non-fatal): {e}")
 
+    # Eval-time activation diagnostics.  We rerun forward passes only on
+    # MP-rank 0 of each DP group; non-zero MP ranks would replay identical
+    # work and corrupt the per-task aggregation.  When ``rank0_only`` is
+    # True we additionally skip non-zero DP ranks.
+    eval_activation_summary: Dict[str, Any] = {}
+    if (
+        cfg.diagnostics.enabled
+        and cfg.diagnostics.collect_eval_activations
+        and results is not None
+    ):
+        from lingua.stem_dist_utils import get_stem_model_parallel_rank
+        mp_rank = get_stem_model_parallel_rank() if is_stem_initialized() else 0
+        if mp_rank == 0:
+            run_id = cfg.diagnostics.run_id or cfg.name
+            try:
+                eval_activation_summary = capture_eval_activations(
+                    model=model,
+                    tokenizer=tokenizer,
+                    results=results,
+                    args=cfg.diagnostics,
+                    output_dir=diag_dir,
+                    run_id=run_id,
+                    rank=dp_rank,
+                ) or {}
+                scalar_metrics = (
+                    eval_activation_summary.get("scalar_metrics", {})
+                    if isinstance(eval_activation_summary, dict)
+                    else {}
+                )
+                if isinstance(scalar_metrics, dict):
+                    eval_diag_metrics.update(scalar_metrics)
+            except Exception as e:
+                logger.warning(f"Eval activation capture failed (non-fatal): {e}")
+
     # -- Gather and merge harness results across DP groups --
     if _has_dp_peers and results is not None:
         safe_gather_keys = ['results', 'versions', 'n-shot', 'higher_is_better',
@@ -555,7 +590,8 @@ def launch_stem_eval(cfg: StemEvalArgs):
                 f.write(json.dumps({
                     "metrics": eval_diag_metrics,
                     "code_failure_analysis": code_summary,
-                }, indent=2))
+                    "eval_activation_summary": eval_activation_summary,
+                }, indent=2, default=str))
         if val_results is not None:
             with open(Path(cfg.dump_dir) / "validation.json", "w") as f:
                 f.write(json.dumps(val_results))
