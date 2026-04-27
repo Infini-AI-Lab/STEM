@@ -615,6 +615,109 @@ def test_run_code_causal_analysis_no_samples_file():
 
 
 # ---------------------------------------------------------------------------
+# generate_until grouping logic (unit-tests the exact logic ported to stem_eval)
+# ---------------------------------------------------------------------------
+
+def _group_by_gen_args(prompts, gen_args_list):
+    """Pure-Python replica of stem_eval.EvalHarnessLM.generate_until grouping."""
+    from collections import OrderedDict
+    groups = OrderedDict()
+    for i, (prompt, ga) in enumerate(zip(prompts, gen_args_list)):
+        key = tuple(sorted(
+            ((k, tuple(v) if isinstance(v, list) else v) for k, v in ga.items()),
+            key=lambda x: x[0],
+        ))
+        if key not in groups:
+            groups[key] = (ga, [])
+        groups[key][1].append((i, prompt))
+    return groups
+
+
+def _simulate_generate_until(prompts, gen_args_list):
+    """Simulate the new generate_until: group, process, re-assemble."""
+    groups = _group_by_gen_args(prompts, gen_args_list)
+    results = [None] * len(prompts)
+    for _key, (ga, indexed_prompts) in groups.items():
+        until = ga.get("until", [])
+        for orig_idx, prompt in indexed_prompts:
+            g = f"GEN:{prompt}"
+            for e in until:
+                g = g.replace(e, "")
+            results[orig_idx] = g
+    return results
+
+
+def test_generate_until_uniform_gen_args():
+    """Single gen_args (pre-existing behaviour) still works."""
+    ga = {"until": ["STOP"], "temperature": 0.0}
+    prompts = ["p1", "p2", "p3"]
+    results = _simulate_generate_until(prompts, [ga, ga, ga])
+    assert results == ["GEN:p1", "GEN:p2", "GEN:p3"]
+
+
+def test_generate_until_mixed_gen_args_mbpp_humaneval():
+    """Mixed MBPP+HumanEval gen_args — was the failing case."""
+    mbpp_ga  = {"until": ["MBPP_STOP"],  "temperature": 0.0}
+    heval_ga = {"until": ["HEVAL_STOP"], "temperature": 0.0}
+    prompts = ["m1", "h1", "m2", "h2", "m3"]
+    gen_args = [mbpp_ga, heval_ga, mbpp_ga, heval_ga, mbpp_ga]
+    results = _simulate_generate_until(prompts, gen_args)
+    # Original order preserved
+    assert results[0] == "GEN:m1"
+    assert results[1] == "GEN:h1"
+    assert results[2] == "GEN:m2"
+    assert results[3] == "GEN:h2"
+    assert results[4] == "GEN:m3"
+
+
+def test_generate_until_stop_tokens_stripped():
+    """Stop tokens from each group's gen_args are stripped from results."""
+    mbpp_ga  = {"until": ["MBPP"], "temperature": 0.0}
+    heval_ga = {"until": ["HEVAL"], "temperature": 0.0}
+    prompts     = ["hello MBPP world", "hello HEVAL world"]
+    gen_args    = [mbpp_ga, heval_ga]
+    results     = _simulate_generate_until(prompts, gen_args)
+    assert "MBPP"  not in results[0]
+    assert "HEVAL" not in results[1]
+    assert "hello" in results[0]
+    assert "hello" in results[1]
+
+
+def test_generate_until_grouping_key_list_values():
+    """gen_args with list values (the typical `until` list) group correctly."""
+    ga_a = {"until": ["a", "b"], "temperature": 0.0}
+    ga_b = {"until": ["c", "d"], "temperature": 0.0}
+    ga_c = {"until": ["a", "b"], "temperature": 0.0}  # same as ga_a
+    prompts = ["p0", "p1", "p2"]
+    groups = _group_by_gen_args(prompts, [ga_a, ga_b, ga_c])
+    assert len(groups) == 2, f"Expected 2 groups, got {len(groups)}"
+    for _key, (_ga, indexed) in groups.items():
+        if indexed[0][1] == "p0":
+            assert len(indexed) == 2  # p0 and p2 share ga_a
+        else:
+            assert len(indexed) == 1  # p1 alone in ga_b
+
+
+def test_generate_until_single_request():
+    """Single request edge case."""
+    ga = {"until": ["STOP"], "temperature": 0.0}
+    results = _simulate_generate_until(["only"], [ga])
+    assert results == ["GEN:only"]
+
+
+def test_generate_until_order_stress():
+    """Alternating groups: result order must always match input order."""
+    ga_even = {"until": ["XSTOP"], "temperature": 0.0}
+    ga_odd  = {"until": ["YSTOP"], "temperature": 0.0}
+    n = 20
+    prompts  = [f"p{i}" for i in range(n)]
+    gen_args = [ga_even if i % 2 == 0 else ga_odd for i in range(n)]
+    results  = _simulate_generate_until(prompts, gen_args)
+    for i in range(n):
+        assert results[i] == f"GEN:p{i}", f"Wrong result at index {i}: {results[i]}"
+
+
+# ---------------------------------------------------------------------------
 # Known-category constant completeness
 # ---------------------------------------------------------------------------
 
@@ -683,6 +786,13 @@ def main():
         test_run_code_causal_analysis_skips_non_code_tasks,
         test_run_code_causal_analysis_no_samples_file,
         test_all_categories_list_complete,
+        # generate_until grouping
+        test_generate_until_uniform_gen_args,
+        test_generate_until_mixed_gen_args_mbpp_humaneval,
+        test_generate_until_stop_tokens_stripped,
+        test_generate_until_grouping_key_list_values,
+        test_generate_until_single_request,
+        test_generate_until_order_stress,
     ]
 
     passed = 0
