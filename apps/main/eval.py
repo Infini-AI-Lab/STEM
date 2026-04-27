@@ -94,6 +94,7 @@ class LMHarnessArgs:
     torch_random_seed: int = 1234
     fewshot_random_seed: int = 1234
     batch_size: Union[int, str] = 8
+    confirm_run_unsafe_code: bool = False
 
 @dataclass
 class ValidationArgs:
