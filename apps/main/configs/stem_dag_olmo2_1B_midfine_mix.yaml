@@ -1,21 +1,5 @@
-# DAG-STEM training for OLMo2 1B (backbone type olmo3_dag in this repo).
-#
-# Prerequisite: run prepare_dag_stem_checkpoint.py on your OLMo2-1B distcp checkpoint,
-# with matching --stem-layers and --stem-parallel-size, e.g.:
-#   python apps/main/prepare_dag_stem_checkpoint.py \
-#     --ckpt-path /path/to/olmo2-1b/distcp \
-#     --output-dir /path/to/olmo2-1b-dag-stem-init \
-#     --model-type olmo3 \
-#     --stem-layers 2 6 10 14 \
-#     --stem-parallel-size 4 \
-#     --alpha-init -5.0
-#
-# Launch:
-#   torchrun --nproc-per-node=<N> -m apps.main.stem_dag_train \
-#     config=apps/main/configs/stem_dag_olmo2_1B.yaml
-
-dump_dir: logs/stem_dag_olmo2_1B
-name: stem_dag_olmo2_1B_warmup
+dump_dir: logs/debug
+name: "olmo2_1B_stem-dag_midfine"
 model_type: olmo3_dag
 steps: 50_000
 probe_freq: 100
@@ -23,18 +7,17 @@ seed: 777
 grad_acc_steps: 2
 
 optim:
-    lr: 4e-4
+    scheduler: "linear"
+    lr: 7.44e-5
     weight_decay: 0.1
     warmup: 0
-    lr_min_ratio: 0.1
+    lr_min_ratio: 0.0
     clip: 1.0
-    initial_token_offset: 1907359
-    global_final_step: 2384186
 
-stem_lr: 8e-4
+stem_lr: 3e-4
 stem_weight_decay: 1e-4
+stem_lr_min_ratio: 0
 stem_warmup: 1000
-stem_lr_min_ratio: 0.3
 
 distributed:
     fsdp_type: full_shard
@@ -43,11 +26,10 @@ distributed:
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
     tp_size: 1
-    stem_parallel_size: 4
 
 model:
     dim: 2048
-    ffn_dim_multiplier: 1.5000915583
+    ffn_dim_multiplier: 1.5
     multiple_of: 256
     n_layers: 16
     n_heads: 16
@@ -61,14 +43,46 @@ model:
     vocab_size: 100352
     rope_theta: 500000.0
     rope_scaling: null
-    stem_layers: [2, 6, 10, 14]
+    stem_layers: [1,2,3,4]
     alpha_init: -5.0
 
 data:
-    root_dir: /dev/shm
+    root_dir: /dev/shm/dolmino-mix_shuffled
     sources:
-        local-shard: 1.0
-    node_local: true
+        # Code
+        cranecode: 4.971690
+        stack_edu: 6.883879
+
+        # Math
+        cranemath: 3.076499
+        dolmino-math: 13.167888
+        megamatt: 1.372526
+        tinymath-mind: 2.06
+        tinymath-pot: 0.76
+
+        # QA
+        reddit_to_flashcards: 42.918011
+        wiki_to_rcqa: 6.926372
+        nemotron-synth-qa: 4.504267
+
+        # Thinking / Reasoning
+        math-meta-reasoning: 0.170397
+        code-meta-reasoning: 0.017646
+        program_verifiable: 0.134278
+        qwq-reasoning-traces: 0.080939
+        openthoughts2: 0.123371
+        general_reasoning_mix: 0.236397
+        gemini-reasoning-traces: 0.024108
+
+        # Instruction
+        tulu-3-sft: 0.616150
+        dolmino_1-flan: 6.288976
+
+        # STEM-heavy + PDFs + Web
+        olmocr_science_pdfs: 0.318698
+        stem-heavy-crawl: 2.303792
+        common_crawl-high-quality: 7.673463
+    node_local: false
     batch_size: 8
     prefetch_size: 1024
     seq_len: 4096
@@ -76,6 +90,7 @@ data:
     load_async: true
     add_bos: true
     add_eos: true
+    track_packed_source_mixture: true
     tokenizer:
         name: huggingface
         path: checkpoints/olmo2-1b-stage1-token1T
@@ -84,23 +99,24 @@ profiling:
     run: true
 
 checkpoint:
-    init_ckpt_path: checkpoints/olmo2-1b-dag-stem-init
+    # Student initialization checkpoint (typically prepared by prepare_stem_checkpoint.py)
+    init_ckpt_path: checkpoints/olmo2-1b-stem-1T-init
     dump:
         every: 10000
         keep: 1
     eval:
-        every: 10000
+        every: 5000
         keep: 1
 
 logging:
     freq: 10
     wandb:
-        project: stem
-        name: stem-dag-olmo2-1B
+        project: "stem"
+        name: "olmo2-1B-midfine-stem-dag"
 
 eval:
     generator:
-        max_tokens: 8192
+        max_tokens: 16384
         dtype: bf16
         temperature: 1.0
         top_p: 0.95
@@ -122,5 +138,14 @@ eval:
               dataset_path: /data/rsadhukh/eval_data/ai2_arc
             - task: race
               dataset_path: /data/rsadhukh/eval_data/race
-    validation:
-        max_steps: 8000
+            - task: mmlu
+              dataset_path: /data/rsadhukh/eval_data/mmlu
+            - task: gsm8k
+              dataset_path: /data/rsadhukh/eval_data/gsm8k
+            - task: mbpp
+              dataset_path: /data/rsadhukh/eval_data/mbpp
+            - task: humaneval
+              dataset_path: /data/rsadhukh/eval_data/humaneval
+        confirm_run_unsafe_code: true
+        batch_size: 64
+    validation: null

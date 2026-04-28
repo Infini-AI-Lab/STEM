@@ -4,7 +4,7 @@ model_type: olmo3
 steps: 50_000
 probe_freq: 100
 seed: 777
-grad_acc_steps: 2
+grad_acc_steps: 4
 
 optim:
     scheduler: "linear"
@@ -42,48 +42,35 @@ model:
 data:
     root_dir: data/dolmino-mix_shuffled
     sources:
-        # Code
-        cranecode: 4.971690
-        stack_edu: 6.883879
-
-        # Math
-        cranemath: 3.076499
-        dolmino-math: 13.167888
-        megamatt: 1.372526
-        tinymath-mind: 2.06
-        tinymath-pot: 0.76
-
-        # QA
-        reddit_to_flashcards: 42.918011
-        wiki_to_rcqa: 6.926372
-        nemotron-synth-qa: 4.504267
-
-        # Thinking / Reasoning
-        math-meta-reasoning: 0.170397
-        code-meta-reasoning: 0.017646
-        program_verifiable: 0.134278
-        qwq-reasoning-traces: 0.080939
-        openthoughts2: 0.123371
-        general_reasoning_mix: 0.236397
-        gemini-reasoning-traces: 0.024108
-
-        # Instruction
-        tulu-3-sft: 0.616150
-        dolmino_1-flan: 6.288976
-
-        # STEM-heavy + PDFs + Web
-        olmocr_science_pdfs: 0.318698
-        stem-heavy-crawl: 2.303792
-        common_crawl-high-quality: 7.673463
+        common_crawl-high-quality: 22.5
+        cranecode: 8.39
+        cranemath: 3.99
+        dolmino-math: 12.29
+        dolmino_1-flan: 6.12
+        gemini-reasoning-traces: 0.12
+        general_reasoning_mix: 1.0
+        code-meta-reasoning: 0.546
+        llama_nemotron-reasoning-traces: 3.968
+        math-meta-reasoning: 0.546
+        megamatt: 1.78
+        nemotron-synth-qa: 4.38
+        olmocr_science_pdfs: 1.78
+        openthoughts2: 0.546
+        program_verifiable: 0.22
+        qwq-reasoning-traces: 0.546
+        reddit_to_flashcards: 7.66
+        stack_edu: 11.61
+        stem-heavy-crawl: 8.22
+        tulu-3-sft: 0.604
+        wiki_to_rcqa: 1.24
     node_local: true
-    batch_size: 8
+    batch_size: 16
     prefetch_size: 1024
     seq_len: 4096
     n_views: 2
     load_async: true
     add_bos: true
     add_eos: true
-    track_packed_source_mixture: true
     tokenizer:
         name: huggingface
         path: /data/rsadhukh/checkpoints/olmo2-1b-base-token4T
@@ -116,19 +103,26 @@ eval:
     harness:
         tasks:
             - task: hellaswag
-              dataset_path: /data/rsadhukh/eval_data/hellaswag
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/hellaswag
             - task: boolq
-              dataset_path: /data/rsadhukh/eval_data/super_glue
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/super_glue
             - task: piqa
-              dataset_path: /data/rsadhukh/eval_data/piqa
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/piqa
             - task: winogrande
-              dataset_path: /data/rsadhukh/eval_data/winogrande
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/winogrande
             - task: openbookqa
-              dataset_path: /data/rsadhukh/eval_data/openbookqa
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/openbookqa
             - task: arc_easy
-              dataset_path: /data/rsadhukh/eval_data/ai2_arc
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/ai2_arc
             - task: arc_challenge
-              dataset_path: /data/rsadhukh/eval_data/ai2_arc
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/ai2_arc
+            - task: race
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/race
+            - task: mmlu
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/mmlu
+            - task: mbpp
+              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/mbpp
         confirm_run_unsafe_code: true
         batch_size: 64
-    validation: null
+    validation:
+        max_steps: 1000

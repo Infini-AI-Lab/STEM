@@ -1,5 +1,5 @@
 dump_dir: logs/debug
-name: "olmo2_1B_midfine"
+name: "longcat-1B-midfine"
 model_type: olmo3
 steps: 50_000
 probe_freq: 100
@@ -14,6 +14,11 @@ optim:
     lr_min_ratio: 0.0
     clip: 1.0
 
+ngram_lr: 3e-4
+ngram_weight_decay: 1e-4
+ngram_lr_min_ratio: 0
+ngram_warmup: 1000
+
 distributed:
     fsdp_type: full_shard
     compile: true
@@ -21,6 +26,7 @@ distributed:
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
     tp_size: 1
+    stem_parallel_size: 2
 
 model:
     dim: 2048
@@ -38,44 +44,39 @@ model:
     vocab_size: 100352
     rope_theta: 500000.0
     rope_scaling: null
+    pad_token_id: 100277
+    eos_token_id: 100257
+    emb_neighbor_num: 3
+    emb_split_num: 2
+    ngram_vocab_size_ratio: 16
+    ngram_embeddings_zero_reset: false
+    
 
 data:
-    root_dir: data/dolmino-mix_shuffled
+    root_dir: /dev/shm/dolmino-mix_shuffled
     sources:
-        # Code
+        common_crawl-high-quality: 7.776233
         cranecode: 4.971690
-        stack_edu: 6.883879
-
-        # Math
         cranemath: 3.076499
-        dolmino-math: 13.167888
-        megamatt: 1.372526
-        tinymath-mind: 2.06
-        tinymath-pot: 0.76
-
-        # QA
-        reddit_to_flashcards: 42.918011
-        wiki_to_rcqa: 6.926372
-        nemotron-synth-qa: 4.504267
-
-        # Thinking / Reasoning
-        math-meta-reasoning: 0.170397
-        code-meta-reasoning: 0.017646
-        program_verifiable: 0.134278
-        qwq-reasoning-traces: 0.080939
-        openthoughts2: 0.123371
-        general_reasoning_mix: 0.236397
-        gemini-reasoning-traces: 0.024108
-
-        # Instruction
-        tulu-3-sft: 0.616150
+        dolmino-math: 9.475957
         dolmino_1-flan: 6.288976
-
-        # STEM-heavy + PDFs + Web
-        olmocr_science_pdfs: 0.318698
-        stem-heavy-crawl: 2.303792
-        common_crawl-high-quality: 7.673463
-    node_local: true
+        gemini-reasoning-traces: 0.036162
+        general_reasoning_mix: 0.311049
+        code-meta-reasoning: 0.1694
+        # llama_nemotron-reasoning-traces: 1.234568
+        math-meta-reasoning: 0.170397
+        megamatt: 1.372526
+        nemotron-synth-qa: 4.504267
+        olmocr_science_pdfs: 0.509917
+        openthoughts2: 0.170822
+        program_verifiable: 0.067139
+        qwq-reasoning-traces: 0.170397
+        reddit_to_flashcards: 42.918011
+        stack_edu: 6.883879
+        stem-heavy-crawl: 2.349868
+        tulu-3-sft: 0.616150
+        wiki_to_rcqa: 6.926372
+    node_local: false
     batch_size: 8
     prefetch_size: 1024
     seq_len: 4096
@@ -86,26 +87,26 @@ data:
     track_packed_source_mixture: true
     tokenizer:
         name: huggingface
-        path: /data/rsadhukh/checkpoints/olmo2-1b-base-token4T
+        path: checkpoints/olmo2-1b-stage1-token1T
 
 profiling:
     run: true
 
 checkpoint:
     # Student initialization checkpoint (typically prepared by prepare_stem_checkpoint.py)
-    init_ckpt_path: /data/rsadhukh/checkpoints/olmo2-1b-base-token4T
+    init_ckpt_path: checkpoints/olmo2-1b-stem-1T-init
     dump:
         every: 10000
         keep: 1
     eval:
-        every: 10000
+        every: 5000
         keep: 1
 
 logging:
     freq: 10
     wandb:
         project: "stem"
-        name: "olmo2-1B-midfine"
+        name: "longcat-1B-midfine"
 
 eval:
     generator:
@@ -129,6 +130,16 @@ eval:
               dataset_path: /data/rsadhukh/eval_data/ai2_arc
             - task: arc_challenge
               dataset_path: /data/rsadhukh/eval_data/ai2_arc
+            - task: race
+              dataset_path: /data/rsadhukh/eval_data/race
+            - task: mmlu
+              dataset_path: /data/rsadhukh/eval_data/mmlu
+            - task: gsm8k
+              dataset_path: /data/rsadhukh/eval_data/gsm8k
+            - task: mbpp
+              dataset_path: /data/rsadhukh/eval_data/mbpp
+            - task: humaneval
+              dataset_path: /data/rsadhukh/eval_data/humaneval
         confirm_run_unsafe_code: true
         batch_size: 64
     validation: null

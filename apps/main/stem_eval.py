@@ -7,9 +7,18 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any, List, Optional, Tuple, Union
+
+# Install evaluate.load("code_eval") sharding before any lm_eval task imports.
+from apps.main.eval_utils import (
+    apply_humaneval_runtime_patches,
+    apply_mbpp_runtime_patches,
+    harness_has_humaneval_task,
+    harness_has_mbpp_task,
+)
+
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
-from typing import Any, List, Optional, Tuple, Union
 from omegaconf import OmegaConf
 import torch
 import wandb
@@ -20,12 +29,6 @@ from apps.main.stem_generate import (
 )
 from apps.main.stem import StemLMTransformer, StemLMTransformerArgs, STEM_MODEL_REGISTRY
 from apps.main.eval import LMHarnessArgs, ValidationArgs, all_dicts_same, _truncate_at_stop
-from apps.main.eval_utils import (
-    apply_humaneval_runtime_patches,
-    apply_mbpp_runtime_patches,
-    harness_has_humaneval_task,
-    harness_has_mbpp_task,
-)
 from lingua.args import dump_config
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
 from lingua.data import init_choice_state, setup_sources

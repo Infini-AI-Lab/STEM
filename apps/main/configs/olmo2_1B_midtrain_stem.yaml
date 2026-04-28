@@ -1,40 +1,18 @@
-# DAG-STEM training for OLMo2 1B (backbone type olmo3_dag in this repo).
-#
-# Prerequisite: run prepare_dag_stem_checkpoint.py on your OLMo2-1B distcp checkpoint,
-# with matching --stem-layers and --stem-parallel-size, e.g.:
-#   python apps/main/prepare_dag_stem_checkpoint.py \
-#     --ckpt-path /path/to/olmo2-1b/distcp \
-#     --output-dir /path/to/olmo2-1b-dag-stem-init \
-#     --model-type olmo3 \
-#     --stem-layers 2 6 10 14 \
-#     --stem-parallel-size 4 \
-#     --alpha-init -5.0
-#
-# Launch:
-#   torchrun --nproc-per-node=<N> -m apps.main.stem_dag_train \
-#     config=apps/main/configs/stem_dag_olmo2_1B.yaml
-
-dump_dir: logs/stem_dag_olmo2_1B
-name: stem_dag_olmo2_1B_warmup
-model_type: olmo3_dag
-steps: 50_000
+dump_dir: logs/debug
+name: "midfine"
+model_type: olmo3
+steps: 25_000
 probe_freq: 100
 seed: 777
-grad_acc_steps: 2
+grad_acc_steps: 4
 
 optim:
-    lr: 4e-4
+    scheduler: "linear"
+    lr: 7.44e-5
     weight_decay: 0.1
     warmup: 0
-    lr_min_ratio: 0.1
+    lr_min_ratio: 0.5
     clip: 1.0
-    initial_token_offset: 1907359
-    global_final_step: 2384186
-
-stem_lr: 8e-4
-stem_weight_decay: 1e-4
-stem_warmup: 1000
-stem_lr_min_ratio: 0.3
 
 distributed:
     fsdp_type: full_shard
@@ -43,11 +21,10 @@ distributed:
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
     tp_size: 1
-    stem_parallel_size: 4
 
 model:
     dim: 2048
-    ffn_dim_multiplier: 1.5000915583
+    ffn_dim_multiplier: 1.5
     multiple_of: 256
     n_layers: 16
     n_heads: 16
@@ -61,14 +38,14 @@ model:
     vocab_size: 100352
     rope_theta: 500000.0
     rope_scaling: null
-    stem_layers: [2, 6, 10, 14]
-    alpha_init: -5.0
 
 data:
-    root_dir: /dev/shm
+    root_dir: /dev/shm/dolmino-mix_shuffled
     sources:
-        local-shard: 1.0
-    node_local: true
+        CommonCrawlHQ: 22.5
+        STEM_Heavy: 10.0
+        Flashcards_RCQA: 8.9
+    node_local: false
     batch_size: 8
     prefetch_size: 1024
     seq_len: 4096
@@ -84,23 +61,24 @@ profiling:
     run: true
 
 checkpoint:
-    init_ckpt_path: checkpoints/olmo2-1b-dag-stem-init
+    # Student initialization checkpoint (typically prepared by prepare_stem_checkpoint.py)
+    init_ckpt_path: checkpoints/olmo2-1b-stem-1T-init
     dump:
         every: 10000
         keep: 1
     eval:
-        every: 10000
+        every: 5000
         keep: 1
 
 logging:
     freq: 10
     wandb:
-        project: stem
-        name: stem-dag-olmo2-1B
+        project: "stem"
+        name: "olmo2-1B-midfine"
 
 eval:
     generator:
-        max_tokens: 8192
+        max_tokens: 16384
         dtype: bf16
         temperature: 1.0
         top_p: 0.95
@@ -122,5 +100,11 @@ eval:
               dataset_path: /data/rsadhukh/eval_data/ai2_arc
             - task: race
               dataset_path: /data/rsadhukh/eval_data/race
+            - task: mmlu
+              dataset_path: /data/rsadhukh/eval_data/mmlu
+            - task: gsm8k
+              dataset_path: /data/rsadhukh/eval_data/gsm8k
+        confirm_run_unsafe_code: true
+        batch_size: 64
     validation:
-        max_steps: 8000
+        max_steps: 1000

@@ -4,48 +4,43 @@ ckpt_dir: /raid/user_data/rsadhukh/checkpoints/STEM-1B-pretrain1T-midtrain100B-s
 stem_parallel_size: 8  # must match training stem_parallel_size
 
 generator:
-    max_tokens: 16384
+    max_tokens: 32768
     dtype: bf16
     temperature: 0.0
     top_p: 0.95
     show_progress: true
 
 harness:
-  tasks:
-    - task: hellaswag
-      dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
-    - task: boolq
-      dataset_path: /raid/user_data/rsadhukh/test_data/super_glue
-    # - task: nq_open
-    #   num_fewshot: 5
-    - task: piqa
-      dataset_path: /raid/user_data/rsadhukh/test_data/piqa
-    # - task: social_iqa
-    #   dataset_kwargs:
-    #     trust_remote_code: true
-    # - triviaqa
-    - task: winogrande
-      dataset_path: /raid/user_data/rsadhukh/test_data/winogrande
-    - task: openbookqa
-      dataset_path: /raid/user_data/rsadhukh/test_data/openbookqa
-    - task: arc_easy
-      dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
-    - task: arc_challenge
-      dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
-    - task: race
-      dataset_path: /raid/user_data/rsadhukh/test_data/race
-    # - commonsense_qa
-    # - coqa
-    # - copa
-    # - task: gsm8k
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/gsm8k
-    # - bbh
-    # - task: mmlu
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/mmlu
-    # - mmlu_pro
-    # - task: mbpp
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/mbpp
-  confirm_run_unsafe_code: true
-  batch_size: 64
+    tasks:
+        - task: hellaswag
+          dataset_path: /data/rsadhukh/eval_data/hellaswag
+        - task: boolq
+          dataset_path: /data/rsadhukh/eval_data/super_glue
+        - task: piqa
+          dataset_path: /data/rsadhukh/eval_data/piqa
+        - task: winogrande
+          dataset_path: /data/rsadhukh/eval_data/winogrande
+        - task: openbookqa
+          dataset_path: /data/rsadhukh/eval_data/openbookqa
+        - task: arc_easy
+          dataset_path: /data/rsadhukh/eval_data/ai2_arc
+        - task: arc_challenge
+          dataset_path: /data/rsadhukh/eval_data/ai2_arc
+        - task: race
+          dataset_path: /data/rsadhukh/eval_data/race
+        - task: mmlu
+          dataset_path: /data/rsadhukh/eval_data/mmlu
+        - task: gsm8k
+          dataset_path: /data/rsadhukh/eval_data/gsm8k
+        - task: mbpp
+          dataset_path: /data/rsadhukh/eval_data/mbpp
+        - task: humaneval
+          dataset_path: /data/rsadhukh/eval_data/humaneval
+        # - task: bbh
+        #   dataset_path: /data/rsadhukh/eval_data/bbh
+        # - task: coqa
+        #   dataset_path: /data/rsadhukh/eval_data/coqa
+    confirm_run_unsafe_code: true
+    batch_size: 128
 validation: null
 

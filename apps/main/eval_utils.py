@@ -10,6 +10,11 @@ from typing import Any, Optional
 
 import evaluate as hf_evaluate
 
+# lm_eval's humaneval/utils.py and mbpp/utils.py call evaluate.load("code_eval") at import time
+# with no experiment_id, so every rank shares one Arrow cache path (NFS races, ENOENT, stale handle).
+# Patch once when this module loads (stem_eval / eval import eval_utils before running lm_eval).
+_stem_original_evaluate_load = hf_evaluate.load
+
 
 def harness_has_mbpp_task(harness: Optional[Any]) -> bool:
     if harness is None or getattr(harness, "tasks", None) is None:
@@ -46,6 +51,15 @@ def harness_has_humaneval_task(harness: Optional[Any]) -> bool:
 def _unique_experiment_id(prefix: str = "mbpp-code-eval") -> str:
     rank = os.environ.get("RANK", "0")
     return f"{prefix}-{rank}-{os.getpid()}-{uuid.uuid4().hex}"
+
+
+def _stem_patched_evaluate_load(path: str, *args: Any, **kwargs: Any) -> Any:
+    if path == "code_eval" and "experiment_id" not in kwargs:
+        kwargs = {**kwargs, "experiment_id": _unique_experiment_id("code-eval-auto")}
+    return _stem_original_evaluate_load(path, *args, **kwargs)
+
+
+hf_evaluate.load = _stem_patched_evaluate_load  # type: ignore[method-assign]
 
 
 def _patch_metric_check_correctness_to_fork(metric_obj: Any, logger: logging.Logger) -> None:

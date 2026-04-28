@@ -372,16 +372,25 @@ class PackedCausalTransformerGenerator:
             generated_tokens = [[] for _ in range(n_seqs)]
             is_done = [False for _ in range(n_seqs)]
             packed_batch, lengths = pack_prompts(batch)
+                
             packed_batch, lengths = packed_batch.cuda(), lengths.cuda()
             n_seqs = lengths.size(0)
 
-            # Prefilling cache
+            if hasattr(self.model, "ngram_embeddings"):
+                self.model.ngram_embeddings.reset_ngram_context()
+                
             prompt_logits = self.prefill(packed_batch.unsqueeze(0), lengths)
             # Selecting last token in each prompt
             all_tokens = sample_tokens(
                 prompt_logits, self.temperature, self.top_p, self.top_k
             )
             start_token = all_tokens[:, lengths.cumsum(0) - 1]
+
+            if hasattr(self.model, "ngram_embeddings"):
+                n = self.model.ngram_embeddings.max_context_len
+                self.model.ngram_embeddings.update_ngram_context(
+                    torch.LongTensor([batch_item[-n:] for batch_item in batch]).cuda()
+                )
 
             for seq_id, tok in enumerate(start_token.squeeze(0).tolist()):
                 generated_tokens[seq_id].append(tok)

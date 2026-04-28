@@ -10,27 +10,38 @@ generator:
   show_progress: true
 
 harness:
-  tasks:
-    - task: hellaswag
-      dataset_path: /raid/user_data/rsadhukh/test_data/hellaswag
-    - task: boolq
-      dataset_path: /raid/user_data/rsadhukh/test_data/super_glue
-    - task: piqa
-      dataset_path: /raid/user_data/rsadhukh/test_data/piqa
-    - task: winogrande
-      dataset_path: /raid/user_data/rsadhukh/test_data/winogrande
-    - task: openbookqa
-      dataset_path: /raid/user_data/rsadhukh/test_data/openbookqa
-    - task: arc_easy
-      dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
-    - task: arc_challenge
-      dataset_path: /raid/user_data/rsadhukh/test_data/ai2_arc
-    - task: race
-      dataset_path: /raid/user_data/rsadhukh/test_data/race
-    # - task: gsm8k
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/gsm8k
-    # - task: mmlu
-    #   dataset_path: /raid/user_data/rsadhukh/test_data/mmlu
-  batch_size: 64
+    tasks:
+        - task: hellaswag
+          dataset_path: /data/rsadhukh/eval_data/hellaswag
+        - task: boolq
+          dataset_path: /data/rsadhukh/eval_data/super_glue
+        - task: piqa
+          dataset_path: /data/rsadhukh/eval_data/piqa
+        - task: winogrande
+          dataset_path: /data/rsadhukh/eval_data/winogrande
+        - task: openbookqa
+          dataset_path: /data/rsadhukh/eval_data/openbookqa
+        - task: arc_easy
+          dataset_path: /data/rsadhukh/eval_data/ai2_arc
+        - task: arc_challenge
+          dataset_path: /data/rsadhukh/eval_data/ai2_arc
+        - task: race
+          dataset_path: /data/rsadhukh/eval_data/race
+        - task: mmlu
+          dataset_path: /data/rsadhukh/eval_data/mmlu
+        - task: gsm8k
+          dataset_path: /data/rsadhukh/eval_data/gsm8k
+        - task: mbpp
+          dataset_path: /data/rsadhukh/eval_data/mbpp
+        - task: humaneval
+          dataset_path: /data/rsadhukh/eval_data/humaneval
+        # - task: bbh
+        #   dataset_path: /data/rsadhukh/eval_data/bbh
+        # - task: coqa
+        #   dataset_path: /data/rsadhukh/eval_data/coqa
+        # - task: squad_v2
+        #   dataset_path: /data/rsadhukh/eval_data/squad_v2
+    confirm_run_unsafe_code: true
+    batch_size: 64
 validation: null
 

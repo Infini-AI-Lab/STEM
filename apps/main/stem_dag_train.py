@@ -4,9 +4,10 @@
 Training script for DAG-STEM models.
 
 Uses the same training loop as ``stem_train.py`` but registers the
-DAG model types (``llama_dag``, ``qwen3_dag``, ``olmo3_dag``) and
-uses ``STEMDagLMTransformerArgs`` so that the ``alpha_init`` hyper-parameter
-is parsed from the config.
+DAG model types (``llama_dag``, ``qwen3_dag``, ``olmo3_dag``,
+``llama_dag_distill``, ``qwen3_dag_distill``, ``olmo3_dag_distill``) and
+uses ``STEMDagDistillLMTransformerArgs`` so that ``alpha_init`` and
+``stem_distill_loss_weight`` are parsed from the config.
 
 Usage::
 
@@ -40,9 +41,14 @@ from omegaconf import OmegaConf
 # Register DAG model types into the shared STEM_MODEL_REGISTRY *before*
 # importing the training function (which resolves model_type from the registry).
 from apps.main.stem import STEM_MODEL_REGISTRY
-from apps.main.stem_dag import DAG_STEM_MODEL_REGISTRY, STEMDagLMTransformerArgs
+from apps.main.stem_dag import (
+    DAG_STEM_DISTILL_MODEL_REGISTRY,
+    DAG_STEM_MODEL_REGISTRY,
+    STEMDagDistillLMTransformerArgs,
+)
 
 STEM_MODEL_REGISTRY.update(DAG_STEM_MODEL_REGISTRY)
+STEM_MODEL_REGISTRY.update(DAG_STEM_DISTILL_MODEL_REGISTRY)
 
 from apps.main.stem_train import StemTrainArgs, train  # noqa: E402
 
@@ -51,8 +57,10 @@ from apps.main.stem_train import StemTrainArgs, train  # noqa: E402
 class DagStemTrainArgs(StemTrainArgs):
     """Training args for DAG-STEM.  Inherits stem_lr / stem_weight_decay
     from ``StemTrainArgs`` and overrides the model field so that OmegaConf
-    can parse ``alpha_init`` from the config."""
-    model: STEMDagLMTransformerArgs = field(default_factory=STEMDagLMTransformerArgs)
+    can parse ``alpha_init`` and ``stem_distill_loss_weight`` from the config."""
+    model: STEMDagDistillLMTransformerArgs = field(
+        default_factory=STEMDagDistillLMTransformerArgs
+    )
     # Freeze w3 (up-projection) in DAG-STEM stem layers after checkpoint load.
     freeze_stem_up_proj: bool = False
 

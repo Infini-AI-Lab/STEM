@@ -1,5 +1,10 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed according to the terms of the Llama 2 Community License Agreement.
+#
+# Full Longcat n-gram LM training (FSDP backbone + vocabulary-parallel n-gram
+# tables, dual optimizers, :class:`lingua.longcat_checkpoint.LongcatCheckpointManager`,
+# init loads via :mod:`lingua.longcat_checkpoint`).
+# Run: ``python -m apps.main.longcat_ngram_train config=apps/main/configs/longcat_ngram_train.yaml``
 
 from copy import deepcopy
 import gc
@@ -25,11 +30,16 @@ from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed._tensor import DTensor
 
 from lingua.args import dataclass_from_dict, dump_config, flatten_dict
-from lingua.stem_checkpoint import StemCheckpointManager, load_from_checkpoint
+from lingua.longcat_checkpoint import (
+    LongcatCheckpointManager,
+    NGRAM_MODEL_SHARD_GLOB,
+    NGRAM_SHARD_SUBDIR,
+    load_longcat_init_from_checkpoint,
+    merge_longcat_backbone_dcp_seed_then_warmup,
+)
 from lingua.data import (
     DataArgs,
     PackTokensState,
-    all_reduce_packed_source_fraction_metrics,
     build_dataloader_from_args,
     init_dataloader_state_from_args,
 )
@@ -54,7 +64,6 @@ from lingua.metrics import (
     MetricLogger,
     get_num_params,
 )
-from lingua.optim import build_optimizer
 from lingua.logger import init_logger
 from lingua.tokenizer import build_tokenizer
 from lingua.profiling import maybe_run_profiler
@@ -62,42 +71,79 @@ from lingua.probe import AutoProbeD
 from lingua.stool import StoolArgs, launch_job
 
 from apps.main.train import TrainArgs, TrainState, validate_train_args, every_n_steps
-from apps.main.stem import (
-    StemLMTransformerArgs,
-    StemLMTransformer,
-    build_stem_lm_fsdp_grouping_plan,
-    STEM_MODEL_REGISTRY,
+from apps.main.longcat import (
+    LongcatLMTransformerArgs,
+    LongcatLMTransformer,
+    LongcatOLMo3LMTransformer,
+    LongcatOLMo3LMTransformerArgs,
+    LongcatQwen3LMTransformer,
+    LongcatQwen3LMTransformerArgs,
+    build_longcat_lm_fsdp_grouping_plan,
+    build_longcat_olmo3_lm_fsdp_grouping_plan,
+    build_longcat_qwen3_lm_fsdp_grouping_plan,
+)
+from apps.main.olmo3 import (
+    get_no_recompute_ops as olmo3_get_no_recompute_ops,
+    get_num_flop_per_token as olmo3_get_num_flop_per_token,
+)
+from apps.main.qwen3 import (
+    get_no_recompute_ops as qwen3_get_no_recompute_ops,
+    get_num_flop_per_token as qwen3_get_num_flop_per_token,
+)
+from apps.main.transformer import (
+    get_no_recompute_ops as llama_get_no_recompute_ops,
+    get_num_flop_per_token as llama_get_num_flop_per_token,
 )
 from lingua.stem_dist_utils import (
     initialize_stem_process_group,
     get_stem_data_parallel_group,
-    get_stem_data_parallel_rank,
     get_stem_data_parallel_world_size,
 )
 
 
-def sync_stem_embeddings_across_dp(model):
-    """Broadcast stem_embeddings weights from dp_rank 0 to all STEM data-parallel ranks.
-
-    This ensures all DP ranks start with identical stem_embeddings weights,
-    which is required because:
-      - FSDP-sharded lm_transformer init may consume different amounts of RNG
-        on different ranks, causing the RNG state to diverge by the time
-        stem_embeddings are initialized.
-      - reset_stem_embeddings() after checkpoint loading also uses RNG
-        (unless model.stem_embeddings_zero_reset is True).
-
-    Must be called after any stem_embeddings initialization or reset.
-    """
+def sync_ngram_embeddings_across_dp(
+    model: Union[
+        LongcatLMTransformer,
+        LongcatQwen3LMTransformer,
+        LongcatOLMo3LMTransformer,
+    ],
+):
+    """Broadcast n-gram embedding weights from DP rank 0 (same rationale as STEM)."""
     if get_stem_data_parallel_world_size() <= 1:
-        return  # Single DP group, nothing to sync
+        return
 
     dp_group = get_stem_data_parallel_group()
-    # Rank 0 within the DP group is the source of truth
     src_rank = torch.distributed.get_global_rank(dp_group, 0)
-    for param in model.stem_embeddings.parameters():
+    for param in model.ngram_embeddings.parameters():
         torch.distributed.broadcast(param.data, src=src_rank, group=dp_group)
-    logger.info("Synchronized stem_embeddings weights across STEM data-parallel ranks")
+    logger.info(
+        "Synchronized ngram_embeddings weights across vocabulary-parallel DP ranks"
+    )
+
+
+LONGCAT_MODEL_REGISTRY = {
+    "llama": (
+        LongcatLMTransformer,
+        LongcatLMTransformerArgs,
+        build_longcat_lm_fsdp_grouping_plan,
+        llama_get_no_recompute_ops,
+        llama_get_num_flop_per_token,
+    ),
+    "qwen3": (
+        LongcatQwen3LMTransformer,
+        LongcatQwen3LMTransformerArgs,
+        build_longcat_qwen3_lm_fsdp_grouping_plan,
+        qwen3_get_no_recompute_ops,
+        qwen3_get_num_flop_per_token,
+    ),
+    "olmo3": (
+        LongcatOLMo3LMTransformer,
+        LongcatOLMo3LMTransformerArgs,
+        build_longcat_olmo3_lm_fsdp_grouping_plan,
+        olmo3_get_no_recompute_ops,
+        olmo3_get_num_flop_per_token,
+    ),
+}
 
 import wandb
 
@@ -105,7 +151,7 @@ logger = logging.getLogger()
 
 
 @dataclass
-class StemTrainLossOut:
+class LongcatTrainLossOut:
     """Bundle for training: backward through ``loss``.
 
     For distillation, ``loss`` is built so ``loss.item()`` is CE (for ``loss/out``
@@ -115,12 +161,12 @@ class StemTrainLossOut:
 
     loss: torch.Tensor
     distill_loss: Optional[torch.Tensor] = None
+    
 
-
-def unpack_stem_train_loss_out(
-    out: Union[torch.Tensor, StemTrainLossOut],
+def unpack_longcat_train_loss_out(
+    out: Union[torch.Tensor, LongcatTrainLossOut],
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-    if isinstance(out, StemTrainLossOut):
+    if isinstance(out, LongcatTrainLossOut):
         return out.loss, out.distill_loss
     return out, None
 
@@ -134,25 +180,20 @@ def _tensor_to_log_scalar(t: Optional[torch.Tensor]) -> Optional[float]:
 
 
 @dataclass
-class StemTrainArgs(TrainArgs):
-    model: StemLMTransformerArgs = field(default_factory=StemLMTransformerArgs)
+class LongcatTrainArgs(TrainArgs):
+    model_type: str = "llama"
+    # Union[Longcat*Args, ...] breaks OmegaConf.structured / merge; type follows model_type.
+    model: Any = field(default_factory=LongcatLMTransformerArgs)
 
-    # Separate learning rate and weight decay for stem_embeddings.
-    # When None, falls back to the values in ``optim``.
-    stem_lr: Optional[float] = None
-    stem_weight_decay: Optional[float] = None
-    # Separate warmup for stem_embeddings schedule.
-    # When None, falls back to ``optim.warmup``.
-    stem_warmup: Optional[int] = None
-    # Optional STEM-specific scheduler controls.
-    # When None, falls back to the corresponding ``optim`` values.
-    stem_scheduler: Optional[str] = None
-    stem_lr_min_ratio: Optional[float] = None
-    # Freeze backbone (lm_transformer) parameters during training.
-    train_stage: Optional[int] = None
-    resume_stage: bool = False
-
-
+    # Separate learning rate / schedule for ``ngram_embeddings`` (outside FSDP).
+    ngram_lr: Optional[float] = None
+    ngram_weight_decay: Optional[float] = None
+    ngram_warmup: Optional[int] = None
+    ngram_scheduler: Optional[str] = None
+    ngram_lr_min_ratio: Optional[float] = None
+    freeze_base: bool = False
+    
+    
 preemption_flag = dict(flag=False)
 
 
@@ -162,7 +203,7 @@ def set_preemption_flag(signum, frame):
     preemption_flag["flag"] = True
     
     
-def train(args: StemTrainArgs):
+def train(args: LongcatTrainArgs):
     with ExitStack() as context_stack:
         tokenizer = build_tokenizer(args.data.tokenizer.name, args.data.tokenizer.path)
         validate_train_args(
@@ -197,24 +238,28 @@ def train(args: StemTrainArgs):
         logger.info(f"Initialized stem process groups with parallel size: {args.distributed.stem_parallel_size}")
 
         # ---- Resolve model class & helpers from the registry ----
-        if args.model_type not in STEM_MODEL_REGISTRY:
+        if args.model_type not in LONGCAT_MODEL_REGISTRY:
             raise ValueError(
                 f"Unknown model_type '{args.model_type}'. "
-                f"Available: {list(STEM_MODEL_REGISTRY.keys())}"
+                f"Available: {list(LONGCAT_MODEL_REGISTRY.keys())}"
             )
         (
-            stem_model_cls, _stem_args_cls,
+            longcat_model_cls,
+            _longcat_args_cls,
             _build_fsdp_plan,
-            _get_no_recompute_ops, _get_num_flop_per_token,
-        ) = STEM_MODEL_REGISTRY[args.model_type]
-        logger.info(f"Using STEM model type: {args.model_type} ({stem_model_cls.__name__})")
+            _get_no_recompute_ops,
+            _get_num_flop_per_token,
+        ) = LONGCAT_MODEL_REGISTRY[args.model_type]
+        logger.info(
+            f"Using Longcat model type: {args.model_type} ({longcat_model_cls.__name__})"
+        )
 
         torch.manual_seed(args.seed)
         logger.info("Building model")
         
         # Initializing Model in meta device allows us to initialize models much bigger than 1 gpu's memory
         with torch.device("meta"):
-            model = stem_model_cls(args.model)
+            model = longcat_model_cls(args.model)
         logger.info("Model is built !")
         
         model_param_count = get_num_params(model)
@@ -231,7 +276,7 @@ def train(args: StemTrainArgs):
         
         model = model.to_empty(device="cuda")
 
-        freeze_base = args.train_stage is not None and args.train_stage == 0
+        freeze_base = args.freeze_base
         if freeze_base:
             for param in model.lm_transformer.parameters():
                 param.requires_grad = False
@@ -239,18 +284,18 @@ def train(args: StemTrainArgs):
         else:
             logger.info("Base model parameters are trainable (freeze_base=False)")
         
-        # Ensure stem_embeddings parameters require gradients and verify they're on the correct device
-        for i, embedding in enumerate(model.stem_embeddings):
+        # Per-shard VocabParallelEmbedding modules live under ``ngram_embeddings.embedders``.
+        for i, embedding in enumerate(model.ngram_embeddings.embedders):
             # Verify device after to_empty()
             weight_device = embedding.weight.device
             if weight_device.type != "cuda":
                 logger.warning(
-                    f"stem_embeddings[{i}].weight is on {weight_device} after to_empty(), "
+                    f"ngram_embeddings.embedders[{i}].weight is on {weight_device} after to_empty(), "
                     f"expected cuda. This may cause initialization issues."
                 )
             for param in embedding.parameters():
                 param.requires_grad = True
-        logger.info("Ensured stem_embeddings parameters require gradients")
+        logger.info("Ensured ngram_embeddings parameters require gradients")
 
         # Initialize model weights if not loading from init checkpoint
         # (init checkpoint loading happens after optimizer creation to allow loading optimizer states)
@@ -258,26 +303,27 @@ def train(args: StemTrainArgs):
             with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
                 torch.manual_seed(args.model.seed)
                 model.init_weights()
-            # Ensure stem_embeddings are identical across DP ranks
+            # Ensure ngram_embeddings are identical across DP ranks
             # (RNG state may diverge due to FSDP-sharded lm_transformer init)
-            sync_stem_embeddings_across_dp(model)
+            sync_ngram_embeddings_across_dp(model)
+            
         
-        # Verify stem_embeddings are initialized after init_weights()
-        for i, embedding in enumerate(model.stem_embeddings):
+        # Verify ngram shard embeddings are initialized after init_weights()
+        for i, embedding in enumerate(model.ngram_embeddings.embedders):
             for param_name, param in embedding.named_parameters():
                 if param.numel() > 0:
                     is_zero = (param.abs().max() == 0).item()
                     param_norm = param.norm().item()
                     logger.info(
-                        f"stem_embeddings[{i}].{param_name}: "
+                        f"ngram_embeddings.embedders[{i}].{param_name}: "
                         f"device={param.device}, shape={param.shape}, "
                         f"norm={param_norm:.6f}, is_zero={is_zero}"
                     )
                     if is_zero and not getattr(
-                        args.model, "stem_embeddings_zero_reset", False
+                        args.model, "ngram_embeddings_zero_reset", False
                     ):
                         logger.error(
-                            f"ERROR: stem_embeddings[{i}].{param_name} is still all zeros after init_weights()!"
+                            f"ERROR: ngram_embeddings.embedders[{i}].{param_name} is still all zeros after init_weights()!"
                         )
         
         check_model_value_range(model, range=10.0, std=1.0)
@@ -292,7 +338,7 @@ def train(args: StemTrainArgs):
         logger.info(f"GPU memory usage: {gpu_memory_monitor}")
         
         # build optimizer after apply parallelisms to the model
-        # Create separate optimizers for lm_transformer and stem_embeddings
+        # Create separate optimizers for lm_transformer and ngram_embeddings
         # to avoid mixing DTensors and regular Tensors
         from torch.optim import AdamW
         from lingua.optim import build_lr_fn
@@ -307,51 +353,58 @@ def train(args: StemTrainArgs):
             fused=True,
         )
         
-        # Create optimizer for stem_embeddings (regular Tensors)
+        # Create optimizer for ngram_embeddings (regular Tensors)
         # Use dedicated stem lr / weight_decay when provided, else fall back to main optim values
-        stem_lr = args.stem_lr if args.stem_lr is not None else args.optim.lr
-        stem_wd = args.stem_weight_decay if args.stem_weight_decay is not None else args.optim.weight_decay
-        logger.info(f"Stem optimizer: lr={stem_lr}, weight_decay={stem_wd}")
-        stem_optimizer = AdamW(
-            model.stem_embeddings.parameters(),
-            lr=stem_lr,
+        ngram_lr = args.ngram_lr if args.ngram_lr is not None else args.optim.lr
+        ngram_wd = (
+            args.ngram_weight_decay
+            if args.ngram_weight_decay is not None
+            else args.optim.weight_decay
+        )
+        logger.info(f"Ngram optimizer: lr={ngram_lr}, weight_decay={ngram_wd}")
+        ngram_optimizer = AdamW(
+            model.ngram_embeddings.parameters(),
+            lr=ngram_lr,
             betas=(args.optim.beta1, args.optim.beta2),
-            weight_decay=stem_wd,
+            weight_decay=ngram_wd,
             eps=args.optim.epsilon,
             fused=False,  # Disable fused for regular tensors
         )
         
         # Create schedulers for both optimizers.
         lm_lr_fn = build_lr_fn(args.optim, args.steps)
-        stem_warmup = args.stem_warmup if args.stem_warmup is not None else args.optim.warmup
-        stem_scheduler_name = (
-            args.stem_scheduler if args.stem_scheduler is not None else args.optim.scheduler
+        ngram_warmup = args.ngram_warmup if args.ngram_warmup is not None else args.optim.warmup
+        ngram_scheduler_name = (
+            args.ngram_scheduler
+            if args.ngram_scheduler is not None
+            else args.optim.scheduler
         )
-        stem_lr_min_ratio = (
-            args.stem_lr_min_ratio
-            if args.stem_lr_min_ratio is not None
+        ngram_lr_min_ratio = (
+            args.ngram_lr_min_ratio
+            if args.ngram_lr_min_ratio is not None
             else args.optim.lr_min_ratio
         )
-        stem_optim_args = replace(
+        ngram_optim_args = replace(
             args.optim,
-            warmup=stem_warmup,
-            scheduler=stem_scheduler_name,
-            lr_min_ratio=stem_lr_min_ratio,
+            warmup=ngram_warmup,
+            scheduler=ngram_scheduler_name,
+            lr_min_ratio=ngram_lr_min_ratio,
             initial_token_offset=0,
             global_final_step=args.steps,
         )
         logger.info(
-            f"Stem scheduler: scheduler={stem_scheduler_name}, warmup={stem_warmup}, "
-            f"lr_min_ratio={stem_lr_min_ratio}"
+            f"Ngram scheduler: scheduler={ngram_scheduler_name}, warmup={ngram_warmup}, "
+            f"lr_min_ratio={ngram_lr_min_ratio}"
         )
-        stem_lr_fn = build_lr_fn(stem_optim_args, args.steps)
+        ngram_lr_fn = build_lr_fn(ngram_optim_args, args.steps)
         from torch.optim import lr_scheduler
         lm_scheduler = lr_scheduler.LambdaLR(lm_optimizer, lm_lr_fn)
-        stem_scheduler = lr_scheduler.LambdaLR(stem_optimizer, stem_lr_fn)
-        
+        ngram_scheduler = lr_scheduler.LambdaLR(ngram_optimizer, ngram_lr_fn)
+
         # Store both optimizers and schedulers
-        optimizer = {"lm": lm_optimizer, "stem": stem_optimizer}
-        scheduler = {"lm": lm_scheduler, "stem": stem_scheduler}
+        optimizer = {"lm": lm_optimizer, "ngram": ngram_optimizer}
+        scheduler = {"lm": lm_scheduler, "ngram": ngram_scheduler}
+        
         
         data_rank = dp_rank
         data_world_size = dp_degree
@@ -388,17 +441,10 @@ def train(args: StemTrainArgs):
             scheduler=scheduler,
         )
         
-        # Use StemCheckpointManager which handles ParallelEmbedding checkpointing
-        train_stage = args.train_stage if not args.resume_stage else None
-        checkpoint = StemCheckpointManager.instantiate_and_make_dir(args.checkpoint, train_stage=train_stage)
+        checkpoint = LongcatCheckpointManager.instantiate_and_make_dir(args.checkpoint)
         
         # Load from init checkpoint if specified (before loading from latest checkpoint)
         if args.checkpoint.init_ckpt_path:
-            from lingua.stem_checkpoint import (
-                load_from_checkpoint,
-                merge_stem_backbone_dcp_seed_then_warmup,
-            )
-
             seed_merge = getattr(
                 args.checkpoint, "merge_lm_optim_seed_ckpt_path", None
             )
@@ -414,7 +460,7 @@ def train(args: StemTrainArgs):
                     seed_merge,
                     args.checkpoint.init_ckpt_path,
                 )
-                merge_stem_backbone_dcp_seed_then_warmup(
+                merge_longcat_backbone_dcp_seed_then_warmup(
                     model,
                     optimizer,
                     seed_merge,
@@ -425,7 +471,7 @@ def train(args: StemTrainArgs):
                     f"Loading initial model from {args.checkpoint.init_ckpt_path}"
                 )
                 if args.checkpoint.continue_training_from_init:
-                    load_from_checkpoint(
+                    load_longcat_init_from_checkpoint(
                         args.checkpoint.init_ckpt_path,
                         model,
                         optimizer=optimizer,
@@ -433,49 +479,41 @@ def train(args: StemTrainArgs):
                         legacy_lm_transformer=args.checkpoint.legacy_init_ckpt_lm_transformer,
                     )
                 else:
-                    load_from_checkpoint(
+                    load_longcat_init_from_checkpoint(
                         args.checkpoint.init_ckpt_path,
                         model,
                         model_key="model",
                         legacy_lm_transformer=args.checkpoint.legacy_init_ckpt_lm_transformer,
                     )
-            model.rope_embeddings.reset_parameters() # For RoPe initialization since it's a buffer it might not be loaded
-            # Only reset stem_embeddings if pre-computed embeddings were NOT found
-            # in the init checkpoint.  If stem_shards/ exists (e.g. produced by
-            # prepare_stem_checkpoint.py), the loaded values are kept as-is.
-            stem_shards_dir = Path(args.checkpoint.init_ckpt_path) / "stem_shards"
-            if stem_shards_dir.exists() and any(stem_shards_dir.glob("stem_model_mp*.pt")):
+                if args.checkpoint.legacy_init_ckpt_lm_transformer:
+                    model.init_ngram_fused_projection()
+            model.rope_embeddings.reset_parameters()
+            ngram_shards_dir = Path(args.checkpoint.init_ckpt_path) / NGRAM_SHARD_SUBDIR
+            if ngram_shards_dir.exists() and any(ngram_shards_dir.glob(NGRAM_MODEL_SHARD_GLOB)):
                 logger.info(
-                    "Pre-computed stem embeddings found in init checkpoint, "
-                    "skipping random reset"
+                    "Pre-computed vocabulary-parallel shards in init checkpoint; "
+                    "skipping random n-gram table reset"
                 )
             else:
-                if getattr(args.model, "stem_embeddings_zero_reset", False):
+                if getattr(args.model, "ngram_embeddings_zero_reset", False):
                     logger.info(
-                        "No pre-computed stem embeddings in init checkpoint, "
-                        "initializing stem embeddings to zeros "
-                        "(model.stem_embeddings_zero_reset=True)"
+                        "No n-gram shards in init checkpoint; zero-initializing "
+                        "(model.ngram_embeddings_zero_reset=True)"
                     )
-                    model.reset_stem_embeddings()
+                    model.reset_ngram_embeddings()
                 else:
                     logger.info(
-                        "No pre-computed stem embeddings in init checkpoint, "
-                        "re-initializing with ParallelEmbedding default (normal, std sqrt(embedding_dim))"
+                        "No n-gram shards in init checkpoint; re-initializing tables "
+                        "(VocabParallelEmbedding defaults)"
                     )
                     with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
                         torch.manual_seed(args.model.seed)
-                        model.reset_stem_embeddings()
-            # Ensure stem_embeddings are identical across DP ranks
-            sync_stem_embeddings_across_dp(model)
-        
+                        model.reset_ngram_embeddings()
+            sync_ngram_embeddings_across_dp(model)
+            
+            
         # Load from latest checkpoint (or continue from init checkpoint)
         checkpoint.load(model, optimizer, train_state, world_mesh)
-        # DAG-STEM only: ``DagStemTrainArgs.freeze_stem_up_proj`` (not on ``StemTrainArgs``).
-        if getattr(args, "freeze_stem_up_proj", False):
-            n_frozen = model.freeze_up_projections()
-            logger.info(
-                f"freeze_stem_up_proj=True: froze {n_frozen} up-projection parameter tensor(s)"
-            )
         stage_start_step = train_state.step
         if args.stage_steps is None:
             target_step = args.steps
@@ -528,7 +566,7 @@ def train(args: StemTrainArgs):
 
             # get batch
             curr_lr = float(optimizer["lm"].param_groups[0]["lr"])
-            curr_stem_lr = float(optimizer["stem"].param_groups[0]["lr"])
+            curr_ngram_lr = float(optimizer["ngram"].param_groups[0]["lr"])
             data_load_start = timer()
             batch, train_state.data_loader_state = next(data_loader)
             batch = torch.tensor(
@@ -582,11 +620,11 @@ def train(args: StemTrainArgs):
                         input_ids[:probe_bsz, :probe_seq],
                         labels[:probe_bsz, :probe_seq],
                     )
-                    probe_loss, _ = unpack_stem_train_loss_out(probe_raw)
+                    probe_loss, _ = unpack_longcat_train_loss_out(probe_raw)
                     probe_loss.backward()
                     # We zero grads to cancel this fake step
                     optimizer["lm"].zero_grad()
-                    optimizer["stem"].zero_grad()
+                    optimizer["ngram"].zero_grad()
 
                 assert (
                     next(model.parameters()).grad is None
@@ -607,7 +645,7 @@ def train(args: StemTrainArgs):
             else:
                 raw_loss_out = model(input_ids, labels, teacher_logits=teacher_logits)
 
-            loss, log_distill_t = unpack_stem_train_loss_out(raw_loss_out)
+            loss, log_distill_t = unpack_longcat_train_loss_out(raw_loss_out)
 
             if args.grad_acc_steps > 1:
                 model.set_requires_gradient_sync(train_state.acc_step == 0)
@@ -622,9 +660,9 @@ def train(args: StemTrainArgs):
 
             # optimizer step
             grad_norm = -1.0
-            stem_grad_norm = -1.0
+            ngram_grad_norm = -1.0
             if train_state.acc_step == 0:
-                # Clip gradients separately for lm_transformer and stem_embeddings
+                # Clip gradients separately for lm_transformer and ngram_embeddings
                 # since they have different tensor types (DTensor vs regular Tensor)
                 # Clip gradients from lm_transformer (DTensors from FSDP)
                 lm_params = [p for p in model.lm_transformer.parameters() if p.grad is not None]
@@ -636,13 +674,13 @@ def train(args: StemTrainArgs):
                         grad_norm.full_tensor() if isinstance(grad_norm, DTensor) else grad_norm
                     ).item()
                 
-                # Sync stem_embeddings gradients across STEM data-parallel ranks.
-                # FSDP handles gradient sync for lm_transformer, but stem_embeddings
+                # Sync ngram_embeddings gradients across STEM data-parallel ranks.
+                # FSDP handles gradient sync for lm_transformer, but ngram_embeddings
                 # are managed manually and need an explicit all-reduce when there are
                 # multiple data-parallel groups (e.g. multi-node with intra-node STEM MP).
                 if get_stem_data_parallel_world_size() > 1:
                     dp_group = get_stem_data_parallel_group()
-                    for param in model.stem_embeddings.parameters():
+                    for param in model.ngram_embeddings.parameters():
                         if param.grad is not None:
                             torch.distributed.all_reduce(
                                 param.grad,
@@ -650,37 +688,43 @@ def train(args: StemTrainArgs):
                                 group=dp_group,
                             )
 
-                # Clip gradients from stem_embeddings (regular Tensors, manually managed)
-                stem_params = [p for p in model.stem_embeddings.parameters() if p.grad is not None]
-                if stem_params:
-                    stem_grad_norm = torch.nn.utils.clip_grad_norm_(
-                        stem_params, max_norm=args.optim.clip, foreach=False
+                # Clip gradients from ngram_embeddings (regular Tensors, manually managed)
+                ngram_params = [
+                    p for p in model.ngram_embeddings.parameters() if p.grad is not None
+                ]
+                if ngram_params:
+                    ngram_grad_norm = torch.nn.utils.clip_grad_norm_(
+                        ngram_params, max_norm=args.optim.clip, foreach=False
                     ).item()
                 else:
-                    # Debug: check if stem_embeddings have gradients at all
-                    all_stem_params = list(model.stem_embeddings.parameters())
-                    params_with_grad = [p for p in all_stem_params if p.grad is not None]
-                    params_without_grad = [p for p in all_stem_params if p.grad is None]
+                    all_ngram_params = list(model.ngram_embeddings.parameters())
+                    params_with_grad = [p for p in all_ngram_params if p.grad is not None]
+                    params_without_grad = [
+                        p for p in all_ngram_params if p.grad is None
+                    ]
                     if params_without_grad:
                         logger.warning(
-                            f"Warning: {len(params_without_grad)}/{len(all_stem_params)} stem_embeddings parameters "
-                            f"have no gradients. This may indicate a gradient flow issue."
+                            f"Warning: {len(params_without_grad)}/{len(all_ngram_params)} "
+                            "ngram_embeddings parameters have no gradients."
                         )
-                    # Check if any gradients are zero
                     if params_with_grad:
-                        zero_grads = [p for p in params_with_grad if p.grad is not None and p.grad.abs().max() == 0]
+                        zero_grads = [
+                            p
+                            for p in params_with_grad
+                            if p.grad is not None and p.grad.abs().max() == 0
+                        ]
                         if zero_grads:
                             logger.warning(
-                                f"Warning: {len(zero_grads)}/{len(params_with_grad)} stem_embeddings parameters "
-                                f"have zero gradients."
+                                f"Warning: {len(zero_grads)}/{len(params_with_grad)} "
+                                "ngram_embeddings parameters have zero gradients."
                             )
 
                 optimizer["lm"].step()
-                optimizer["stem"].step()
+                optimizer["ngram"].step()
                 scheduler["lm"].step()
-                scheduler["stem"].step()
+                scheduler["ngram"].step()
                 optimizer["lm"].zero_grad()
-                optimizer["stem"].zero_grad()
+                optimizer["ngram"].zero_grad()
                 train_state.step += 1
 
             # updates the scale for next iteration
@@ -729,12 +773,12 @@ def train(args: StemTrainArgs):
                 optim_dict = {
                     "grad_norm": grad_norm,
                     "lr": curr_lr,
-                    "stem_lr": curr_stem_lr,
+                    "ngram_lr": curr_ngram_lr,
                     "total_tokens": total_tokens,
                 }
-                # Add stem gradient norm if available
-                if stem_grad_norm >= 0:
-                    optim_dict["stem_grad_norm"] = stem_grad_norm
+                # Add n-gram embedding gradient norm if available
+                if ngram_grad_norm >= 0:
+                    optim_dict["ngram_grad_norm"] = ngram_grad_norm
                 
                 metrics = flatten_dict(
                     {
@@ -771,14 +815,6 @@ def train(args: StemTrainArgs):
                 metrics.update(dist_mean_dict(to_sync))
                 metrics.update(alpha_dict)
 
-                if args.data.track_packed_source_mixture and args.data.packed_source_counts is not None:
-                    metrics.update(
-                        all_reduce_packed_source_fraction_metrics(
-                            args.data.packed_source_counts,
-                            input_ids.device,
-                        )
-                    )
-
                 if get_is_master():
                     metric_logger.log(metrics)
 
@@ -793,15 +829,15 @@ def train(args: StemTrainArgs):
                 )
                 if distill_aux is not None:
                     log_msg += f"  distill: {round(distill_aux, 4):>7}"
-                if stem_grad_norm >= 0:
-                    log_msg += f"  stem_grad: {stem_grad_norm:.2e}"
+                if ngram_grad_norm >= 0:
+                    log_msg += f"  ngram_grad: {ngram_grad_norm:.2e}"
                 log_msg += (
                     f"  flops: {FLOPS:.2e}"
                     f"  wps: {wps:.2e}"
                     f"  iter: {curr_iter_time:>7}"
                     f"  data: {data_load_time:>5}"
                     f"  lr: {curr_lr:.2e}"
-                    f"  stem_lr: {curr_stem_lr:.2e}"
+                    f"  ngram_lr: {curr_ngram_lr:.2e}"
                     f"  mem: {gpu_mem_stats.max_active_pct:.0f}%"
                     f"  pow: {gpu_mem_stats.power_draw/1000} W"
                 )
@@ -826,18 +862,14 @@ def train(args: StemTrainArgs):
             if args.eval is not None and (every_n_steps(
                 train_state, args.checkpoint.eval.every, acc_step=0
             ) or every_n_steps(train_state, target_step, acc_step=0)):
-                from apps.main.stem_eval import (
-                    launch_stem_eval,
-                    EVAL_FOLDER_NAME,
-                    StemEvalArgs,
-                )
+                from apps.main.eval import EVAL_FOLDER_NAME, EvalArgs
+                from apps.main.longcat_ngram_eval import launch_longcat_eval
 
-                eval_args = dataclass_from_dict(StemEvalArgs, args.eval)
+                eval_args = dataclass_from_dict(EvalArgs, args.eval)
 
                 eval_args.model_type = args.model_type
                 eval_args.global_step = train_state.step
                 eval_args.ckpt_dir = str(checkpoint.existing_saves[-1])
-                eval_args.stem_parallel_size = args.distributed.stem_parallel_size
                 eval_args.dump_dir = str(
                     os.path.join(
                         args.dump_dir,
@@ -847,7 +879,7 @@ def train(args: StemTrainArgs):
                 )
                 eval_args.metric_log_dir = args.dump_dir
                 if args.async_eval_gpus is None:
-                    launch_stem_eval(eval_args)
+                    launch_longcat_eval(eval_args)
                 elif get_is_master():
                     if wandb.run is not None and args.logging.wandb is not None:
                         eval_args.wandb = deepcopy(args.logging.wandb)
@@ -857,7 +889,7 @@ def train(args: StemTrainArgs):
                         launch_job(
                             StoolArgs(
                                 asdict(eval_args),
-                                script="apps.main.stem_eval",
+                                script="apps.main.longcat_eval",
                                 copy_code=False,
                                 nodes=args.async_eval_gpus // 8,
                                 qos="lowest",
@@ -893,7 +925,7 @@ def main():
     # We remove 'config' attribute from config as the underlying DataClass does not have it
     del cli_args.config
 
-    default_cfg = OmegaConf.structured(StemTrainArgs())
+    default_cfg = OmegaConf.structured(LongcatTrainArgs())
     cfg = OmegaConf.merge(default_cfg, file_cfg, cli_args)
     cfg = OmegaConf.to_object(cfg)
 
@@ -902,3 +934,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
+        

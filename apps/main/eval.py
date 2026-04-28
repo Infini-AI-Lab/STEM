@@ -8,9 +8,18 @@ import logging
 import os
 import wandb
 from pathlib import Path
+from typing import Any, List, Optional, Tuple, Union
+
+# Install evaluate.load("code_eval") sharding before any lm_eval imports.
+from apps.main.eval_utils import (
+    apply_humaneval_runtime_patches,
+    apply_mbpp_runtime_patches,
+    harness_has_humaneval_task,
+    harness_has_mbpp_task,
+)
+
 from lm_eval.api.instance import Instance
 from lm_eval.api.model import LM
-from typing import Any, List, Optional, Tuple, Union
 from lm_eval import simple_evaluate
 from omegaconf import OmegaConf
 import torch
@@ -22,12 +31,6 @@ from apps.main.generate import (
 from apps.main.transformer import LMTransformer, LMTransformerArgs
 from apps.main.qwen3 import Qwen3LMTransformer, Qwen3LMTransformerArgs
 from apps.main.olmo3 import OLMo3LMTransformer, OLMo3LMTransformerArgs
-from apps.main.eval_utils import (
-    apply_humaneval_runtime_patches,
-    apply_mbpp_runtime_patches,
-    harness_has_humaneval_task,
-    harness_has_mbpp_task,
-)
 from lingua.args import dump_config
 from lingua.checkpoint import CONSOLIDATE_FOLDER, consolidate_checkpoints
 from lingua.data import init_choice_state, setup_sources

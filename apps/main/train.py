@@ -28,6 +28,7 @@ from lingua.checkpoint import CheckpointArgs, CheckpointManager, load_from_check
 from lingua.data import (
     DataArgs,
     PackTokensState,
+    all_reduce_packed_source_fraction_metrics,
     build_dataloader_from_args,
     init_dataloader_state_from_args,
 )
@@ -642,6 +643,14 @@ def train(args: TrainArgs):
                 to_sync = {}
                 to_sync["loss/out"] = loss.item()
                 metrics.update(dist_mean_dict(to_sync))
+
+                if args.data.track_packed_source_mixture and args.data.packed_source_counts is not None:
+                    metrics.update(
+                        all_reduce_packed_source_fraction_metrics(
+                            args.data.packed_source_counts,
+                            input_ids.device,
+                        )
+                    )
 
                 if get_is_master():
                     metric_logger.log(metrics)
