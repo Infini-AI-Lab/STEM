@@ -316,6 +316,7 @@ def main() -> None:
             root_dir=multi_state["root_dir"],
             sources=multi_state["sources"],
             rng_state=multi_state["rng_state"],
+            source_counts=source_counts if cfg.data.track_packed_source_mixture else None,
         )
         tok_it = tokenize_tagged(
             tagged,

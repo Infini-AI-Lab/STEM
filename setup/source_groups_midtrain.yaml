@@ -1,0 +1,121 @@
+groups:
+  # - source: code-meta-reasoning
+  #   ratio: 0.169122
+  #   prefixes:
+  #     - code-meta-reasoning
+
+  # - source: common_crawl-high-quality
+  #   ratio: 7.776233
+  #   prefixes:
+  #     - common_crawl-high-quality
+
+  # - source: cranecode
+  #   ratio: 4.971690
+  #   prefixes:
+  #     - cranecode
+
+  # - source: cranemath
+  #   ratio: 3.076499
+  #   prefixes:
+  #     - cranemath
+
+  # - source: dolmino-math
+  #   ratio: 9.475957
+  #   prefixes:
+  #     - dolmino-math
+
+  # - source: dolmino_1-flan
+  #   ratio: 6.288976
+  #   prefixes:
+  #     - dolmino_1-flan
+
+  # - source: gemini-reasoning-traces
+  #   ratio: 0.036162
+  #   prefixes:
+  #     - gemini-reasoning-traces
+
+  # - source: general_reasoning_mix
+  #   ratio: 0.311049
+  #   prefixes:
+  #     - general_reasoning_mix
+
+  # - source: llama_nemotron-reasoning-traces
+  #   ratio: 1.234568
+  #   prefixes:
+  #     - llama_nemotron-reasoning-traces
+
+  # - source: math-meta-reasoning
+  #   ratio: 0.170397
+  #   prefixes:
+  #     - math-meta-reasoning
+
+  # - source: megamatt
+  #   ratio: 1.372526
+  #   prefixes:
+  #     - megamatt
+
+  # - source: nemotron-synth-qa
+  #   ratio: 4.504267
+  #   prefixes:
+  #     - nemotron-synth-qa
+
+  # - source: olmocr_science_pdfs
+  #   ratio: 0.509917
+  #   prefixes:
+  #     - olmocr_science_pdfs
+
+  - source: omr-rewrite-fullthoughts
+    ratio: 0.85
+    prefixes:
+      - omr-rewrite-fullthoughts
+
+  # - source: openthoughts2
+  #   ratio: 0.170822
+  #   prefixes:
+  #     - openthoughts2
+
+  # - source: program_verifiable
+  #   ratio: 0.067139
+  #   prefixes:
+  #     - program_verifiable
+
+  # - source: qwq-reasoning-traces
+  #   ratio: 0.170397
+  #   prefixes:
+  #     - qwq-reasoning-traces
+
+  # - source: reddit_to_flashcards
+  #   ratio: 42.918011
+  #   prefixes:
+  #     - reddit_to_flashcards
+
+  # - source: stack_edu
+  #   ratio: 6.883879
+  #   prefixes:
+  #     - stack_edu
+
+  # - source: stem-heavy-crawl
+  #   ratio: 2.349868
+  #   prefixes:
+  #     - stem-heavy-crawl
+
+  # - source: tinymath-mind
+  #   ratio: 5.2
+  #   prefixes:
+  #     - tinymath-mind
+
+  # - source: tinymath-pot
+  #   ratio: 4.9
+  #   prefixes:
+  #     - tinymath-pot
+
+  # - source: tulu-3-sft
+  #   ratio: 0.616150
+  #   prefixes:
+  #     - tulu-3-sft
+
+  # - source: wiki_to_rcqa
+    # ratio: 6.926372
+    # prefixes:
+    #   - wiki_to_rcqa-
+  

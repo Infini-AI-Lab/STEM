@@ -1,9 +1,9 @@
 groups:
-  - source: Code_Main
-    ratio: 20.0
-    prefixes:
-      - stack_edu_fim-
-      - cranecode
+  # - source: Code_Main
+  #   ratio: 20.0
+  #   prefixes:
+  #     - stack_edu_fim-
+  #     - cranecode
 
   - source: Code_Reasoning
     ratio: 10.0
@@ -13,10 +13,10 @@ groups:
       - code-meta-reasoning
       - program_verifiable
 
-  - source: Math_Main
-    ratio: 5.0
-    prefixes:
-      - dolmino-math
-      - cranemath
-      - megamatt
+  # - source: Math_Main
+  #   ratio: 5.0
+  #   prefixes:
+  #     - dolmino-math
+  #     - cranemath
+  #     - megamatt
       

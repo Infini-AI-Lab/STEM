@@ -1,0 +1,17 @@
+groups:
+  # - source: CommonCrawlHQ
+  #   ratio: 22.5
+  #   prefixes:
+  #     - common_crawl-high_quality
+
+  - source: STEM_Heavy
+    ratio: 10.0
+    prefixes:
+      - olmocr-science_pdfs
+      - stem-heavy-crawl
+
+  - source: Flashcards_RCQA
+    ratio: 8.9
+    prefixes:
+      - reddit_to_flashcards
+      - wiki_to_rcqa

@@ -1,0 +1,37 @@
+groups:
+  - source: Code_Main
+    ratio: 20.0
+    prefixes:
+      - stack_edu
+      - cranecode
+
+  - source: Math_Main
+    ratio: 18.06
+    prefixes:
+      - dolmino-math
+      - cranemath
+      - megamatt
+
+  - source: CommonCrawlHQ
+    ratio: 8.0
+    prefixes:
+      - common_crawl-high_quality
+
+  - source: InstQA_Main
+    ratio: 5.0
+    prefixes:
+      - dolmino_1-flan
+      - nemotron-synth-qa
+      - tulu-3-sft
+
+  - source: Reasoning_Traces
+    ratio: 5.0
+    prefixes:
+      - qwq-reasoning-traces
+      - llama_nemotron-reasoning-traces
+      - openthoughts2-reasoning-traces
+      - gemini-reasoning-traces
+      - general_reasoning_mix
+      - math-meta-reasoning
+      - code-meta-reasoning
+      - program_verifiable

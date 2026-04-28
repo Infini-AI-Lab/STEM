@@ -28,14 +28,14 @@ harness:
           dataset_path: /data/rsadhukh/eval_data/ai2_arc
         - task: race
           dataset_path: /data/rsadhukh/eval_data/race
-        - task: mmlu
-          dataset_path: /data/rsadhukh/eval_data/mmlu
-        - task: gsm8k
-          dataset_path: /data/rsadhukh/eval_data/gsm8k
-        - task: mbpp
-          dataset_path: /data/rsadhukh/eval_data/mbpp
-        - task: humaneval
-          dataset_path: /data/rsadhukh/eval_data/humaneval
+        # - task: mmlu
+        #   dataset_path: /data/rsadhukh/eval_data/mmlu
+        # - task: gsm8k
+        #   dataset_path: /data/rsadhukh/eval_data/gsm8k
+        # - task: mbpp
+        #   dataset_path: /data/rsadhukh/eval_data/mbpp
+        # - task: humaneval
+        #   dataset_path: /data/rsadhukh/eval_data/humaneval
         # - task: bbh
         #   dataset_path: /data/rsadhukh/eval_data/bbh
         # - task: coqa

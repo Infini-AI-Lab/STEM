@@ -370,16 +370,38 @@ def choose_source_tagged(
     root_dir: str,
     sources: Dict[str, float],
     rng_state: Dict[str, Any],
+    source_counts: Optional[Dict[str, int]] = None,
 ) -> Iterator:
-    """Same as ``choose_source`` but yields ``(seq, chosen_source_key, multi_choice_state)`` for mixture tracking."""
+    """Same as ``choose_source`` but yields ``(seq, chosen_source_key, multi_choice_state)`` for mixture tracking.
+
+    When ``source_counts`` is provided, sampling weights are recomputed each step from the
+    *deficit* between the target token fraction and the realized fraction so far, making the
+    realized token-level mixture track ``sources`` regardless of per-source doc-length variance.
+    The dict is mutated in-place by ``pack_tokens_with_source_counts`` downstream, so each call
+    sees up-to-date counts. On resume the dict starts at zero; sampling falls back to the static
+    target fractions until enough tokens have accumulated.
+    """
     n_sources = len(sources)
     possible_sources = list(sources.keys())
-    weights = list(sources.values())
+    target_fracs = np.array(list(sources.values()), dtype=np.float64)
+    target_fracs = target_fracs / target_fracs.sum()
     rng = np.random.default_rng()
     rng.bit_generator.state = rng_state
     while True:
-        norm_weights = np.array(weights) / np.array(weights).sum()
-        source_choice = possible_sources[rng.choice(n_sources, p=norm_weights)]
+        if source_counts is not None:
+            emitted = np.array(
+                [source_counts[s] for s in possible_sources], dtype=np.float64
+            )
+            total = emitted.sum()
+            deficit = np.maximum(0.0, target_fracs * total - emitted)
+            deficit_sum = deficit.sum()
+            if deficit_sum > 0.0:
+                weights = deficit / deficit_sum
+            else:
+                weights = target_fracs
+        else:
+            weights = target_fracs
+        source_choice = possible_sources[rng.choice(n_sources, p=weights)]
         seq, state = next(source_to_iterator[source_choice])
         source_to_state = {**source_to_state, source_choice: state}
         multi_choice_state = MultiChoiceState(
@@ -803,6 +825,7 @@ def build_dataloader(
             root_dir=multi_state["root_dir"],
             sources=multi_state["sources"],
             rng_state=multi_state["rng_state"],
+            source_counts=source_counts,
         )
         data_it = tokenize_tagged(
             data_it,
@@ -932,7 +955,9 @@ class DataArgs:
     prefetch_size: int = 64
     tokenizer: TokenizerArgs = field(default_factory=TokenizerArgs)
     # When True, ``packed_source_counts`` is filled during packing (same attribution as
-    # ``measure_source_tokens_packed``). Async loading is disabled because counts live in-process.
+    # ``measure_source_tokens_packed``) and source sampling becomes deficit-driven so the
+    # realized token-level mixture tracks ``sources`` despite cross-source doc-length variance.
+    # Async loading is disabled because counts live in-process.
     track_packed_source_mixture: bool = False
     packed_source_counts: Optional[Dict[str, int]] = field(default=None, repr=False)
 

@@ -45,6 +45,7 @@ declare -A DATASETS=(
     ["gsm8k"]="openai/gsm8k"
     ["mmlu"]="cais/mmlu"
     ["mbpp"]="google-research-datasets/mbpp"
+    ["humaneval"]="openai/openai_humaneval"
 )
 
 download_dataset() {

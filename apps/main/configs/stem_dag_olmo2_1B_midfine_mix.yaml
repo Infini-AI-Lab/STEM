@@ -4,7 +4,7 @@ model_type: olmo3_dag
 steps: 50_000
 probe_freq: 100
 seed: 777
-grad_acc_steps: 2
+grad_acc_steps: 4
 
 optim:
     scheduler: "linear"
@@ -50,38 +50,38 @@ data:
     root_dir: /dev/shm/dolmino-mix_shuffled
     sources:
         # Code
-        cranecode: 4.971690
-        stack_edu: 6.883879
+        cranecode: 10.0
+        stack_edu: 10.0
 
         # Math
-        cranemath: 3.076499
-        dolmino-math: 13.167888
-        megamatt: 1.372526
-        tinymath-mind: 2.06
-        tinymath-pot: 0.76
+        cranemath: 5.63
+        dolmino-math: 10.7
+        megamatt: 1.73
+        tinymath-mind: 0.9
+        tinymath-pot: 0.24
 
         # QA
-        reddit_to_flashcards: 42.918011
-        wiki_to_rcqa: 6.926372
-        nemotron-synth-qa: 4.504267
+        reddit_to_flashcards: 5.9
+        wiki_to_rcqa: 3.0
+        nemotron-synth-qa: 5.0
 
         # Thinking / Reasoning
-        math-meta-reasoning: 0.170397
-        code-meta-reasoning: 0.017646
-        program_verifiable: 0.134278
-        qwq-reasoning-traces: 0.080939
-        openthoughts2: 0.123371
-        general_reasoning_mix: 0.236397
-        gemini-reasoning-traces: 0.024108
+        math-meta-reasoning: 0.38
+        code-meta-reasoning: 0.46
+        program_verifiable: 0.16
+        qwq-reasoning-traces: 1.87
+        openthoughts2: 1.25
+        general_reasoning_mix: 1.87
+        gemini-reasoning-traces: 0.25
 
         # Instruction
-        tulu-3-sft: 0.616150
-        dolmino_1-flan: 6.288976
+        tulu-3-sft: 1.1
+        dolmino_1-flan: 5.0
 
         # STEM-heavy + PDFs + Web
-        olmocr_science_pdfs: 0.318698
-        stem-heavy-crawl: 2.303792
-        common_crawl-high-quality: 7.673463
+        olmocr_science_pdfs: 5.0
+        stem-heavy-crawl: 5.0
+        common_crawl-high-quality: 22.5
     node_local: false
     batch_size: 8
     prefetch_size: 1024

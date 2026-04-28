@@ -1,3 +1,6 @@
+# local virtualenv (activate: source stem/bin/activate)
+stem/
+
 *.pyc
 *.log
 .vscode
