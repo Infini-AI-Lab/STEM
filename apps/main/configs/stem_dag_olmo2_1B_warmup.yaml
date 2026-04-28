@@ -1,5 +1,21 @@
+# DAG-STEM training for OLMo2 1B (backbone type olmo3_dag in this repo).
+#
+# Prerequisite: run prepare_dag_stem_checkpoint.py on your OLMo2-1B distcp checkpoint,
+# with matching --stem-layers and --stem-parallel-size, e.g.:
+#   python apps/main/prepare_dag_stem_checkpoint.py \
+#     --ckpt-path /path/to/olmo2-1b/distcp \
+#     --output-dir /path/to/olmo2-1b-dag-stem-init \
+#     --model-type olmo3 \
+#     --stem-layers 2 6 10 14 \
+#     --stem-parallel-size 4 \
+#     --alpha-init -5.0
+#
+# Launch:
+#   torchrun --nproc-per-node=<N> -m apps.main.stem_dag_train \
+#     config=apps/main/configs/stem_dag_olmo2_1B.yaml
+
 dump_dir: logs/stem_dag_olmo2_1B
-name: stem_dag_olmo2_1B_midtrain
+name: stem_dag_olmo2_1B_warmup
 model_type: olmo3_dag
 steps: 50_000
 probe_freq: 100
@@ -7,17 +23,18 @@ seed: 777
 grad_acc_steps: 4
 
 optim:
-    scheduler: "linear"
-    lr: 7.44e-5
+    lr: 4e-4
     weight_decay: 0.1
     warmup: 0
-    lr_min_ratio: 0.0
+    lr_min_ratio: 0.1
     clip: 1.0
+    initial_token_offset: 1907359
+    global_final_step: 2384186
 
-stem_lr: 3e-4
+stem_lr: 8e-4
 stem_weight_decay: 1e-4
-stem_lr_min_ratio: 0
 stem_warmup: 1000
+stem_lr_min_ratio: 0.3
 
 distributed:
     fsdp_type: full_shard
@@ -26,11 +43,11 @@ distributed:
     matmul_allow_tf32: false
     selective_activation_checkpointing: false
     tp_size: 1
-    stem_parallel_size: 2
+    stem_parallel_size: 8
 
 model:
     dim: 2048
-    ffn_dim_multiplier: 1.5
+    ffn_dim_multiplier: 1.5000915583
     multiple_of: 256
     n_layers: 16
     n_heads: 16
@@ -44,46 +61,14 @@ model:
     vocab_size: 100352
     rope_theta: 500000.0
     rope_scaling: null
-    stem_layers: [1, 2, 3, 4]
+    stem_layers: [1,2,3,4,5,6,7,8]
     alpha_init: -5.0
 
 data:
-    root_dir: /dev/shm/dolmino-mix_shuffled
+    root_dir: /dev/shm
     sources:
-        # Code
-        cranecode: 10.0
-        stack_edu: 10.0
-
-        # Math
-        cranemath: 5.63
-        dolmino-math: 10.7
-        megamatt: 1.73
-        tinymath-mind: 0.9
-        tinymath-pot: 0.24
-
-        # QA
-        reddit_to_flashcards: 5.9
-        wiki_to_rcqa: 3.0
-        nemotron-synth-qa: 5.0
-
-        # Thinking / Reasoning
-        math-meta-reasoning: 0.38
-        code-meta-reasoning: 0.46
-        program_verifiable: 0.16
-        qwq-reasoning-traces: 1.87
-        openthoughts2: 1.25
-        general_reasoning_mix: 1.87
-        gemini-reasoning-traces: 0.25
-
-        # Instruction
-        tulu-3-sft: 1.1
-        dolmino_1-flan: 5.0
-
-        # STEM-heavy + PDFs + Web
-        olmocr_science_pdfs: 5.0
-        stem-heavy-crawl: 5.0
-        common_crawl-high-quality: 22.5
-    node_local: false
+        local-shard: 1.0
+    node_local: true
     batch_size: 4
     prefetch_size: 1024
     seq_len: 4096
@@ -91,11 +76,9 @@ data:
     load_async: true
     add_bos: true
     add_eos: true
-    track_packed_source_mixture: true
     tokenizer:
         name: huggingface
         path: checkpoints/olmo2-1b-stage1-token1T
-
 
 profiling:
     run: true
@@ -112,8 +95,8 @@ checkpoint:
 logging:
     freq: 10
     wandb:
-        project: "stem"
-        name: "stem-dag-olmo2-1B-midtrain"
+        project: stem
+        name: stem-dag-olmo2-1B
 
 eval:
     generator:
@@ -139,14 +122,7 @@ eval:
               dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/ai2_arc
             - task: race
               dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/race
-            - task: gsm8k
-              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/gsm8k
-            - task: mmlu
-              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/mmlu
-            - task: mbpp
-              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/mbpp
-            - task: humaneval
-              dataset_path: /data-fsx/beidchen-sandbox/data/eval_data/humaneval
         confirm_run_unsafe_code: true
         batch_size: 64
-    validation: null
+    validation:
+        max_steps: 8000
