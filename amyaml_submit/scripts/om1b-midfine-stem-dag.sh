@@ -26,8 +26,6 @@ NODE_RANK=${HOSTNAME##*-}
 echo "NODE_RANK: $NODE_RANK"
 echo "WANDB_MODE: $WANDB_MODE"
 
-aws s3 sync s3://agi-mm-training-shared-us-east-2/beidchen/data/stem/stem_dag_olmo2-1B_L12/ /dev/shm/warmup_stem_L12 --region us-east-2
-
 python3 setup/prepare_hf_dataset_by_source.py \
     --local_dir /dev/shm/data \
     --out_dir /dev/shm/dolmino-mix_shuffled \
@@ -50,6 +48,8 @@ rm -rf /dev/shm/data
 
 hf download Rano23/olmo2-1b-base-token4T --local-dir /dev/shm/olmo2-1b-base-token4T
 
+hf download Rano23/stem_dag_olmo2-1B_L12 --local-dir /dev/shm/stem_dag_olmo2-1B_L12
+
 
 echo "########################################################"
 echo "Training starting"
@@ -58,7 +58,7 @@ echo "########################################################"
 torchrun --nproc-per-node=8 --nnodes=${NNODES} -m apps.main.stem_dag_train \
     config=apps/main/configs/stem_dag_olmo2_1B_midtrain.yaml \
     dump_dir=/data-fsx/beidchen-sandbox/data/logs/${experiment_name} \
-    checkpoint.init_ckpt_path=/dev/shm/warmup_stem_L12/ \
+    checkpoint.init_ckpt_path=/dev/shm/stem_dag_olmo2-1B_L12 \
     checkpoint.continue_training_from_init=true \
     checkpoint.merge_lm_optim_seed_ckpt_path=/dev/shm/olmo2-1b-base-token4T \
     checkpoint.dump.every=10000 \

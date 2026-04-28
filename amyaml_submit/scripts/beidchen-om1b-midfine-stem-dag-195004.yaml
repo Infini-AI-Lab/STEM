@@ -36,7 +36,7 @@ spec:
                         values:
                           - p5en.48xlarge
           tolerations:
-            - key: yadunanr-knowledge-stem-5e-p5en
+            - key: mziyadi-lmsys
               operator: Equal
               value: "True"
               effect: NoSchedule
