@@ -84,13 +84,27 @@ def consolidate_checkpoints(ckpt_dir: str):
 
     Returns the path to the consolidated checkpoint
     """
-    consolidate_path = Path(ckpt_dir) / CONSOLIDATE_FOLDER
+    ckpt_root = Path(ckpt_dir)
+    if not ckpt_root.is_dir():
+        raise FileNotFoundError(
+            f"Checkpoint directory does not exist (cannot consolidate): {ckpt_root.resolve()}"
+        )
+    # Caller already points at ``.../consolidated/`` (has ``consolidated.pth``).
+    if (ckpt_root / CONSOLIDATE_NAME).exists():
+        return ckpt_root
+
+    consolidate_path = ckpt_root / CONSOLIDATE_FOLDER
     if not (consolidate_path / CONSOLIDATE_NAME).exists():
-        consolidate_path.mkdir(exist_ok=True)
+        if not (ckpt_root / ".metadata").exists():
+            raise ValueError(
+                "Not a DCP checkpoint (missing .metadata) and not an existing "
+                f"consolidated tree (no {CONSOLIDATE_NAME}). Path: {ckpt_root.resolve()}"
+            )
+        consolidate_path.mkdir(parents=True, exist_ok=True)
         logger.info(f"Consolidating to: {str(consolidate_path)}")
-        dcp_to_torch_save(ckpt_dir, str(consolidate_path / CONSOLIDATE_NAME))
+        dcp_to_torch_save(str(ckpt_root), str(consolidate_path / CONSOLIDATE_NAME))
         (consolidate_path / CONFIG_NAME).write_text(
-            (Path(ckpt_dir) / CONFIG_NAME).read_text()
+            (ckpt_root / CONFIG_NAME).read_text()
         )
         logger.info("Consolidated !")
     return consolidate_path

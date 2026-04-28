@@ -16,7 +16,7 @@ class StemTransformerArgs(BaseTransformerArgs):
     stem_layers: Optional[List[int]] = None
     stem_embedding_dim: Optional[int] = None
     # When True, stem embedding tables are zero-filled instead of ParallelEmbedding's
-    # default (Xavier normal via reset_parameters).
+    # default (normal with std sqrt(embedding_dim) via reset_parameters).
     stem_embeddings_zero_reset: bool = False
   
 

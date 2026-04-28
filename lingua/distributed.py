@@ -468,7 +468,7 @@ def parallelize_model(
 
         # For StemLMTransformer, wrap only lm_transformer as root, not the entire model
         # This ensures stem_embeddings remain unwrapped and can be managed manually
-        if hasattr(model, "lm_transformer") and hasattr(model, "stem_embeddings"):
+        if hasattr(model, "lm_transformer"):
             # This is a StemLMTransformer - wrap only lm_transformer as root
             model.lm_transformer = fully_shard(
                 model.lm_transformer, **fsdp_config, reshard_after_forward=True

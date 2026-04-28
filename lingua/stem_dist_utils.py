@@ -3,6 +3,7 @@
 from logging import getLogger, Logger
 from typing import Callable, Optional, List, Dict
 from datetime import timedelta
+import math
 
 import torch
 import torch.distributed as dist
@@ -479,6 +480,19 @@ def _initialize_affine_weight(
     return None
 
 
+def _default_parallel_embedding_init(
+    embedding_dim: int,
+) -> Callable[[torch.Tensor], torch.Tensor]:
+    """Normal distribution with std = sqrt(embedding_dim) (in-place on the tensor)."""
+
+    std = 1.0 / math.sqrt(float(embedding_dim))
+
+    def init_(weight: torch.Tensor) -> torch.Tensor:
+        return torch.nn.init.normal_(weight, mean=0.0, std=std)
+
+    return init_
+
+
 class ParallelEmbedding(torch.nn.Module):
     def __init__(
         self,
@@ -489,9 +503,7 @@ class ParallelEmbedding(torch.nn.Module):
         norm_type: float = 2.0,
         scale_grad_by_freq: bool = False,
         sparse: bool = False,
-        init_method: Callable[
-            [torch.Tensor], torch.Tensor
-        ] = torch.nn.init.xavier_normal_,
+        init_method: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         keep_master_weight_for_test: bool = False,
         device: Optional[torch.device] = None,
     ) -> None:
@@ -518,7 +530,11 @@ class ParallelEmbedding(torch.nn.Module):
             torch.empty(self.num_embeddings, self.embedding_dim_per_partition, device=device)
         )
         # And initialize.
-        self.init_method = init_method
+        self.init_method = (
+            init_method
+            if init_method is not None
+            else _default_parallel_embedding_init(embedding_dim)
+        )
         self.reset_parameters()
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:  
@@ -584,9 +600,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         norm_type: float = 2.0,
         scale_grad_by_freq: bool = False,
         sparse: bool = False,
-        init_method: Callable[
-            [torch.Tensor], torch.Tensor
-        ] = torch.nn.init.xavier_normal_,
+        init_method: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         keep_master_weight_for_test: bool = False,
         device: Optional[torch.device] = None,
     ) -> None:
@@ -611,7 +625,11 @@ class VocabParallelEmbedding(torch.nn.Module):
         self.weight = Parameter(
             torch.empty(self.num_embeddings_per_partition, self.embedding_dim, device=device)
         )
-        self.init_method = init_method
+        self.init_method = (
+            init_method
+            if init_method is not None
+            else _default_parallel_embedding_init(embedding_dim)
+        )
         self.keep_master_weight_for_test = keep_master_weight_for_test
         self.master_weight = None
         self.reset_parameters()

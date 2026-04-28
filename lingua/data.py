@@ -11,10 +11,16 @@ from multiprocessing.synchronize import Event as EventClass
 import os
 from pathlib import Path
 from queue import Full
-from typing import Dict, Any, Iterator, Optional, TypedDict
-from lingua.tokenizer import build_tokenizer, TokenizerArgs
-import numpy as np
+from typing import Dict, Any, Iterator, List, Optional, TypedDict
+
 import logging
+
+import numpy as np
+import torch
+import torch.distributed as dist
+
+from lingua.distributed import get_is_master
+from lingua.tokenizer import TokenizerArgs, build_tokenizer
 
 logger = logging.getLogger()
 
@@ -287,6 +293,31 @@ def tokenize(
         )
 
 
+def tokenize_tagged(
+    iterator: Iterator,
+    add_bos: bool,
+    add_eos: bool,
+    tokenizer_type: str,
+    tokenizer_path: Optional[str] = None,
+) -> Iterator:
+    """Like ``tokenize`` but iterator yields ``(content, doc_source, upstream_state)``."""
+    tokenizer = build_tokenizer(name=tokenizer_type, path=tokenizer_path)
+    for content, doc_source, mc_state in iterator:
+        assert (
+            "text" in content or "content" in content
+        ), "JSON line must contain either text or content key"
+        content_key = "text" if ("text" in content) else "content"
+        text = content[content_key]
+        tokens = tokenizer.encode(text, add_bos=add_bos, add_eos=add_eos)
+        yield tokens, doc_source, TokenizerState(
+            it_state=mc_state,
+            add_bos=add_bos,
+            add_eos=add_eos,
+            name=tokenizer_type,
+            path=tokenizer_path,
+        )
+
+
 def choose_source(
     source_to_iterator: Dict[str, Iterator],
     source_to_state: Dict[str, Any],
@@ -331,6 +362,33 @@ def choose_source(
             rng_state=rng.bit_generator.state,
         )
         yield seq, multi_choice_state
+
+
+def choose_source_tagged(
+    source_to_iterator: Dict[str, Iterator],
+    source_to_state: Dict[str, Any],
+    root_dir: str,
+    sources: Dict[str, float],
+    rng_state: Dict[str, Any],
+) -> Iterator:
+    """Same as ``choose_source`` but yields ``(seq, chosen_source_key, multi_choice_state)`` for mixture tracking."""
+    n_sources = len(sources)
+    possible_sources = list(sources.keys())
+    weights = list(sources.values())
+    rng = np.random.default_rng()
+    rng.bit_generator.state = rng_state
+    while True:
+        norm_weights = np.array(weights) / np.array(weights).sum()
+        source_choice = possible_sources[rng.choice(n_sources, p=norm_weights)]
+        seq, state = next(source_to_iterator[source_choice])
+        source_to_state = {**source_to_state, source_choice: state}
+        multi_choice_state = MultiChoiceState(
+            root_dir=root_dir,
+            sources=sources,
+            source_to_state=source_to_state,
+            rng_state=rng.bit_generator.state,
+        )
+        yield seq, source_choice, multi_choice_state
 
 
 def get_empty_buffer_state(
@@ -424,6 +482,67 @@ def pack_tokens(
                 )  # (output_seq_len, n_views)
 
                 # We rewind by n_views to account for the last tokens not having their targets
+                rewinded_idx = start_token - (n_views - 1)
+                empty_buffer_state = get_empty_buffer_state(rewinded_idx, states)
+                buffer = buffer[output_seq_len:]
+                assert len(buffer) == (n_views - 1)
+
+                yield out, empty_buffer_state
+
+            if start_token == len(tokens):
+                start_token = 0
+                sample_is_read = True
+                previous_state = state
+
+
+def pack_tokens_with_source_counts(
+    iterator: Iterator,
+    empty_buffer_state: PackTokensState,
+    source_counts: Dict[str, int],
+) -> Iterator:
+    """
+    Same packing as ``pack_tokens`` but ``iterator`` yields ``(tokens, doc_source, tokenizer_state)``;
+    each appended segment of length ``seq_len`` adds ``seq_len`` to ``source_counts[doc_source]``.
+    """
+    buffer = []
+    states = []
+    output_seq_len = empty_buffer_state["output_seq_len"]
+    n_views = empty_buffer_state["n_views"]
+    start_token = empty_buffer_state["start_token"]
+    previous_state = empty_buffer_state["it_state"]
+    buffer_size = output_seq_len + n_views - 1
+    for _i, (tokens, doc_source, state) in enumerate(iterator):
+        sample_is_read = False
+        while not sample_is_read:
+            assert start_token < len(
+                tokens
+            ), f"Start token index {start_token} bigger than sequence {len(tokens)}"
+            free_space = buffer_size - len(buffer)
+            seq_len = min(free_space, len(tokens) - start_token)
+            end_token = start_token + seq_len
+            buffer.extend(tokens[start_token:end_token])
+            start_token = end_token
+
+            source_counts[doc_source] += seq_len
+
+            states.append(
+                PackTokensState(
+                    start_token=start_token,
+                    seq_len=seq_len,
+                    it_state=previous_state,
+                    output_seq_len=output_seq_len,
+                    n_views=n_views,
+                )
+            )
+            assert len(buffer) <= buffer_size, "Buffer overflow"
+
+            if len(buffer) == buffer_size:
+                out = np.array(buffer)
+                assert out.ndim == 1, "Iterator should return 1D sequences"
+                out = np.lib.stride_tricks.sliding_window_view(
+                    out, n_views, axis=0
+                )  # (output_seq_len, n_views)
+
                 rewinded_idx = start_token - (n_views - 1)
                 empty_buffer_state = get_empty_buffer_state(rewinded_idx, states)
                 buffer = buffer[output_seq_len:]
@@ -670,31 +789,53 @@ def setup_sources(multi_state):
 @contextlib.contextmanager
 def build_dataloader(
     state: PrefetchState,
+    source_counts: Optional[Dict[str, int]] = None,
 ):
     pack_state = state["it_state"]
     tokenizer_state = pack_state["it_state"]
     multi_state = tokenizer_state["it_state"]
 
     path_to_iter = setup_sources(multi_state)
-    data_it = choose_source(
-        source_to_iterator=path_to_iter,
-        source_to_state=multi_state["source_to_state"],
-        root_dir=multi_state["root_dir"],
-        sources=multi_state["sources"],
-        rng_state=multi_state["rng_state"],
-    )
-    data_it = tokenize(
-        data_it,
-        tokenizer_state["add_bos"],
-        tokenizer_state["add_eos"],
-        tokenizer_state["name"],
-        tokenizer_state["path"],
-    )
+    if source_counts is not None:
+        data_it = choose_source_tagged(
+            source_to_iterator=path_to_iter,
+            source_to_state=multi_state["source_to_state"],
+            root_dir=multi_state["root_dir"],
+            sources=multi_state["sources"],
+            rng_state=multi_state["rng_state"],
+        )
+        data_it = tokenize_tagged(
+            data_it,
+            tokenizer_state["add_bos"],
+            tokenizer_state["add_eos"],
+            tokenizer_state["name"],
+            tokenizer_state["path"],
+        )
+        data_it = pack_tokens_with_source_counts(
+            data_it,
+            pack_state,
+            source_counts,
+        )
+    else:
+        data_it = choose_source(
+            source_to_iterator=path_to_iter,
+            source_to_state=multi_state["source_to_state"],
+            root_dir=multi_state["root_dir"],
+            sources=multi_state["sources"],
+            rng_state=multi_state["rng_state"],
+        )
+        data_it = tokenize(
+            data_it,
+            tokenizer_state["add_bos"],
+            tokenizer_state["add_eos"],
+            tokenizer_state["name"],
+            tokenizer_state["path"],
+        )
 
-    data_it = pack_tokens(
-        data_it,
-        pack_state,
-    )
+        data_it = pack_tokens(
+            data_it,
+            pack_state,
+        )
 
     data_it = batch_and_shuffle_prefetched_sequences(
         data_loader=data_it,
@@ -790,6 +931,10 @@ class DataArgs:
     load_async: bool = True
     prefetch_size: int = 64
     tokenizer: TokenizerArgs = field(default_factory=TokenizerArgs)
+    # When True, ``packed_source_counts`` is filled during packing (same attribution as
+    # ``measure_source_tokens_packed``). Async loading is disabled because counts live in-process.
+    track_packed_source_mixture: bool = False
+    packed_source_counts: Optional[Dict[str, int]] = field(default=None, repr=False)
 
 
 def init_dataloader_state_from_args(
@@ -818,8 +963,45 @@ def build_dataloader_from_args(
     args: DataArgs,
     state: Optional[PrefetchState] = None,
 ):
-    data_builder = partial(build_dataloader, state)
+    source_counts: Optional[Dict[str, int]] = None
+    if args.track_packed_source_mixture:
+        if args.load_async:
+            logger.warning(
+                "track_packed_source_mixture=True: source counts are updated in the dataloader "
+                "process only; forcing synchronous dataloader (load_async=False) for this run."
+            )
+        source_counts = {k: 0 for k in sorted(args.sources.keys())}
+        args.packed_source_counts = source_counts
+        data_builder = partial(build_dataloader, state, source_counts=source_counts)
+        return data_builder()
+    args.packed_source_counts = None
+    data_builder = partial(build_dataloader, state, source_counts=None)
     if args.load_async:
         return async_iterator(args.prefetch_size, data_builder)
     else:
         return data_builder()
+
+
+def all_reduce_packed_source_fraction_metrics(
+    counts: Dict[str, int],
+    device: torch.device,
+    *,
+    metric_prefix: str = "data/source_fraction_observed",
+) -> Dict[str, float]:
+    """
+    All ranks: sum packed-token counts across the default process group, then rank 0 returns
+    per-source fractions of the global packed total (same notion as ``measure_source_tokens_packed``).
+    Other ranks return an empty dict.
+    """
+    order: List[str] = sorted(counts.keys())
+    vec = torch.tensor([counts[s] for s in order], dtype=torch.long, device=device)
+    if dist.is_initialized() and dist.get_world_size() > 1:
+        dist.all_reduce(vec, op=dist.ReduceOp.SUM)
+    if not get_is_master():
+        return {}
+    total = int(vec.sum().item())
+    metrics: Dict[str, float] = {}
+    for i, s in enumerate(order):
+        tok = int(vec[i].item())
+        metrics[f"{metric_prefix}/{s}"] = (tok / total) if total else 0.0
+    return metrics
