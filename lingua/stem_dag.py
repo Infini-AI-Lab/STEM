@@ -63,7 +63,7 @@ class STEMDagTransformerArgs(StemTransformerArgs):
     # "sum":           up = w3(x) + y, no learnable gate (no alpha parameter).
     #                  Use this to evaluate checkpoints trained with the
     #                  simple-sum variant (no saved alpha).
-    alpha_mode: str = "sigmoid_gated"
+    alpha_mode: str = "sum"
 
 
 # =========================================================================
@@ -79,7 +79,7 @@ class STEMDagFeedForward(StemFeedForward):
         ffn_dim_multiplier: Optional[float],
         mp_size: int = 1,
         alpha_init: float = -5.0,
-        alpha_mode: str = "sigmoid_gated",
+        alpha_mode: str = "sum",
     ):
         super().__init__(dim, hidden_dim, multiple_of, ffn_dim_multiplier, mp_size)
         if alpha_mode not in _DAG_ALPHA_MODES:
