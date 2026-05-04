@@ -118,6 +118,47 @@ class GenerationResult:
     stop_reason: str
 
 
+@dataclass(frozen=True)
+class InterventionLayerDiagnostic:
+    layer_idx: int
+    stem_embedding_index: int
+    output_shape: List[int]
+    output_dtype: str
+    output_device: str
+    source_positions: List[int]
+    source_token_ids_at_positions: List[int]
+    target_token_ids: List[int]
+    replacement_token_ids: Optional[List[int]]
+    max_abs_diff_unedited_vs_baseline: float
+    max_abs_diff_edited_vs_expected: float
+    max_abs_diff_edit_vs_baseline: float
+    unedited_positions_match_baseline: bool
+    edited_positions_match_expected: bool
+    output_is_distinct_tensor: bool
+    selected_weight_rows_unchanged: bool
+    weight_version_unchanged: bool
+    passed: bool
+    failures: List[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class InterventionDiagnostics:
+    passed: bool
+    prompt_text_unchanged: bool
+    prompt_token_ids_unchanged: bool
+    source_positions_match_plan: bool
+    source_token_ids_match_plan: bool
+    stem_layers_expected: List[int]
+    stem_layers_checked: List[int]
+    forward_path_checked: bool
+    forward_path_called_layers: List[int]
+    forward_path_calls_match_stem_layers: bool
+    edit_mode: str
+    layer_diagnostics: List[InterventionLayerDiagnostic]
+    failures: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+
 def build_country_capital_prompt(
     query_country: str,
     examples: Optional[Sequence[CountryCapitalExample]] = None,
@@ -466,6 +507,22 @@ class StemEmbeddingOverride:
         return out
 
 
+class TracedStemEmbeddingOverride:
+    """Wrap a STEM override and record which layers the LM forward requested."""
+
+    def __init__(self, base: StemEmbeddingOverride):
+        self.base = base
+        self.calls: List[int] = []
+
+    @property
+    def plan(self) -> StemEditPlan:
+        return self.base.plan
+
+    def __call__(self, layer_idx: int, token_values: torch.Tensor) -> torch.Tensor:
+        self.calls.append(int(layer_idx))
+        return self.base(layer_idx, token_values)
+
+
 def make_stem_embedding_override_fn(
     model: Any,
     source_token_positions: Sequence[int],
@@ -504,6 +561,271 @@ def make_stem_embedding_override_fn(
         warnings=plan.warnings,
     )
     return StemEmbeddingOverride(model=model, plan=plan)
+
+
+def _max_abs_or_zero(tensor: torch.Tensor) -> float:
+    if tensor.numel() == 0:
+        return 0.0
+    return float(tensor.detach().abs().max().item())
+
+
+def _selected_weight_row_snapshot(
+    embedding: Any,
+    token_ids: Sequence[int],
+) -> Tuple[Optional[torch.Tensor], Optional[int]]:
+    weight = getattr(embedding, "weight", None)
+    if weight is None:
+        return None, None
+    unique_ids = sorted({int(token_id) for token_id in token_ids})
+    if not unique_ids:
+        return None, int(getattr(weight, "_version", -1))
+    rows = torch.tensor(unique_ids, dtype=torch.long, device=weight.device)
+    return weight.detach().index_select(0, rows).clone(), int(getattr(weight, "_version", -1))
+
+
+def _selected_weight_rows_unchanged(
+    embedding: Any,
+    token_ids: Sequence[int],
+    before_rows: Optional[torch.Tensor],
+) -> bool:
+    weight = getattr(embedding, "weight", None)
+    if weight is None or before_rows is None:
+        return True
+    unique_ids = sorted({int(token_id) for token_id in token_ids})
+    if not unique_ids:
+        return True
+    rows = torch.tensor(unique_ids, dtype=torch.long, device=weight.device)
+    after_rows = weight.detach().index_select(0, rows)
+    return bool(torch.equal(before_rows, after_rows))
+
+
+@torch.no_grad()
+def run_intervention_diagnostics(
+    *,
+    model: Any,
+    original_prompt: str,
+    intervened_prompt: str,
+    original_token_ids: Sequence[int],
+    intervened_token_ids: Sequence[int],
+    override: StemEmbeddingOverride,
+    device: Union[str, torch.device],
+    expected_source_positions: Sequence[int],
+    expected_stem_layers: Optional[Sequence[int]] = None,
+    attn_impl: str = "sdpa",
+    run_forward_path_check: bool = True,
+    atol: float = 0.0,
+    rtol: float = 0.0,
+) -> InterventionDiagnostics:
+    """Validate that the STEM intervention edits only the intended vectors.
+
+    This is a production safety gate for the central causal claim of the
+    experiment: the intervened case must keep the original prompt text and
+    token IDs, while replacing only the STEM lookup vectors at the configured
+    source positions for every STEM layer.
+    """
+
+    failures: List[str] = []
+    warnings: List[str] = []
+    original_ids = [int(token_id) for token_id in original_token_ids]
+    intervened_ids = [int(token_id) for token_id in intervened_token_ids]
+    plan_positions = list(override.plan.source_positions)
+    expected_positions = [int(pos) for pos in expected_source_positions]
+    prompt_text_unchanged = original_prompt == intervened_prompt
+    prompt_token_ids_unchanged = original_ids == intervened_ids
+    source_positions_match_plan = plan_positions == expected_positions
+    source_token_ids_match_plan = True
+
+    if not prompt_text_unchanged:
+        failures.append("Intervened prompt text differs from original prompt text.")
+    if not prompt_token_ids_unchanged:
+        failures.append("Intervened token IDs differ from original token IDs.")
+    if not source_positions_match_plan:
+        failures.append(
+            "Override source positions do not match detected source entity span: "
+            f"plan={plan_positions}, detected={expected_positions}."
+        )
+    if not original_ids:
+        failures.append("Original token IDs are empty.")
+    if any(pos < 0 or pos >= len(original_ids) for pos in plan_positions):
+        failures.append(
+            f"Source positions {plan_positions} are not all within prompt length {len(original_ids)}."
+        )
+
+    stem_layers = list(expected_stem_layers if expected_stem_layers is not None else getattr(model, "stem_layers", []))
+    stem_layers = [int(layer_idx) for layer_idx in stem_layers]
+    if not stem_layers:
+        failures.append("No STEM layers were provided or detected.")
+    if not hasattr(model, "_layer_to_stem_idx"):
+        failures.append("Model has no _layer_to_stem_idx mapping.")
+    if not hasattr(model, "stem_embeddings"):
+        failures.append("Model has no stem_embeddings module list.")
+
+    input_tensor = torch.tensor([original_ids], dtype=torch.long, device=device)
+    source_tokens_at_positions = [
+        int(original_ids[pos]) for pos in plan_positions if 0 <= pos < len(original_ids)
+    ]
+    source_token_ids_match_plan = source_tokens_at_positions == list(override.plan.source_token_ids)
+    if not source_token_ids_match_plan:
+        failures.append(
+            "Source token IDs at edit positions do not match the override plan: "
+            f"prompt={source_tokens_at_positions}, plan={override.plan.source_token_ids}."
+        )
+    selected_weight_ids = (
+        list(override.plan.source_token_ids)
+        + list(override.plan.target_token_ids)
+        + list(override.plan.replacement_token_ids or [])
+        + source_tokens_at_positions
+    )
+
+    layer_diagnostics: List[InterventionLayerDiagnostic] = []
+    for layer_idx in stem_layers:
+        layer_failures: List[str] = []
+        try:
+            embedding = override._embedding_for_layer(layer_idx)
+            stem_idx = int(getattr(model, "_layer_to_stem_idx")[layer_idx])
+            before_rows, before_version = _selected_weight_row_snapshot(embedding, selected_weight_ids)
+
+            baseline = embedding(input_tensor)
+            edited = override(layer_idx, input_tensor)
+            replacement = override._lookup_target_vectors(
+                embedding,
+                input_tensor,
+                output_dtype=edited.dtype,
+                output_device=edited.device,
+            )
+            selected_rows_unchanged = _selected_weight_rows_unchanged(
+                embedding, selected_weight_ids, before_rows
+            )
+            weight = getattr(embedding, "weight", None)
+            after_version = int(getattr(weight, "_version", -1)) if weight is not None else before_version
+            weight_version_unchanged = before_version == after_version
+
+            pos_tensor = torch.tensor(plan_positions, dtype=torch.long, device=edited.device)
+            unedited_mask = torch.ones(edited.shape[1], dtype=torch.bool, device=edited.device)
+            if len(plan_positions) > 0:
+                unedited_mask[pos_tensor] = False
+            unedited_diff = _max_abs_or_zero(edited[:, unedited_mask, :] - baseline[:, unedited_mask, :])
+            edited_expected_diff = _max_abs_or_zero(edited[:, pos_tensor, :] - replacement)
+            edit_vs_baseline_diff = _max_abs_or_zero(edited[:, pos_tensor, :] - baseline[:, pos_tensor, :])
+            unedited_ok = bool(torch.allclose(
+                edited[:, unedited_mask, :],
+                baseline[:, unedited_mask, :],
+                atol=atol,
+                rtol=rtol,
+            ))
+            edited_ok = bool(torch.allclose(
+                edited[:, pos_tensor, :],
+                replacement,
+                atol=atol,
+                rtol=rtol,
+            ))
+            output_is_distinct = edited.data_ptr() != baseline.data_ptr()
+
+            if not unedited_ok:
+                layer_failures.append(
+                    "Edited output differs from baseline outside source positions "
+                    f"(max_abs_diff={unedited_diff})."
+                )
+            if not edited_ok:
+                layer_failures.append(
+                    "Edited source-position vectors do not match expected target vectors "
+                    f"(max_abs_diff={edited_expected_diff})."
+                )
+            if not output_is_distinct:
+                layer_failures.append("Override returned the same tensor storage as the baseline lookup.")
+            if not selected_rows_unchanged:
+                layer_failures.append("Selected STEM embedding weight rows changed during diagnostic.")
+            if not weight_version_unchanged:
+                layer_failures.append("STEM embedding weight version changed during diagnostic.")
+
+            layer_diagnostics.append(
+                InterventionLayerDiagnostic(
+                    layer_idx=layer_idx,
+                    stem_embedding_index=stem_idx,
+                    output_shape=[int(dim) for dim in edited.shape],
+                    output_dtype=str(edited.dtype).replace("torch.", ""),
+                    output_device=str(edited.device),
+                    source_positions=plan_positions,
+                    source_token_ids_at_positions=source_tokens_at_positions,
+                    target_token_ids=list(override.plan.target_token_ids),
+                    replacement_token_ids=override.plan.replacement_token_ids,
+                    max_abs_diff_unedited_vs_baseline=unedited_diff,
+                    max_abs_diff_edited_vs_expected=edited_expected_diff,
+                    max_abs_diff_edit_vs_baseline=edit_vs_baseline_diff,
+                    unedited_positions_match_baseline=unedited_ok,
+                    edited_positions_match_expected=edited_ok,
+                    output_is_distinct_tensor=output_is_distinct,
+                    selected_weight_rows_unchanged=selected_rows_unchanged,
+                    weight_version_unchanged=weight_version_unchanged,
+                    passed=not layer_failures,
+                    failures=layer_failures,
+                )
+            )
+            failures.extend([f"Layer {layer_idx}: {message}" for message in layer_failures])
+        except Exception as exc:
+            message = f"Layer {layer_idx} diagnostic failed with exception: {exc}"
+            failures.append(message)
+            layer_diagnostics.append(
+                InterventionLayerDiagnostic(
+                    layer_idx=layer_idx,
+                    stem_embedding_index=-1,
+                    output_shape=[],
+                    output_dtype="unknown",
+                    output_device=str(device),
+                    source_positions=plan_positions,
+                    source_token_ids_at_positions=source_tokens_at_positions,
+                    target_token_ids=list(override.plan.target_token_ids),
+                    replacement_token_ids=override.plan.replacement_token_ids,
+                    max_abs_diff_unedited_vs_baseline=float("nan"),
+                    max_abs_diff_edited_vs_expected=float("nan"),
+                    max_abs_diff_edit_vs_baseline=float("nan"),
+                    unedited_positions_match_baseline=False,
+                    edited_positions_match_expected=False,
+                    output_is_distinct_tensor=False,
+                    selected_weight_rows_unchanged=False,
+                    weight_version_unchanged=False,
+                    passed=False,
+                    failures=[message],
+                )
+            )
+
+    forward_path_checked = False
+    forward_path_called_layers: List[int] = []
+    forward_path_calls_match_stem_layers = False
+    if run_forward_path_check and not failures:
+        forward_path_checked = True
+        traced = TracedStemEmbeddingOverride(override)
+        try:
+            _ = _call_model(model, input_tensor, traced, attn_impl=attn_impl)
+            forward_path_called_layers = list(traced.calls)
+            forward_path_calls_match_stem_layers = forward_path_called_layers == stem_layers
+            if not forward_path_calls_match_stem_layers:
+                failures.append(
+                    "LM forward did not call the override exactly once for each STEM layer: "
+                    f"called={forward_path_called_layers}, expected={stem_layers}."
+                )
+        except Exception as exc:
+            failures.append(f"Forward-path diagnostic failed with exception: {exc}")
+    elif not run_forward_path_check:
+        warnings.append("Forward-path diagnostic was disabled by configuration.")
+
+    passed = not failures and all(layer.passed for layer in layer_diagnostics)
+    return InterventionDiagnostics(
+        passed=passed,
+        prompt_text_unchanged=prompt_text_unchanged,
+        prompt_token_ids_unchanged=prompt_token_ids_unchanged,
+        source_positions_match_plan=source_positions_match_plan,
+        source_token_ids_match_plan=source_token_ids_match_plan,
+        stem_layers_expected=stem_layers,
+        stem_layers_checked=[layer.layer_idx for layer in layer_diagnostics],
+        forward_path_checked=forward_path_checked,
+        forward_path_called_layers=forward_path_called_layers,
+        forward_path_calls_match_stem_layers=forward_path_calls_match_stem_layers,
+        edit_mode=override.plan.resolved_mode,
+        layer_diagnostics=layer_diagnostics,
+        failures=failures,
+        warnings=warnings,
+    )
 
 
 def _call_model(

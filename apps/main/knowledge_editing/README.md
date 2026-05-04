@@ -32,6 +32,27 @@ python -m apps.main.knowledge_editing.run_stem_knowledge_edit \
   --edit-mode auto
 ```
 
+By default, the CLI first runs an intervention diagnostic gate and refuses to
+continue if the gate fails. The gate verifies that the intervened prompt text
+and token IDs are identical to the original prompt, each STEM layer receives
+the override, only the source entity positions differ from a normal STEM
+embedding lookup, those positions equal the target-vector replacement strategy,
+and selected STEM embedding weight rows remain unchanged.
+
+Diagnostics-only:
+
+```bash
+python -m apps.main.knowledge_editing.run_stem_knowledge_edit \
+  --config apps/main/configs/stem_dag_llama3_1B_midfine.yaml \
+  --checkpoint-dir /path/to/dump/checkpoints/0000100000 \
+  --output-dir /tmp/stem_knowledge_editing \
+  --source-entity Spain \
+  --target-entity Germany \
+  --device cuda \
+  --dtype bfloat16 \
+  --diagnostics-only
+```
+
 `--checkpoint-dir` can point to a 10-digit checkpoint step directory, a
 `checkpoints/` directory, a dump directory containing `checkpoints/`, or an
 already-created `consolidated/` directory. STEM shard loading follows the repo
@@ -41,6 +62,7 @@ checkpoint layout: `stem_shards/stem_model_mp*.pt` is consolidated into
 Each run writes a timestamped directory containing:
 
 - `metadata.json`
+- `intervention_diagnostics.json`
 - `prompt_original.txt`
 - `prompt_target.txt`
 - `topk_next_token_probs.json`

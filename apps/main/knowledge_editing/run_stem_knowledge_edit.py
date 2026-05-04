@@ -36,10 +36,12 @@ from apps.main.knowledge_editing.experiment import (
     GenerationResult,
     TokenizedPrompt,
     TopKResult,
+    build_country_capital_prompt,
     make_stem_embedding_override_fn,
     plot_topk_probabilities,
     replace_last_entity,
     run_generation,
+    run_intervention_diagnostics,
     run_next_token_topk,
     sanitize_for_path,
     save_results,
@@ -106,6 +108,19 @@ def parse_args() -> argparse.Namespace:
         help="Override prompt EOS handling. By default uses config data.add_eos if present.",
     )
     parser.add_argument("--attn-impl", default="sdpa")
+    parser.add_argument(
+        "--diagnostics-only",
+        action="store_true",
+        help="Load the model, run intervention diagnostics, write diagnostics files, and exit.",
+    )
+    parser.add_argument(
+        "--skip-forward-diagnostic",
+        action="store_true",
+        help=(
+            "Skip the full LM forward-path diagnostic. Layer-local vector checks still run. "
+            "Use only when the model forward is intentionally unavailable."
+        ),
+    )
     parser.add_argument(
         "--dry-run-tokenization",
         action="store_true",
@@ -529,6 +544,9 @@ def run(args: argparse.Namespace) -> Path:
 
     source_span = tokenization["original"].entity_span
     target_span = tokenization["target"].entity_span
+    (run_dir / "prompt_original.txt").write_text(prompts["original"])
+    (run_dir / "prompt_target.txt").write_text(prompts["target"])
+
     override = make_stem_embedding_override_fn(
         model,
         source_span.token_positions,
@@ -541,6 +559,32 @@ def run(args: argparse.Namespace) -> Path:
     )
     for warning in override.plan.warnings:
         LOG.warning(warning)
+
+    LOG.info("Running STEM intervention diagnostics")
+    intervention_diagnostics = run_intervention_diagnostics(
+        model=model,
+        original_prompt=prompts["original"],
+        intervened_prompt=prompts["original"],
+        original_token_ids=tokenization["original"].token_ids,
+        intervened_token_ids=tokenization["original"].token_ids,
+        override=override,
+        device=device,
+        expected_source_positions=source_span.token_positions,
+        expected_stem_layers=list(getattr(model, "stem_layers", [])),
+        attn_impl=args.attn_impl,
+        run_forward_path_check=not args.skip_forward_diagnostic,
+    )
+    write_json(run_dir / "intervention_diagnostics.json", intervention_diagnostics)
+    if not intervention_diagnostics.passed:
+        write_json(
+            run_dir / "intervention_diagnostics_failed.json",
+            intervention_diagnostics,
+        )
+        raise RuntimeError(
+            "STEM intervention diagnostics failed; refusing to run the scientific "
+            f"experiment. See {run_dir / 'intervention_diagnostics.json'}."
+        )
+    LOG.info("STEM intervention diagnostics passed")
 
     metadata: Dict[str, Any] = {
         "source_entity_text": args.source_entity,
@@ -566,10 +610,13 @@ def run(args: argparse.Namespace) -> Path:
         },
         "loader": loader_metadata,
         "model_mode": detect_model_mode_metadata(model, cfg),
+        "intervention_diagnostics": intervention_diagnostics,
     }
 
-    (run_dir / "prompt_original.txt").write_text(prompts["original"])
-    (run_dir / "prompt_target.txt").write_text(prompts["target"])
+    if args.diagnostics_only:
+        write_json(run_dir / "metadata.json", metadata)
+        LOG.info("Diagnostics-only run complete: %s", run_dir)
+        return run_dir
 
     LOG.info("Running next-token probability experiment")
     topk_results: Dict[str, TopKResult] = {
