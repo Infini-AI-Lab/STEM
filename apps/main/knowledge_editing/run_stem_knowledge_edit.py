@@ -36,7 +36,9 @@ from apps.main.knowledge_editing.experiment import (
     GenerationResult,
     TokenizedPrompt,
     TopKResult,
+    DEFAULT_MATH_TEXT_OPERATORS,
     build_country_capital_prompt,
+    build_math_text_prompt,
     make_stem_embedding_override_fn,
     plot_topk_probabilities,
     replace_last_entity,
@@ -51,6 +53,8 @@ from apps.main.knowledge_editing.experiment import (
 )
 
 LOG = logging.getLogger(__name__)
+
+PROMPT_TYPES = ("country-capital", "math-text")
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,8 +71,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--output-dir", default="knowledge_edit_outputs")
-    parser.add_argument("--source-entity", required=True)
-    parser.add_argument("--target-entity", required=True)
+    parser.add_argument("--source-entity", "--source-operator", dest="source_entity", required=True)
+    parser.add_argument("--target-entity", "--target-operator", dest="target_entity", required=True)
+    parser.add_argument(
+        "--prompt-type",
+        default="country-capital",
+        choices=PROMPT_TYPES,
+        help=(
+            "Few-shot prompt family. Use country-capital for country/capital retrieval "
+            "or math-text for text arithmetic operator editing."
+        ),
+    )
     parser.add_argument("--top-k", type=int, default=4, help="Top-k next-token probabilities to save and plot.")
     parser.add_argument("--max-new-tokens", type=int, default=100)
     parser.add_argument("--temperature", type=float, default=0.0)
@@ -415,12 +428,19 @@ def get_special_token_id(tokenizer: Any, name: str) -> Optional[int]:
 def build_prompts_and_tokenization(
     tokenizer: Any,
     *,
+    prompt_type: str,
     source_entity: str,
     target_entity: str,
     add_bos: bool,
     add_eos: bool,
 ) -> Tuple[Dict[str, str], Dict[str, TokenizedPrompt]]:
-    original_prompt = build_country_capital_prompt(source_entity)
+    if prompt_type == "country-capital":
+        original_prompt = build_country_capital_prompt(source_entity)
+    elif prompt_type == "math-text":
+        original_prompt = build_math_text_prompt(source_entity)
+    else:
+        raise ValueError(f"Unknown prompt_type {prompt_type!r}; expected one of {PROMPT_TYPES}")
+
     target_prompt = replace_last_entity(original_prompt, source_entity, target_entity)
     original_tokens = tokenize_with_entity_span(
         tokenizer,
@@ -484,14 +504,25 @@ def dry_run(args: argparse.Namespace) -> None:
     add_eos = resolve_bool_from_config(cfg, "data.add_eos", args.add_eos, default=False)
     prompts, tokenization = build_prompts_and_tokenization(
         tokenizer,
+        prompt_type=args.prompt_type,
         source_entity=args.source_entity,
         target_entity=args.target_entity,
         add_bos=add_bos,
         add_eos=add_eos,
     )
+    warnings = []
+    if args.prompt_type == "math-text":
+        for name, value in (("source", args.source_entity), ("target", args.target_entity)):
+            if value not in DEFAULT_MATH_TEXT_OPERATORS:
+                warnings.append(
+                    f"{name} operator {value!r} is not in the default math-text "
+                    f"operator set {DEFAULT_MATH_TEXT_OPERATORS}."
+                )
     payload = {
+        "prompt_type": args.prompt_type,
         "source_entity": args.source_entity,
         "target_entity": args.target_entity,
+        "warnings": warnings,
         "add_bos": add_bos,
         "add_eos": add_eos,
         "prompt_original": prompts["original"],
@@ -508,7 +539,8 @@ def run(args: argparse.Namespace) -> Path:
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = (
-        f"knowledge_edit_{sanitize_for_path(args.source_entity)}_"
+        f"knowledge_edit_{sanitize_for_path(args.prompt_type)}_"
+        f"{sanitize_for_path(args.source_entity)}_"
         f"to_{sanitize_for_path(args.target_entity)}_{timestamp}"
     )
     run_dir = Path(args.output_dir).expanduser().resolve() / run_name
@@ -536,11 +568,22 @@ def run(args: argparse.Namespace) -> Path:
     add_eos = resolve_bool_from_config(cfg, "data.add_eos", args.add_eos, default=False)
     prompts, tokenization = build_prompts_and_tokenization(
         tokenizer,
+        prompt_type=args.prompt_type,
         source_entity=args.source_entity,
         target_entity=args.target_entity,
         add_bos=add_bos,
         add_eos=add_eos,
     )
+    prompt_warnings = []
+    if args.prompt_type == "math-text":
+        for name, value in (("source", args.source_entity), ("target", args.target_entity)):
+            if value not in DEFAULT_MATH_TEXT_OPERATORS:
+                prompt_warnings.append(
+                    f"{name} operator {value!r} is not in the default math-text "
+                    f"operator set {DEFAULT_MATH_TEXT_OPERATORS}."
+                )
+        for warning in prompt_warnings:
+            LOG.warning(warning)
 
     source_span = tokenization["original"].entity_span
     target_span = tokenization["target"].entity_span
@@ -587,8 +630,11 @@ def run(args: argparse.Namespace) -> Path:
     LOG.info("STEM intervention diagnostics passed")
 
     metadata: Dict[str, Any] = {
+        "prompt_type": args.prompt_type,
+        "edited_field": "operator" if args.prompt_type == "math-text" else "country",
         "source_entity_text": args.source_entity,
         "target_entity_text": args.target_entity,
+        "prompt_warnings": prompt_warnings,
         "source_token_ids": source_span.token_ids,
         "source_decoded_pieces": source_span.decoded_pieces,
         "target_token_ids": target_span.token_ids,
@@ -710,6 +756,7 @@ def run(args: argparse.Namespace) -> Path:
         output_pdf=run_dir / "knowledge_edit_topk_probs.pdf",
         source_entity=args.source_entity,
         target_entity=args.target_entity,
+        prompt_type=args.prompt_type,
     )
     save_results(
         run_dir,

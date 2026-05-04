@@ -21,6 +21,7 @@ python -m apps.main.knowledge_editing.run_stem_knowledge_edit \
   --config apps/main/configs/stem_dag_llama3_1B_midfine.yaml \
   --checkpoint-dir /path/to/dump/checkpoints/0000100000 \
   --output-dir /tmp/stem_knowledge_editing \
+  --prompt-type country-capital \
   --source-entity Spain \
   --target-entity Germany \
   --top-k 4 \
@@ -30,6 +31,44 @@ python -m apps.main.knowledge_editing.run_stem_knowledge_edit \
   --device cuda \
   --dtype bfloat16 \
   --edit-mode auto
+```
+
+Math text operator-edit experiment:
+
+```bash
+python -m apps.main.knowledge_editing.run_stem_knowledge_edit \
+  --config apps/main/configs/stem_dag_llama3_1B_midfine.yaml \
+  --checkpoint-dir /path/to/dump/checkpoints/0000100000 \
+  --output-dir /tmp/stem_knowledge_editing \
+  --prompt-type math-text \
+  --source-operator add \
+  --target-operator subtract \
+  --top-k 4 \
+  --max-new-tokens 100 \
+  --temperature 0.0 \
+  --seed 0 \
+  --device cuda \
+  --dtype bfloat16 \
+  --edit-mode auto
+```
+
+The `math-text` default prompt edits the operator in the final problem:
+
+```text
+Problem: three subtract by one
+Answer: two
+
+Problem: one add by ten
+Answer: eleven
+
+Problem: two multiply by four
+Answer: eight
+
+Problem: six divide by three
+Answer: two
+
+Problem: nine add by two
+Answer:
 ```
 
 By default, the CLI first runs an intervention diagnostic gate and refuses to

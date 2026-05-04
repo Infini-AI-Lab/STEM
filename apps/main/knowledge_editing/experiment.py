@@ -23,12 +23,19 @@ logger = logging.getLogger(__name__)
 
 
 EDIT_MODES = ("auto", "one_to_one", "average", "copy", "left_pad", "right_pad")
+DEFAULT_MATH_TEXT_OPERATORS = ("add", "subtract", "multiply", "divide")
 
 
 @dataclass(frozen=True)
 class CountryCapitalExample:
     country: str
     capital_sentence: str
+
+
+@dataclass(frozen=True)
+class MathTextExample:
+    problem: str
+    answer: str
 
 
 DEFAULT_COUNTRY_CAPITAL_EXAMPLES: Tuple[CountryCapitalExample, ...] = (
@@ -54,6 +61,14 @@ DEFAULT_COUNTRY_CAPITAL_EXAMPLES: Tuple[CountryCapitalExample, ...] = (
             "River and is known for politics, culture, education, and landmarks."
         ),
     ),
+)
+
+
+DEFAULT_MATH_TEXT_EXAMPLES: Tuple[MathTextExample, ...] = (
+    MathTextExample(problem="three subtract by one", answer="two"),
+    MathTextExample(problem="one add by ten", answer="eleven"),
+    MathTextExample(problem="two multiply by four", answer="eight"),
+    MathTextExample(problem="six divide by three", answer="two"),
 )
 
 
@@ -171,6 +186,32 @@ def build_country_capital_prompt(
         for example in shots
     ]
     blocks.append(f"Country: {query_country}\nCapital:")
+    return "\n\n".join(blocks)
+
+
+def build_math_text_prompt(
+    query_operator: str,
+    *,
+    query_left_operand: str = "nine",
+    query_right_operand: str = "two",
+    examples: Optional[Sequence[MathTextExample]] = None,
+) -> str:
+    """Build the few-shot text-arithmetic prompt.
+
+    The query operator is intentionally isolated in the final problem so the
+    same entity-span and STEM-vector replacement machinery can edit only that
+    operator while leaving all prompt token IDs unchanged in the intervened
+    case.
+    """
+
+    shots = examples if examples is not None else DEFAULT_MATH_TEXT_EXAMPLES
+    blocks = [
+        f"Problem: {example.problem}\nAnswer: {example.answer}"
+        for example in shots
+    ]
+    blocks.append(
+        f"Problem: {query_left_operand} {query_operator} by {query_right_operand}\nAnswer:"
+    )
     return "\n\n".join(blocks)
 
 
@@ -1009,6 +1050,7 @@ def plot_topk_probabilities(
     output_pdf: Union[str, Path],
     source_entity: str,
     target_entity: str,
+    prompt_type: str = "country-capital",
 ) -> None:
     """Save Figure-7-style side-by-side top-k probability bar charts."""
 
@@ -1018,11 +1060,18 @@ def plot_topk_probabilities(
     import matplotlib.pyplot as plt
 
     order = ["original", "target", "intervened"]
-    titles = {
-        "original": f"Original: Country: {source_entity}",
-        "target": f"Target: Country: {target_entity}",
-        "intervened": f"Intervened: {source_entity} text + {target_entity} STEM",
-    }
+    if prompt_type == "math-text":
+        titles = {
+            "original": f"Original: operator {source_entity}",
+            "target": f"Target: operator {target_entity}",
+            "intervened": f"Intervened: {source_entity} text + {target_entity} STEM",
+        }
+    else:
+        titles = {
+            "original": f"Original: Country: {source_entity}",
+            "target": f"Target: Country: {target_entity}",
+            "intervened": f"Intervened: {source_entity} text + {target_entity} STEM",
+        }
     colors = {
         "original": "#4C78A8",
         "target": "#F58518",

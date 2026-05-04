@@ -2,6 +2,7 @@
 
 from apps.main.knowledge_editing.experiment import (
     build_country_capital_prompt,
+    build_math_text_prompt,
     find_last_entity_token_span,
     make_stem_embedding_override_fn,
     plot_topk_probabilities,
@@ -14,6 +15,7 @@ from apps.main.knowledge_editing.experiment import (
 
 __all__ = [
     "build_country_capital_prompt",
+    "build_math_text_prompt",
     "find_last_entity_token_span",
     "make_stem_embedding_override_fn",
     "plot_topk_probabilities",
