@@ -41,6 +41,7 @@ from apps.main.knowledge_editing.experiment import (
     get_prompt_edited_field,
     get_prompt_default_entities,
     get_prompt_entity_warnings,
+    get_prompt_template_spec,
     make_stem_embedding_override_fn,
     normalize_prompt_type,
     plot_topk_probabilities,
@@ -92,7 +93,8 @@ def parse_args() -> argparse.Namespace:
         choices=PROMPT_TYPE_CHOICES,
         help=(
             "Few-shot prompt family. Supports country-capital, math-text, "
-            "math-prompt-1..5, coding-prompt-1..5, and semantic aliases."
+            "math-prompt-1..5, coding-prompt-1..5, semantic aliases, and "
+            "their -zero-shot variants."
         ),
     )
     parser.add_argument("--top-k", type=int, default=4, help="Top-k next-token probabilities to save and plot.")
@@ -536,6 +538,12 @@ def dry_run(args: argparse.Namespace) -> None:
     payload = {
         "prompt_type": args.prompt_type,
         "edited_field": get_prompt_edited_field(args.prompt_type),
+        "is_zero_shot": args.prompt_type.endswith("-zero-shot"),
+        "prompt_description": (
+            get_prompt_template_spec(args.prompt_type).description
+            if get_prompt_template_spec(args.prompt_type) is not None
+            else None
+        ),
         "source_entity": args.source_entity,
         "target_entity": args.target_entity,
         "warnings": warnings,
@@ -647,6 +655,12 @@ def run(args: argparse.Namespace) -> Path:
     metadata: Dict[str, Any] = {
         "prompt_type": args.prompt_type,
         "edited_field": edited_field,
+        "is_zero_shot": args.prompt_type.endswith("-zero-shot"),
+        "prompt_description": (
+            get_prompt_template_spec(args.prompt_type).description
+            if get_prompt_template_spec(args.prompt_type) is not None
+            else None
+        ),
         "source_entity_text": args.source_entity,
         "target_entity_text": args.target_entity,
         "prompt_warnings": prompt_warnings,

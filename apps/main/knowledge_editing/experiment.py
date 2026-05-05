@@ -87,6 +87,29 @@ DEFAULT_MATH_TEXT_EXAMPLES: Tuple[MathTextExample, ...] = (
 
 
 PROMPT_TEMPLATE_SPECS: Dict[str, PromptTemplateSpec] = {
+    "country-capital-zero-shot": PromptTemplateSpec(
+        prompt_type="country-capital-zero-shot",
+        edited_field="country",
+        default_source="Spain",
+        default_target="Germany",
+        description="Zero-shot country/capital retrieval prompt.",
+        template=(
+            "Country: {source}\n"
+            "Capital:"
+        ),
+    ),
+    "math-text-zero-shot": PromptTemplateSpec(
+        prompt_type="math-text-zero-shot",
+        edited_field="operator",
+        default_source="add",
+        default_target="subtract",
+        allowed_entities=DEFAULT_MATH_TEXT_OPERATORS,
+        description="Zero-shot text arithmetic operator prompt.",
+        template=(
+            "Problem: nine {source} by two\n"
+            "Answer:"
+        ),
+    ),
     "math-unary-op": PromptTemplateSpec(
         prompt_type="math-unary-op",
         edited_field="operation",
@@ -343,6 +366,146 @@ PROMPT_TEMPLATE_SPECS: Dict[str, PromptTemplateSpec] = {
             "Expression:"
         ),
     ),
+    "math-unary-op-zero-shot": PromptTemplateSpec(
+        prompt_type="math-unary-op-zero-shot",
+        edited_field="operation",
+        default_source="square",
+        default_target="cube",
+        allowed_entities=("square", "cube"),
+        description="Zero-shot unary integer operation prompt.",
+        template=(
+            "Task: Apply the operation to the integer. Return only the numerical answer.\n\n"
+            "Operation: {source}\n"
+            "Input: 7\n"
+            "Answer:"
+        ),
+    ),
+    "math-binary-op-zero-shot": PromptTemplateSpec(
+        prompt_type="math-binary-op-zero-shot",
+        edited_field="operation",
+        default_source="add",
+        default_target="multiply",
+        allowed_entities=("add", "multiply"),
+        description="Zero-shot binary integer operation prompt.",
+        template=(
+            "Task: Apply the operation to the two integers. Return only the integer answer.\n\n"
+            "Operation: {source}\n"
+            "Numbers: 14, 6\n"
+            "Answer:"
+        ),
+    ),
+    "math-derivative-zero-shot": PromptTemplateSpec(
+        prompt_type="math-derivative-zero-shot",
+        edited_field="function",
+        default_source="sin(x)",
+        default_target="cos(x)",
+        allowed_entities=("x^2", "sin(x)", "cos(x)", "x^3"),
+        description="Zero-shot symbolic derivative prompt.",
+        template=(
+            "Task: Return only the derivative with respect to x. Use compact notation.\n\n"
+            "Function: {source}\n"
+            "Derivative:"
+        ),
+    ),
+    "math-prime-composite-zero-shot": PromptTemplateSpec(
+        prompt_type="math-prime-composite-zero-shot",
+        edited_field="number",
+        default_source="13",
+        default_target="21",
+        allowed_entities=("7", "21", "29", "35", "13"),
+        description="Zero-shot prime/composite classification prompt.",
+        template=(
+            "Task: Classify the number. Return only one word: prime or composite.\n\n"
+            "Number: {source}\n"
+            "Class:"
+        ),
+    ),
+    "math-area-zero-shot": PromptTemplateSpec(
+        prompt_type="math-area-zero-shot",
+        edited_field="shape",
+        default_source="circle",
+        default_target="square",
+        allowed_entities=("square", "circle"),
+        description="Zero-shot exact area formula prompt.",
+        template=(
+            "Task: Compute the area. If the shape is square, the parameter is the side length. "
+            "If the shape is circle, the parameter is the radius. Return only the exact area.\n\n"
+            "Shape: {source}\n"
+            "Parameter: 1\n"
+            "Area:"
+        ),
+    ),
+    "coding-sort-reverse-zero-shot": PromptTemplateSpec(
+        prompt_type="coding-sort-reverse-zero-shot",
+        edited_field="action",
+        default_source="sort",
+        default_target="reverse",
+        allowed_entities=("sort", "reverse"),
+        description="Zero-shot Python sort/reverse function-call prompt.",
+        template=(
+            "Task: Return a single Python function call. Return only code.\n\n"
+            "Action: {source}\n"
+            "Variable: scores\n"
+            "Call:"
+        ),
+    ),
+    "coding-builtin-call-zero-shot": PromptTemplateSpec(
+        prompt_type="coding-builtin-call-zero-shot",
+        edited_field="operation",
+        default_source="count",
+        default_target="sum",
+        allowed_entities=("count", "sum"),
+        description="Zero-shot Python built-in function-call prompt.",
+        template=(
+            "Task: Return a single Python built-in function call. Return only code.\n\n"
+            "Operation: {source}\n"
+            "Variable: tokens\n"
+            "Call:"
+        ),
+    ),
+    "coding-array-constructor-zero-shot": PromptTemplateSpec(
+        prompt_type="coding-array-constructor-zero-shot",
+        edited_field="array type",
+        default_source="zeros",
+        default_target="ones",
+        allowed_entities=("zeros", "ones"),
+        description="Zero-shot NumPy-style constructor prompt without np prefix.",
+        template=(
+            "Task: Return a single NumPy-style array constructor without the np prefix. Return only code.\n\n"
+            "Array type: {source}\n"
+            "Shape: (4, 4)\n"
+            "Call:"
+        ),
+    ),
+    "coding-pandas-method-zero-shot": PromptTemplateSpec(
+        prompt_type="coding-pandas-method-zero-shot",
+        edited_field="request",
+        default_source="first rows",
+        default_target="last rows",
+        allowed_entities=("first rows", "last rows"),
+        description="Zero-shot pandas method-call prompt without dataframe prefix.",
+        template=(
+            "Task: Return only the pandas method call without the dataframe object prefix.\n\n"
+            "Request: {source}\n"
+            "Rows: 12\n"
+            "Call:"
+        ),
+    ),
+    "coding-sql-aggregate-zero-shot": PromptTemplateSpec(
+        prompt_type="coding-sql-aggregate-zero-shot",
+        edited_field="aggregate",
+        default_source="COUNT",
+        default_target="SUM",
+        allowed_entities=("SUM", "COUNT"),
+        description="Zero-shot SQL aggregate expression prompt.",
+        template=(
+            "Task: Return only the SQL aggregate expression.\n\n"
+            "Table: sales\n"
+            "Column: revenue\n"
+            "Aggregate: {source}\n"
+            "Expression:"
+        ),
+    ),
 }
 
 
@@ -357,6 +520,16 @@ PROMPT_TYPE_ALIASES: Dict[str, str] = {
     "coding-prompt-3": "coding-array-constructor",
     "coding-prompt-4": "coding-pandas-method",
     "coding-prompt-5": "coding-sql-aggregate",
+    "math-prompt-1-zero-shot": "math-unary-op-zero-shot",
+    "math-prompt-2-zero-shot": "math-binary-op-zero-shot",
+    "math-prompt-3-zero-shot": "math-derivative-zero-shot",
+    "math-prompt-4-zero-shot": "math-prime-composite-zero-shot",
+    "math-prompt-5-zero-shot": "math-area-zero-shot",
+    "coding-prompt-1-zero-shot": "coding-sort-reverse-zero-shot",
+    "coding-prompt-2-zero-shot": "coding-builtin-call-zero-shot",
+    "coding-prompt-3-zero-shot": "coding-array-constructor-zero-shot",
+    "coding-prompt-4-zero-shot": "coding-pandas-method-zero-shot",
+    "coding-prompt-5-zero-shot": "coding-sql-aggregate-zero-shot",
 }
 
 
