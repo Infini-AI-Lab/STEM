@@ -52,6 +52,44 @@ python -m apps.main.knowledge_editing.run_stem_knowledge_edit \
   --edit-mode auto
 ```
 
+Additional prompt types:
+
+| Prompt type | Alias | Default source -> target | Edited field |
+| --- | --- | --- | --- |
+| `math-unary-op` | `math-prompt-1` | `square` -> `cube` | operation |
+| `math-binary-op` | `math-prompt-2` | `add` -> `multiply` | operation |
+| `math-derivative` | `math-prompt-3` | `sin(x)` -> `cos(x)` | function |
+| `math-prime-composite` | `math-prompt-4` | `13` -> `21` | number |
+| `math-area` | `math-prompt-5` | `circle` -> `square` | shape |
+| `coding-sort-reverse` | `coding-prompt-1` | `sort` -> `reverse` | action |
+| `coding-builtin-call` | `coding-prompt-2` | `count` -> `sum` | operation |
+| `coding-array-constructor` | `coding-prompt-3` | `zeros` -> `ones` | array type |
+| `coding-pandas-method` | `coding-prompt-4` | `first rows` -> `last rows` | request |
+| `coding-sql-aggregate` | `coding-prompt-5` | `COUNT` -> `SUM` | aggregate |
+
+If `--source-entity`/`--target-entity` are omitted, the selected prompt type
+uses the default source -> target pair from this table. The
+`--source-operator` and `--target-operator` flags are aliases for
+`--source-entity` and `--target-entity`.
+
+Example using a numbered alias:
+
+```bash
+python -m apps.main.knowledge_editing.run_stem_knowledge_edit \
+  --config apps/main/configs/stem_dag_llama3_1B_midfine.yaml \
+  --checkpoint-dir /path/to/dump/checkpoints/0000100000 \
+  --output-dir /tmp/stem_knowledge_editing \
+  --prompt-type coding-prompt-5 \
+  --source-entity COUNT \
+  --target-entity SUM \
+  --top-k 4 \
+  --max-new-tokens 100 \
+  --temperature 0.0 \
+  --seed 0 \
+  --device cuda \
+  --dtype bfloat16
+```
+
 The `math-text` default prompt edits the operator in the final problem:
 
 ```text

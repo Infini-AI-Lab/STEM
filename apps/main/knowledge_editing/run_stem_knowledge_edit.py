@@ -36,10 +36,13 @@ from apps.main.knowledge_editing.experiment import (
     GenerationResult,
     TokenizedPrompt,
     TopKResult,
-    DEFAULT_MATH_TEXT_OPERATORS,
-    build_country_capital_prompt,
-    build_math_text_prompt,
+    PROMPT_TYPE_CHOICES,
+    build_prompt_by_type,
+    get_prompt_edited_field,
+    get_prompt_default_entities,
+    get_prompt_entity_warnings,
     make_stem_embedding_override_fn,
+    normalize_prompt_type,
     plot_topk_probabilities,
     replace_last_entity,
     run_generation,
@@ -53,8 +56,6 @@ from apps.main.knowledge_editing.experiment import (
 )
 
 LOG = logging.getLogger(__name__)
-
-PROMPT_TYPES = ("country-capital", "math-text")
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,15 +72,27 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--output-dir", default="knowledge_edit_outputs")
-    parser.add_argument("--source-entity", "--source-operator", dest="source_entity", required=True)
-    parser.add_argument("--target-entity", "--target-operator", dest="target_entity", required=True)
+    parser.add_argument(
+        "--source-entity",
+        "--source-operator",
+        dest="source_entity",
+        default=None,
+        help="Source edit text. If omitted, the selected prompt type's default source is used.",
+    )
+    parser.add_argument(
+        "--target-entity",
+        "--target-operator",
+        dest="target_entity",
+        default=None,
+        help="Target edit text. If omitted, the selected prompt type's default target is used.",
+    )
     parser.add_argument(
         "--prompt-type",
         default="country-capital",
-        choices=PROMPT_TYPES,
+        choices=PROMPT_TYPE_CHOICES,
         help=(
-            "Few-shot prompt family. Use country-capital for country/capital retrieval "
-            "or math-text for text arithmetic operator editing."
+            "Few-shot prompt family. Supports country-capital, math-text, "
+            "math-prompt-1..5, coding-prompt-1..5, and semantic aliases."
         ),
     )
     parser.add_argument("--top-k", type=int, default=4, help="Top-k next-token probabilities to save and plot.")
@@ -140,6 +153,15 @@ def parse_args() -> argparse.Namespace:
         help="Build prompts, tokenize source/target entity spans, print diagnostics, and exit.",
     )
     return parser.parse_args()
+
+
+def resolve_prompt_args(args: argparse.Namespace) -> None:
+    args.prompt_type = normalize_prompt_type(args.prompt_type)
+    default_source, default_target = get_prompt_default_entities(args.prompt_type)
+    if args.source_entity is None:
+        args.source_entity = default_source
+    if args.target_entity is None:
+        args.target_entity = default_target
 
 
 def configure_logging(run_dir: Optional[Path]) -> None:
@@ -434,13 +456,8 @@ def build_prompts_and_tokenization(
     add_bos: bool,
     add_eos: bool,
 ) -> Tuple[Dict[str, str], Dict[str, TokenizedPrompt]]:
-    if prompt_type == "country-capital":
-        original_prompt = build_country_capital_prompt(source_entity)
-    elif prompt_type == "math-text":
-        original_prompt = build_math_text_prompt(source_entity)
-    else:
-        raise ValueError(f"Unknown prompt_type {prompt_type!r}; expected one of {PROMPT_TYPES}")
-
+    prompt_type = normalize_prompt_type(prompt_type)
+    original_prompt = build_prompt_by_type(prompt_type, source_entity)
     target_prompt = replace_last_entity(original_prompt, source_entity, target_entity)
     original_tokens = tokenize_with_entity_span(
         tokenizer,
@@ -494,6 +511,7 @@ def detect_model_mode_metadata(model: Any, cfg: Any) -> Dict[str, Any]:
 
 def dry_run(args: argparse.Namespace) -> None:
     configure_logging(None)
+    resolve_prompt_args(args)
     cfg = OmegaConf.load(args.config)
     tokenizer = build_tokenizer_from_config(
         cfg,
@@ -510,16 +528,14 @@ def dry_run(args: argparse.Namespace) -> None:
         add_bos=add_bos,
         add_eos=add_eos,
     )
-    warnings = []
-    if args.prompt_type == "math-text":
-        for name, value in (("source", args.source_entity), ("target", args.target_entity)):
-            if value not in DEFAULT_MATH_TEXT_OPERATORS:
-                warnings.append(
-                    f"{name} operator {value!r} is not in the default math-text "
-                    f"operator set {DEFAULT_MATH_TEXT_OPERATORS}."
-                )
+    warnings = get_prompt_entity_warnings(
+        args.prompt_type,
+        args.source_entity,
+        args.target_entity,
+    )
     payload = {
         "prompt_type": args.prompt_type,
+        "edited_field": get_prompt_edited_field(args.prompt_type),
         "source_entity": args.source_entity,
         "target_entity": args.target_entity,
         "warnings": warnings,
@@ -537,6 +553,7 @@ def run(args: argparse.Namespace) -> Path:
     if not args.checkpoint_dir:
         raise ValueError("--checkpoint-dir is required unless --dry-run-tokenization is set")
 
+    resolve_prompt_args(args)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = (
         f"knowledge_edit_{sanitize_for_path(args.prompt_type)}_"
@@ -574,16 +591,14 @@ def run(args: argparse.Namespace) -> Path:
         add_bos=add_bos,
         add_eos=add_eos,
     )
-    prompt_warnings = []
-    if args.prompt_type == "math-text":
-        for name, value in (("source", args.source_entity), ("target", args.target_entity)):
-            if value not in DEFAULT_MATH_TEXT_OPERATORS:
-                prompt_warnings.append(
-                    f"{name} operator {value!r} is not in the default math-text "
-                    f"operator set {DEFAULT_MATH_TEXT_OPERATORS}."
-                )
-        for warning in prompt_warnings:
-            LOG.warning(warning)
+    edited_field = get_prompt_edited_field(args.prompt_type)
+    prompt_warnings = get_prompt_entity_warnings(
+        args.prompt_type,
+        args.source_entity,
+        args.target_entity,
+    )
+    for warning in prompt_warnings:
+        LOG.warning(warning)
 
     source_span = tokenization["original"].entity_span
     target_span = tokenization["target"].entity_span
@@ -631,7 +646,7 @@ def run(args: argparse.Namespace) -> Path:
 
     metadata: Dict[str, Any] = {
         "prompt_type": args.prompt_type,
-        "edited_field": "operator" if args.prompt_type == "math-text" else "country",
+        "edited_field": edited_field,
         "source_entity_text": args.source_entity,
         "target_entity_text": args.target_entity,
         "prompt_warnings": prompt_warnings,
@@ -757,6 +772,7 @@ def run(args: argparse.Namespace) -> Path:
         source_entity=args.source_entity,
         target_entity=args.target_entity,
         prompt_type=args.prompt_type,
+        edited_field=edited_field,
     )
     save_results(
         run_dir,

@@ -1,10 +1,18 @@
 """Standalone STEM knowledge-editing experiments."""
 
 from apps.main.knowledge_editing.experiment import (
+    PROMPT_TYPE_CHOICES,
     build_country_capital_prompt,
     build_math_text_prompt,
+    build_prompt_by_type,
     find_last_entity_token_span,
+    get_prompt_allowed_entities,
+    get_prompt_default_entities,
+    get_prompt_edited_field,
+    get_prompt_entity_warnings,
+    get_prompt_template_spec,
     make_stem_embedding_override_fn,
+    normalize_prompt_type,
     plot_topk_probabilities,
     run_intervention_diagnostics,
     run_generation,
@@ -14,10 +22,18 @@ from apps.main.knowledge_editing.experiment import (
 )
 
 __all__ = [
+    "PROMPT_TYPE_CHOICES",
     "build_country_capital_prompt",
     "build_math_text_prompt",
+    "build_prompt_by_type",
     "find_last_entity_token_span",
+    "get_prompt_allowed_entities",
+    "get_prompt_default_entities",
+    "get_prompt_edited_field",
+    "get_prompt_entity_warnings",
+    "get_prompt_template_spec",
     "make_stem_embedding_override_fn",
+    "normalize_prompt_type",
     "plot_topk_probabilities",
     "run_intervention_diagnostics",
     "run_generation",

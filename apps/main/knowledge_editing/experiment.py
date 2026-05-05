@@ -38,6 +38,20 @@ class MathTextExample:
     answer: str
 
 
+@dataclass(frozen=True)
+class PromptTemplateSpec:
+    prompt_type: str
+    edited_field: str
+    template: str
+    default_source: str
+    default_target: str
+    allowed_entities: Tuple[str, ...] = ()
+    description: str = ""
+
+    def build(self, source_entity: str) -> str:
+        return self.template.format(source=source_entity)
+
+
 DEFAULT_COUNTRY_CAPITAL_EXAMPLES: Tuple[CountryCapitalExample, ...] = (
     CountryCapitalExample(
         country="United States of America",
@@ -69,6 +83,289 @@ DEFAULT_MATH_TEXT_EXAMPLES: Tuple[MathTextExample, ...] = (
     MathTextExample(problem="one add by ten", answer="eleven"),
     MathTextExample(problem="two multiply by four", answer="eight"),
     MathTextExample(problem="six divide by three", answer="two"),
+)
+
+
+PROMPT_TEMPLATE_SPECS: Dict[str, PromptTemplateSpec] = {
+    "math-unary-op": PromptTemplateSpec(
+        prompt_type="math-unary-op",
+        edited_field="operation",
+        default_source="square",
+        default_target="cube",
+        allowed_entities=("square", "cube"),
+        description="Unary integer operation prompt.",
+        template=(
+            "Task: Apply the operation to the integer. Return only the numerical answer.\n\n"
+            "Operation: square\n"
+            "Input: 3\n"
+            "Answer: 9\n\n"
+            "Operation: cube\n"
+            "Input: 2\n"
+            "Answer: 8\n\n"
+            "Operation: square\n"
+            "Input: 11\n"
+            "Answer: 121\n\n"
+            "Operation: cube\n"
+            "Input: 4\n"
+            "Answer: 64\n\n"
+            "Operation: {source}\n"
+            "Input: 7\n"
+            "Answer:"
+        ),
+    ),
+    "math-binary-op": PromptTemplateSpec(
+        prompt_type="math-binary-op",
+        edited_field="operation",
+        default_source="add",
+        default_target="multiply",
+        allowed_entities=("add", "multiply"),
+        description="Binary integer operation prompt.",
+        template=(
+            "Task: Apply the operation to the two integers. Return only the integer answer.\n\n"
+            "Operation: add\n"
+            "Numbers: 8, 5\n"
+            "Answer: 13\n\n"
+            "Operation: multiply\n"
+            "Numbers: 7, 6\n"
+            "Answer: 42\n\n"
+            "Operation: add\n"
+            "Numbers: 19, 4\n"
+            "Answer: 23\n\n"
+            "Operation: multiply\n"
+            "Numbers: 9, 3\n"
+            "Answer: 27\n\n"
+            "Operation: {source}\n"
+            "Numbers: 14, 6\n"
+            "Answer:"
+        ),
+    ),
+    "math-derivative": PromptTemplateSpec(
+        prompt_type="math-derivative",
+        edited_field="function",
+        default_source="sin(x)",
+        default_target="cos(x)",
+        allowed_entities=("x^2", "sin(x)", "cos(x)", "x^3"),
+        description="Symbolic derivative prompt.",
+        template=(
+            "Task: Return only the derivative with respect to x. Use compact notation.\n\n"
+            "Function: x^2\n"
+            "Derivative: 2x\n\n"
+            "Function: sin(x)\n"
+            "Derivative: cos(x)\n\n"
+            "Function: cos(x)\n"
+            "Derivative: -sin(x)\n\n"
+            "Function: x^3\n"
+            "Derivative: 3x^2\n\n"
+            "Function: {source}\n"
+            "Derivative:"
+        ),
+    ),
+    "math-prime-composite": PromptTemplateSpec(
+        prompt_type="math-prime-composite",
+        edited_field="number",
+        default_source="13",
+        default_target="21",
+        allowed_entities=("7", "21", "29", "35", "13"),
+        description="Prime/composite classification prompt.",
+        template=(
+            "Task: Classify the number. Return only one word: prime or composite.\n\n"
+            "Number: 7\n"
+            "Class: prime\n\n"
+            "Number: 21\n"
+            "Class: composite\n\n"
+            "Number: 29\n"
+            "Class: prime\n\n"
+            "Number: 35\n"
+            "Class: composite\n\n"
+            "Number: {source}\n"
+            "Class:"
+        ),
+    ),
+    "math-area": PromptTemplateSpec(
+        prompt_type="math-area",
+        edited_field="shape",
+        default_source="circle",
+        default_target="square",
+        allowed_entities=("square", "circle"),
+        description="Exact area formula prompt.",
+        template=(
+            "Task: Compute the area. If the shape is square, the parameter is the side length. "
+            "If the shape is circle, the parameter is the radius. Return only the exact area.\n\n"
+            "Shape: square\n"
+            "Parameter: 3\n"
+            "Area: 9\n\n"
+            "Shape: circle\n"
+            "Parameter: 2\n"
+            "Area: 4*pi\n\n"
+            "Shape: square\n"
+            "Parameter: 5\n"
+            "Area: 25\n\n"
+            "Shape: circle\n"
+            "Parameter: 4\n"
+            "Area: 16*pi\n\n"
+            "Shape: {source}\n"
+            "Parameter: 1\n"
+            "Area:"
+        ),
+    ),
+    "coding-sort-reverse": PromptTemplateSpec(
+        prompt_type="coding-sort-reverse",
+        edited_field="action",
+        default_source="sort",
+        default_target="reverse",
+        allowed_entities=("sort", "reverse"),
+        description="Python sort/reverse function-call prompt.",
+        template=(
+            "Task: Return a single Python function call. Return only code.\n\n"
+            "Action: sort\n"
+            "Variable: nums\n"
+            "Call: sorted(nums)\n\n"
+            "Action: reverse\n"
+            "Variable: chars\n"
+            "Call: reversed(chars)\n\n"
+            "Action: sort\n"
+            "Variable: names\n"
+            "Call: sorted(names)\n\n"
+            "Action: reverse\n"
+            "Variable: tokens\n"
+            "Call: reversed(tokens)\n\n"
+            "Action: {source}\n"
+            "Variable: scores\n"
+            "Call:"
+        ),
+    ),
+    "coding-builtin-call": PromptTemplateSpec(
+        prompt_type="coding-builtin-call",
+        edited_field="operation",
+        default_source="count",
+        default_target="sum",
+        allowed_entities=("count", "sum"),
+        description="Python built-in function-call prompt.",
+        template=(
+            "Task: Return a single Python built-in function call. Return only code.\n\n"
+            "Operation: count\n"
+            "Variable: items\n"
+            "Call: len(items)\n\n"
+            "Operation: sum\n"
+            "Variable: values\n"
+            "Call: sum(values)\n\n"
+            "Operation: count\n"
+            "Variable: words\n"
+            "Call: len(words)\n\n"
+            "Operation: sum\n"
+            "Variable: numbers\n"
+            "Call: sum(numbers)\n\n"
+            "Operation: {source}\n"
+            "Variable: tokens\n"
+            "Call:"
+        ),
+    ),
+    "coding-array-constructor": PromptTemplateSpec(
+        prompt_type="coding-array-constructor",
+        edited_field="array type",
+        default_source="zeros",
+        default_target="ones",
+        allowed_entities=("zeros", "ones"),
+        description="NumPy-style constructor prompt without np prefix.",
+        template=(
+            "Task: Return a single NumPy-style array constructor without the np prefix. Return only code.\n\n"
+            "Array type: zeros\n"
+            "Shape: (2, 3)\n"
+            "Call: zeros((2, 3))\n\n"
+            "Array type: ones\n"
+            "Shape: (5,)\n"
+            "Call: ones((5,))\n\n"
+            "Array type: zeros\n"
+            "Shape: (1, 4)\n"
+            "Call: zeros((1, 4))\n\n"
+            "Array type: ones\n"
+            "Shape: (3, 3)\n"
+            "Call: ones((3, 3))\n\n"
+            "Array type: {source}\n"
+            "Shape: (4, 4)\n"
+            "Call:"
+        ),
+    ),
+    "coding-pandas-method": PromptTemplateSpec(
+        prompt_type="coding-pandas-method",
+        edited_field="request",
+        default_source="first rows",
+        default_target="last rows",
+        allowed_entities=("first rows", "last rows"),
+        description="Pandas method-call prompt without dataframe prefix.",
+        template=(
+            "Task: Return only the pandas method call without the dataframe object prefix.\n\n"
+            "Request: first rows\n"
+            "Rows: 5\n"
+            "Call: head(5)\n\n"
+            "Request: last rows\n"
+            "Rows: 3\n"
+            "Call: tail(3)\n\n"
+            "Request: first rows\n"
+            "Rows: 10\n"
+            "Call: head(10)\n\n"
+            "Request: last rows\n"
+            "Rows: 8\n"
+            "Call: tail(8)\n\n"
+            "Request: {source}\n"
+            "Rows: 12\n"
+            "Call:"
+        ),
+    ),
+    "coding-sql-aggregate": PromptTemplateSpec(
+        prompt_type="coding-sql-aggregate",
+        edited_field="aggregate",
+        default_source="COUNT",
+        default_target="SUM",
+        allowed_entities=("SUM", "COUNT"),
+        description="SQL aggregate expression prompt.",
+        template=(
+            "Task: Return only the SQL aggregate expression.\n\n"
+            "Table: orders\n"
+            "Column: amount\n"
+            "Aggregate: SUM\n"
+            "Expression: SUM(amount)\n\n"
+            "Table: users\n"
+            "Column: id\n"
+            "Aggregate: COUNT\n"
+            "Expression: COUNT(id)\n\n"
+            "Table: employees\n"
+            "Column: salary\n"
+            "Aggregate: SUM\n"
+            "Expression: SUM(salary)\n\n"
+            "Table: events\n"
+            "Column: event_id\n"
+            "Aggregate: COUNT\n"
+            "Expression: COUNT(event_id)\n\n"
+            "Table: sales\n"
+            "Column: revenue\n"
+            "Aggregate: {source}\n"
+            "Expression:"
+        ),
+    ),
+}
+
+
+PROMPT_TYPE_ALIASES: Dict[str, str] = {
+    "math-prompt-1": "math-unary-op",
+    "math-prompt-2": "math-binary-op",
+    "math-prompt-3": "math-derivative",
+    "math-prompt-4": "math-prime-composite",
+    "math-prompt-5": "math-area",
+    "coding-prompt-1": "coding-sort-reverse",
+    "coding-prompt-2": "coding-builtin-call",
+    "coding-prompt-3": "coding-array-constructor",
+    "coding-prompt-4": "coding-pandas-method",
+    "coding-prompt-5": "coding-sql-aggregate",
+}
+
+
+PROMPT_TYPE_CHOICES: Tuple[str, ...] = tuple(
+    sorted(
+        set(("country-capital", "math-text"))
+        | set(PROMPT_TEMPLATE_SPECS)
+        | set(PROMPT_TYPE_ALIASES)
+    )
 )
 
 
@@ -213,6 +510,78 @@ def build_math_text_prompt(
         f"Problem: {query_left_operand} {query_operator} by {query_right_operand}\nAnswer:"
     )
     return "\n\n".join(blocks)
+
+
+def normalize_prompt_type(prompt_type: str) -> str:
+    """Return the canonical prompt type for a user-facing prompt type or alias."""
+
+    normalized = PROMPT_TYPE_ALIASES.get(prompt_type, prompt_type)
+    if normalized not in PROMPT_TYPE_CHOICES:
+        raise ValueError(
+            f"Unknown prompt_type {prompt_type!r}; expected one of {PROMPT_TYPE_CHOICES}"
+        )
+    return normalized
+
+
+def get_prompt_template_spec(prompt_type: str) -> Optional[PromptTemplateSpec]:
+    return PROMPT_TEMPLATE_SPECS.get(normalize_prompt_type(prompt_type))
+
+
+def build_prompt_by_type(prompt_type: str, source_entity: str) -> str:
+    prompt_type = normalize_prompt_type(prompt_type)
+    if prompt_type == "country-capital":
+        return build_country_capital_prompt(source_entity)
+    if prompt_type == "math-text":
+        return build_math_text_prompt(source_entity)
+    spec = PROMPT_TEMPLATE_SPECS[prompt_type]
+    return spec.build(source_entity)
+
+
+def get_prompt_edited_field(prompt_type: str) -> str:
+    prompt_type = normalize_prompt_type(prompt_type)
+    if prompt_type == "country-capital":
+        return "country"
+    if prompt_type == "math-text":
+        return "operator"
+    return PROMPT_TEMPLATE_SPECS[prompt_type].edited_field
+
+
+def get_prompt_default_entities(prompt_type: str) -> Tuple[str, str]:
+    prompt_type = normalize_prompt_type(prompt_type)
+    if prompt_type == "country-capital":
+        return "Spain", "Germany"
+    if prompt_type == "math-text":
+        return "add", "subtract"
+    spec = PROMPT_TEMPLATE_SPECS[prompt_type]
+    return spec.default_source, spec.default_target
+
+
+def get_prompt_allowed_entities(prompt_type: str) -> Tuple[str, ...]:
+    prompt_type = normalize_prompt_type(prompt_type)
+    if prompt_type == "math-text":
+        return DEFAULT_MATH_TEXT_OPERATORS
+    spec = PROMPT_TEMPLATE_SPECS.get(prompt_type)
+    return spec.allowed_entities if spec is not None else ()
+
+
+def get_prompt_entity_warnings(
+    prompt_type: str,
+    source_entity: str,
+    target_entity: str,
+) -> List[str]:
+    prompt_type = normalize_prompt_type(prompt_type)
+    allowed = get_prompt_allowed_entities(prompt_type)
+    if not allowed:
+        return []
+    edited_field = get_prompt_edited_field(prompt_type)
+    warnings: List[str] = []
+    for name, value in (("source", source_entity), ("target", target_entity)):
+        if value not in allowed:
+            warnings.append(
+                f"{name} {edited_field} {value!r} is not in the default "
+                f"{prompt_type} entity set {allowed}."
+            )
+    return warnings
 
 
 def replace_last_entity(text: str, source_entity: str, target_entity: str) -> str:
@@ -1051,6 +1420,7 @@ def plot_topk_probabilities(
     source_entity: str,
     target_entity: str,
     prompt_type: str = "country-capital",
+    edited_field: Optional[str] = None,
 ) -> None:
     """Save Figure-7-style side-by-side top-k probability bar charts."""
 
@@ -1060,16 +1430,18 @@ def plot_topk_probabilities(
     import matplotlib.pyplot as plt
 
     order = ["original", "target", "intervened"]
-    if prompt_type == "math-text":
+    prompt_type = normalize_prompt_type(prompt_type)
+    edited_field = edited_field or get_prompt_edited_field(prompt_type)
+    if prompt_type == "country-capital":
         titles = {
-            "original": f"Original: operator {source_entity}",
-            "target": f"Target: operator {target_entity}",
+            "original": f"Original: Country: {source_entity}",
+            "target": f"Target: Country: {target_entity}",
             "intervened": f"Intervened: {source_entity} text + {target_entity} STEM",
         }
     else:
         titles = {
-            "original": f"Original: Country: {source_entity}",
-            "target": f"Target: Country: {target_entity}",
+            "original": f"Original: {edited_field}: {source_entity}",
+            "target": f"Target: {edited_field}: {target_entity}",
             "intervened": f"Intervened: {source_entity} text + {target_entity} STEM",
         }
     colors = {
