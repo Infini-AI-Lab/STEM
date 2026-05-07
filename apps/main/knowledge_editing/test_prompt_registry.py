@@ -17,7 +17,10 @@ try:
 except ModuleNotFoundError:
     sys.modules.setdefault(
         "torch",
-        types.SimpleNamespace(no_grad=lambda: (lambda fn: fn)),
+        types.SimpleNamespace(
+            Tensor=object,
+            no_grad=lambda: (lambda fn: fn),
+        ),
     )
 
 from apps.main.knowledge_editing.experiment import (  # noqa: E402

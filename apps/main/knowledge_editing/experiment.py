@@ -13,6 +13,7 @@ import logging
 import math
 import random
 import re
+import textwrap
 from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
@@ -1585,6 +1586,40 @@ def _token_label(text: str, token_id: int) -> str:
     return escaped
 
 
+def _plot_token_label(text: str, token_id: int) -> str:
+    """Return a compact tick label for a decoded next-token string."""
+
+    label = _token_label(text, token_id).strip()
+    if len(label) <= 14:
+        return label
+    return textwrap.fill(
+        label,
+        width=14,
+        break_long_words=True,
+        break_on_hyphens=False,
+    )
+
+
+def _last_prompt_block(prompt: str, *, max_chars: int = 72) -> str:
+    """Return the final query block for a concise panel caption."""
+
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", prompt.strip()) if block.strip()]
+    block = blocks[-1] if blocks else prompt.strip()
+    block = re.sub(r"[ \t]+", " ", block)
+    if len(block) <= max_chars:
+        return block
+    return textwrap.shorten(block.replace("\n", " "), width=max_chars, placeholder="...")
+
+
+def _nice_probability_ylim(max_probability: float) -> float:
+    """Choose a stable paper-style probability upper bound with 0.2 ticks."""
+
+    if not math.isfinite(max_probability) or max_probability < 0.0:
+        raise ValueError(f"Invalid probability value for plotting: {max_probability!r}")
+    padded = max_probability * 1.08
+    return min(1.0, max(0.2, math.ceil((padded - 1e-12) / 0.2) * 0.2))
+
+
 def plot_topk_probabilities(
     topk_results: Mapping[str, TopKResult],
     *,
@@ -1595,60 +1630,134 @@ def plot_topk_probabilities(
     prompt_type: str = "country-capital",
     edited_field: Optional[str] = None,
 ) -> None:
-    """Save Figure-7-style side-by-side top-k probability bar charts."""
-
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    """Save publication-ready side-by-side top-k probability histograms."""
 
     order = ["original", "target", "intervened"]
+    missing_cases = [case for case in order if case not in topk_results]
+    if missing_cases:
+        raise ValueError(f"Missing top-k results for plot cases: {missing_cases}")
+
     prompt_type = normalize_prompt_type(prompt_type)
     edited_field = edited_field or get_prompt_edited_field(prompt_type)
-    if prompt_type == "country-capital":
-        titles = {
-            "original": f"Original: Country: {source_entity}",
-            "target": f"Target: Country: {target_entity}",
-            "intervened": f"Intervened: {source_entity} text + {target_entity} STEM",
-        }
-    else:
-        titles = {
-            "original": f"Original: {edited_field}: {source_entity}",
-            "target": f"Target: {edited_field}: {target_entity}",
-            "intervened": f"Intervened: {source_entity} text + {target_entity} STEM",
-        }
-    colors = {
-        "original": "#4C78A8",
-        "target": "#F58518",
-        "intervened": "#54A24B",
+    captions = {
+        "original": f"(a) Original:\n{_last_prompt_block(topk_results['original'].prompt)}",
+        "target": f"(b) Target:\n{_last_prompt_block(topk_results['target'].prompt)}",
+        "intervened": f"(c) Intervened:\n{_last_prompt_block(topk_results['intervened'].prompt)}",
     }
+    if prompt_type != "country-capital":
+        captions["intervened"] = (
+            f"(c) Intervened:\n{edited_field}: {source_entity} text, "
+            f"{target_entity} STEM"
+        )
 
     max_prob = 0.0
-    for result in topk_results.values():
-        for token in result.tokens:
-            max_prob = max(max_prob, token.probability)
-    y_limit = min(1.0, max(0.05, max_prob * 1.18))
-
-    fig, axes = plt.subplots(1, 3, figsize=(12.6, 3.8), sharey=True)
-    for ax, case in zip(axes, order):
+    for case in order:
         result = topk_results[case]
-        labels = [_token_label(tok.token_str, tok.token_id) for tok in result.tokens]
-        probs = [tok.probability for tok in result.tokens]
-        x_values = list(range(len(labels)))
-        ax.bar(x_values, probs, color=colors[case], edgecolor="black", linewidth=0.6)
-        ax.set_title(titles[case], fontsize=10.5, pad=10)
-        ax.set_xticks(x_values)
-        ax.set_xticklabels(labels, rotation=35, ha="right", fontsize=8.5)
-        ax.set_ylim(0, y_limit)
-        ax.grid(axis="y", linestyle=":", alpha=0.45)
-        ax.tick_params(axis="y", labelsize=9)
-        for idx, prob in enumerate(probs):
-            ax.text(idx, prob + y_limit * 0.025, f"{prob:.3f}", ha="center", va="bottom", fontsize=7.5)
-    axes[0].set_ylabel("Next-token probability", fontsize=10)
-    fig.tight_layout(w_pad=1.8)
-    fig.savefig(output_png, dpi=220, bbox_inches="tight")
-    fig.savefig(output_pdf, bbox_inches="tight")
-    plt.close(fig)
+        if not result.tokens:
+            raise ValueError(f"Cannot plot empty top-k token list for case {case!r}")
+        for token in result.tokens:
+            if not math.isfinite(token.probability) or token.probability < 0.0:
+                raise ValueError(
+                    f"Invalid probability for case {case!r}, token {token.token_id}: "
+                    f"{token.probability!r}"
+                )
+            max_prob = max(max_prob, token.probability)
+    y_limit = _nice_probability_ylim(max_prob)
+    y_tick_count = int(round(y_limit / 0.2))
+    y_ticks = [round(idx * 0.2, 1) for idx in range(y_tick_count + 1)]
+
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise RuntimeError(
+            "matplotlib is required to write knowledge-editing figures. "
+            "Install matplotlib in the experiment environment before running "
+            "the full plotting pipeline."
+        ) from exc
+
+    output_png = Path(output_png)
+    output_pdf = Path(output_pdf)
+    output_png.parent.mkdir(parents=True, exist_ok=True)
+    output_pdf.parent.mkdir(parents=True, exist_ok=True)
+
+    rc_params = {
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "Nimbus Roman", "DejaVu Serif"],
+        "mathtext.fontset": "dejavuserif",
+        "axes.labelsize": 12,
+        "xtick.labelsize": 11,
+        "ytick.labelsize": 11,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+        "savefig.dpi": 300,
+        "figure.dpi": 300,
+        "axes.unicode_minus": False,
+    }
+    bar_color = "#C2345A"
+    edge_color = "#000000"
+    grid_color = "#DADADA"
+
+    with plt.rc_context(rc_params):
+        fig, axes = plt.subplots(1, 3, figsize=(12.8, 3.9), sharey=True)
+        for panel_idx, (ax, case) in enumerate(zip(axes, order)):
+            result = topk_results[case]
+            labels = [_plot_token_label(tok.token_str, tok.token_id) for tok in result.tokens]
+            probabilities = [tok.probability for tok in result.tokens]
+            x_values = list(range(len(labels)))
+
+            ax.bar(
+                x_values,
+                probabilities,
+                width=0.72,
+                color=bar_color,
+                edgecolor=edge_color,
+                linewidth=0.7,
+                zorder=3,
+            )
+            ax.set_xticks(x_values)
+            ax.set_xticklabels(labels, rotation=0, ha="center")
+            ax.set_xlim(-0.6, max(len(labels) - 0.4, 0.6))
+            ax.set_ylim(0.0, y_limit)
+            ax.set_yticks(y_ticks)
+            if panel_idx > 0:
+                ax.tick_params(labelleft=False)
+            ax.grid(True, axis="y", color=grid_color, linewidth=0.85, zorder=0)
+            ax.tick_params(axis="both", length=0, pad=4)
+            for spine in ax.spines.values():
+                spine.set_color("#111111")
+                spine.set_linewidth(0.9)
+
+            label_line, *rest = captions[case].split("\n", 1)
+            prompt_line = rest[0] if rest else ""
+            ax.text(
+                0.5,
+                -0.19,
+                label_line,
+                transform=ax.transAxes,
+                ha="center",
+                va="top",
+                fontsize=11,
+                fontweight="bold",
+            )
+            if prompt_line:
+                ax.text(
+                    0.5,
+                    -0.32,
+                    prompt_line,
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="top",
+                    fontsize=10.5,
+                )
+
+        axes[0].set_ylabel("Probability")
+        fig.subplots_adjust(left=0.07, right=0.99, top=0.96, bottom=0.36, wspace=0.26)
+        fig.savefig(output_png, dpi=300, bbox_inches="tight")
+        fig.savefig(output_pdf, bbox_inches="tight")
+        plt.close(fig)
 
 
 def _jsonable(obj: Any) -> Any:

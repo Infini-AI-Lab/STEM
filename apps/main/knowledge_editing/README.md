@@ -177,3 +177,7 @@ Each run writes a timestamped directory containing:
 - `knowledge_edit_topk_probs.png`
 - `knowledge_edit_topk_probs.pdf`
 - `run.log`
+
+The histogram/PDF plotter uses `matplotlib` at runtime and writes a
+publication-style three-panel figure with shared probability axes, serif fonts,
+embedded TrueType PDF fonts, and panel captions based on the final query block.
